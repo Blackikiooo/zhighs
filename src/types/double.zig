@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 /// Double precision.
-pub const HighsDouble = f64;
+pub const HD = f64;
 
 const has_fma = switch (builtin.cpu.arch) {
     .x86, .x86_64 => builtin.cpu.has(.x86, .fma),
@@ -10,9 +10,9 @@ const has_fma = switch (builtin.cpu.arch) {
 };
 
 /// Double-double precision.
-pub const Highs2Double = struct {
-    high: HighsDouble,
-    low: HighsDouble,
+pub const HCD = struct {
+    high: HD,
+    low: HD,
 
     const Self = @This();
 
@@ -21,7 +21,7 @@ pub const Highs2Double = struct {
         .low = 0.0,
     };
 
-    pub fn twoSum(a: HighsDouble, b: HighsDouble) Self {
+    pub fn twoSum(a: HD, b: HD) Self {
         @setFloatMode(.strict);
         const x = a + b;
         const z = x - a;
@@ -33,7 +33,7 @@ pub const Highs2Double = struct {
         };
     }
 
-    inline fn split(a: HighsDouble) Self {
+    inline fn split(a: HD) Self {
         @setFloatMode(.strict);
 
         const factor = (1 << 27) + 1; // 2^27 + 1
@@ -47,13 +47,13 @@ pub const Highs2Double = struct {
         };
     }
 
-    pub fn twoProduct(a: HighsDouble, b: HighsDouble) Self {
+    pub fn twoProduct(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
         const x = a * b;
 
         const err = if (comptime has_fma) blk: {
-            break :blk @mulAdd(HighsDouble, a, b, -x);
+            break :blk @mulAdd(HD, a, b, -x);
         } else blk: {
             const a_split = split(a);
             const b_split = split(b);
@@ -66,7 +66,7 @@ pub const Highs2Double = struct {
         };
     }
 
-    pub fn init(value: HighsDouble) Self {
+    pub fn init(value: HD) Self {
         return Self{
             .high = value,
             .low = 0.0,
@@ -75,20 +75,20 @@ pub const Highs2Double = struct {
 
     /// If you need to convert this to a double, use this function,
     /// but be aware that this may introduce rounding errors again.
-    pub fn toHighsDouble(self: Self) HighsDouble {
+    pub fn toHighsDouble(self: Self) HD {
         return self.high + self.low;
     }
 
     /// This will make `.low` more and more bigger, and may introduce more and more rounding errors,
     /// so you will take account of the renorm outsiede because invoke `twoSum` is expensive.
-    pub fn addDoubleAssign(self: *Self, o: HighsDouble) void {
-        const sum = Highs2Double.twoSum(self.high, o);
+    pub fn addDoubleAssign(self: *Self, o: HD) void {
+        const sum = HCD.twoSum(self.high, o);
         self.high = sum.high;
         self.low += sum.low;
     }
     /// The same as `addDoubleAssign`, but the parameter is a `Highs2Double`.
-    pub fn add2DoubleAssign(self: *Self, o: Highs2Double) void {
-        const sum = Highs2Double.twoSum(self.high, o.high);
+    pub fn add2DoubleAssign(self: *Self, o: HCD) void {
+        const sum = HCD.twoSum(self.high, o.high);
         self.high = sum.high;
         self.low += sum.low + o.low;
     }
@@ -103,7 +103,7 @@ pub const Highs2Double = struct {
 };
 
 test "two-sum-test" {
-    const res = Highs2Double.twoSum(1e16, 1.0);
+    const res = HCD.twoSum(1e16, 1.0);
     const a = res.high;
     const b = res.low;
     const expected = a + b;
@@ -114,21 +114,21 @@ test "two-sum-test" {
 }
 
 test "cmp-test" {
-    const a = Highs2Double.init(1.0);
-    const b = Highs2Double.init(2.0);
+    const a = HCD.init(1.0);
+    const b = HCD.init(2.0);
     try std.testing.expectEqual(a.cmp(b), .lt);
     try std.testing.expectEqual(b.cmp(a), .gt);
     try std.testing.expectEqual(a.cmp(a), .eq);
 
-    var d = Highs2Double.init(1e16);
+    var d = HCD.init(1e16);
     d.addDoubleAssign(1);
-    try std.testing.expectEqual(Highs2Double.init(1e16).cmp(d), .eq);
+    try std.testing.expectEqual(HCD.init(1e16).cmp(d), .eq);
 }
 
 test "two-product" {
-    const res1 = Highs2Double.twoProduct(1e16, 1.0);
+    const res1 = HCD.twoProduct(1e16, 1.0);
     try std.testing.expectEqual(res1.toHighsDouble(), 1e16);
 
-    const res2 = Highs2Double.twoProduct(1e16, 0.3);
+    const res2 = HCD.twoProduct(1e16, 0.3);
     try std.testing.expectEqual(res2.toHighsDouble(), 3e15);
 }
