@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const HighsIntWidth = enum {
-    _32,
-    _64,
+    w_32,
+    w_64,
 };
 
 pub const TypesBuild = struct {
@@ -19,7 +19,7 @@ pub fn buildTypes(
         .target = target,
     });
 
-    const highs_int_width = b.option(HighsIntWidth, "highs-int-width", "Integer width for HighsInt: i32 or i64") orelse ._32;
+    const highs_int_width = b.option(HighsIntWidth, "highs-int-width", "Integer width for HighsInt: i32 or i64") orelse .w_32;
     const config = b.addOptions();
     config.addOption(HighsIntWidth, "highs_int_width", highs_int_width);
 

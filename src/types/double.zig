@@ -21,8 +21,11 @@ pub const HCD = struct {
         .low = 0.0,
     };
 
+    /// performs an exact transformation such that x + y = a + b
+    /// and x = double(a + b). The operation uses 6 flops (addition/subtraction).
     pub fn twoSum(a: HD, b: HD) Self {
         @setFloatMode(.strict);
+
         const x = a + b;
         const z = x - a;
         const y = (a - (x - z)) + (b - z);
@@ -33,10 +36,12 @@ pub const HCD = struct {
         };
     }
 
-    inline fn split(a: HD) Self {
+    /// splits a 53 bit double precision number into two 26 bit parts
+    /// such that x + y = a holds exactly
+    pub fn split(a: HD) Self {
         @setFloatMode(.strict);
 
-        const factor = (1 << 27) + 1; // 2^27 + 1
+        const factor: comptime_int = (1 << 27) + 1; // 2^27 + 1
         const t = factor * a;
         const high = t - (t - a);
         const err = a - high;
@@ -47,6 +52,9 @@ pub const HCD = struct {
         };
     }
 
+    /// performs an exact transformation such that x + y = a * b
+    /// and x = double(a * b). The operation uses 10 flops for
+    /// addition/subtraction and 7 flops for multiplication.
     pub fn twoProduct(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
@@ -66,7 +74,7 @@ pub const HCD = struct {
         };
     }
 
-    pub fn init(value: HD) Self {
+    pub fn initWithHD(value: HD) Self {
         return Self{
             .high = value,
             .low = 0.0,
@@ -75,27 +83,40 @@ pub const HCD = struct {
 
     /// If you need to convert this to a double, use this function,
     /// but be aware that this may introduce rounding errors again.
-    pub fn toHighsDouble(self: Self) HD {
+    pub inline fn toHD(self: Self) HD {
         return self.high + self.low;
     }
 
     /// This will make `.low` more and more bigger, and may introduce more and more rounding errors,
     /// so you will take account of the renorm outsiede because invoke `twoSum` is expensive.
-    pub fn addDoubleAssign(self: *Self, o: HD) void {
+    pub fn addHDAssign(self: *Self, o: HD) void {
         const sum = HCD.twoSum(self.high, o);
         self.high = sum.high;
         self.low += sum.low;
     }
-    /// The same as `addDoubleAssign`, but the parameter is a `Highs2Double`.
-    pub fn add2DoubleAssign(self: *Self, o: HCD) void {
+    /// The same as `addHDAssign`, but the parameter is a `HCD`.
+    pub fn addHCDAssign(self: *Self, o: HCD) void {
         const sum = HCD.twoSum(self.high, o.high);
         self.high = sum.high;
         self.low += sum.low + o.low;
     }
 
+    pub fn minusHDAssign(self: *Self, o: HD) void {
+        const sum = HCD.twoSum(self.high, -o);
+        self.high = sum.high;
+        self.low += sum.low;
+    }
+
+    pub fn minusHCDAssign(self: *Self, o: HCD) void {
+        const sum = HCD.twoSum(self.high, -o.high);
+        self.high = sum.high;
+        // todo: check if this is correct！！
+        self.low += sum.low;
+    }
+
     pub fn cmp(self: Self, o: Self) std.math.Order {
-        const a = self.toHighsDouble(); // mind that this may introduce rounding errors.
-        const b = o.toHighsDouble();
+        const a = self.toHD(); // mind that this may introduce rounding errors.
+        const b = o.toHD();
         if (a < b) return .lt;
         if (a > b) return .gt;
         return .eq;
@@ -114,21 +135,26 @@ test "two-sum-test" {
 }
 
 test "cmp-test" {
-    const a = HCD.init(1.0);
-    const b = HCD.init(2.0);
+    const a = HCD.initWithHD(1.0);
+    const b = HCD.initWithHD(2.0);
     try std.testing.expectEqual(a.cmp(b), .lt);
     try std.testing.expectEqual(b.cmp(a), .gt);
     try std.testing.expectEqual(a.cmp(a), .eq);
 
-    var d = HCD.init(1e16);
-    d.addDoubleAssign(1);
-    try std.testing.expectEqual(HCD.init(1e16).cmp(d), .eq);
+    var d = HCD.initWithHD(1e16);
+    d.addHDAssign(1);
+    try std.testing.expectEqual(HCD.initWithHD(1e16).cmp(d), .eq);
 }
 
 test "two-product" {
     const res1 = HCD.twoProduct(1e16, 1.0);
-    try std.testing.expectEqual(res1.toHighsDouble(), 1e16);
+    try std.testing.expectEqual(res1.toHD(), 1e16);
 
     const res2 = HCD.twoProduct(1e16, 0.3);
-    try std.testing.expectEqual(res2.toHighsDouble(), 3e15);
+    try std.testing.expectEqual(res2.toHD(), 3e15);
+}
+
+test "split" {
+    const res = HCD.split(1e16);
+    try std.testing.expect(res.toHD() == 1e16);
 }
