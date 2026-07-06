@@ -5,7 +5,16 @@ const builtin = @import("builtin");
 pub const HD = f64;
 
 const has_fma = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => builtin.cpu.has(.x86, .fma),
+    // x86 系列
+    .x86, .x86_64 => builtin.cpu.has(.fma),
+    // AArch64 / ARM32
+    .aarch64, .arm => builtin.cpu.has(.fp_fma),
+    // RISC-V 带浮点扩展就有FMA
+    .riscv64, .riscv32 => builtin.cpu.has(.d),
+    // PowerPC
+    .powerpc64, .powerpc32 => true,
+    // 龙芯
+    .loongarch64 => true,
     else => false,
 };
 
@@ -53,8 +62,7 @@ pub const HCD = struct {
     }
 
     /// performs an exact transformation such that x + y = a * b
-    /// and x = double(a * b). The operation uses 10 flops for
-    /// addition/subtraction and 7 flops for multiplication.
+    /// and x = double(a * b).
     pub fn twoProduct(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
@@ -74,10 +82,25 @@ pub const HCD = struct {
         };
     }
 
-    pub fn initWithHD(value: HD) Self {
+    pub inline fn initWithHD(value: HD) Self {
         return Self{
             .high = value,
             .low = 0.0,
+        };
+    }
+
+    pub inline fn init(high: HD, low: HD) Self {
+        return Self{
+            .high = high,
+            .low = low,
+        };
+    }
+
+    /// use const x = self is clone semantics, but use clone will more clear.
+    pub inline fn clone(self: Self) Self {
+        return Self{
+            .high = self.high,
+            .low = self.low,
         };
     }
 
@@ -87,6 +110,15 @@ pub const HCD = struct {
         return self.high + self.low;
     }
 
+    pub fn addHD(self: Self, o: HD) HCD {
+        var res: HCD = self.clone();
+        const sum = twoSum(res.high, o);
+        res.high = sum.high;
+        res.low += sum.low;
+        return res;
+    }
+
+    /// The same as '+=' operator c++, but the parameter is a `HD`.
     /// This will make `.low` more and more bigger, and may introduce more and more rounding errors,
     /// so you will take account of the renorm outsiede because invoke `twoSum` is expensive.
     pub fn addHDAssign(self: *Self, o: HD) void {
@@ -94,6 +126,8 @@ pub const HCD = struct {
         self.high = sum.high;
         self.low += sum.low;
     }
+
+    /// The same as '+=' operator in c++, but the parameter is a `HCD`.
     /// The same as `addHDAssign`, but the parameter is a `HCD`.
     pub fn addHCDAssign(self: *Self, o: HCD) void {
         const sum = HCD.twoSum(self.high, o.high);
@@ -101,17 +135,49 @@ pub const HCD = struct {
         self.low += sum.low + o.low;
     }
 
+    /// The same as '-=' operator c++, but the parameter is a `HD`.
     pub fn minusHDAssign(self: *Self, o: HD) void {
         const sum = HCD.twoSum(self.high, -o);
         self.high = sum.high;
         self.low += sum.low;
     }
 
+    /// The same as '-=' operator c++, but the parameter is a `HCD`.
     pub fn minusHCDAssign(self: *Self, o: HCD) void {
         const sum = HCD.twoSum(self.high, -o.high);
         self.high = sum.high;
         self.low += sum.low - o.low;
     }
+
+    /// The same as '*=' operator c++, but the parameter is a `HD`.
+    pub fn multiplyHDAssign(self: *Self, o: HD) void {
+        const low_product = self.low * o;
+        const high_product = Self.twoProduct(self.high, o);
+        self.high = high_product.high;
+        self.low = high_product.low;
+        self.addHDAssign(low_product);
+    }
+
+    /// The same as '*=' operator c++, but the parameter is a `HCD`.
+    pub fn multiplyHCDAssign(self: *Self, o: HCD) void {
+        const cross_product1 = self.low * o.high;
+        const cross_product2 = self.high * o.low;
+
+        const high_product = Self.twoProduct(self.high, o.high);
+        // const low_product = self.low * o.low;  //this is so small that it can be ignored, and it will be added to the low part of the result.
+        self.high = high_product.high;
+        self.low = high_product.low;
+        self.addHDAssign(cross_product1);
+        self.addHDAssign(cross_product2);
+    }
+
+    pub fn divideHDAssign(self: *Self, o: HD) void {
+        const d = Self.init(self.high / o, self.low / o);
+        // const c = d.multiplyHDAssign(o).
+        _ = d;
+    }
+
+    // pub fn divideHCDAssign(self: *Self, o: HCD) void {}
 
     pub fn cmp(self: Self, o: Self) std.math.Order {
         const a = self.toHD(); // mind that this may introduce rounding errors.
@@ -156,4 +222,17 @@ test "two-product" {
 test "split" {
     const res = HCD.split(1e16);
     try std.testing.expect(res.toHD() == 1e16);
+}
+
+test "cmp-test-with-low" {
+    var a = HCD.initWithHD(1.0);
+    const b = HCD.initWithHD(1.0);
+    a.addHDAssign(1e-16);
+    try std.testing.expectEqual(a.cmp(b), .gt);
+}
+
+test "add hd" {
+    var a = HCD.initWithHD(1.0);
+    a.addHDAssign(1);
+    try std.testing.expectEqual(a.toHD(), 2.0);
 }
