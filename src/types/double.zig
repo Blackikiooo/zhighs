@@ -110,8 +110,7 @@ pub const HCD = struct {
     pub fn minusHCDAssign(self: *Self, o: HCD) void {
         const sum = HCD.twoSum(self.high, -o.high);
         self.high = sum.high;
-        // todo: check if this is correct！！
-        self.low += sum.low;
+        self.low += sum.low - o.low;
     }
 
     pub fn cmp(self: Self, o: Self) std.math.Order {
