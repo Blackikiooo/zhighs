@@ -1,1 +1,1 @@
-`types/double.zig`中需要实现addHD,addHCD,minusHD,minusHCD...然后实现divideHD,divideHCD...然后实现比较函数，这个函数的功能就告一段落了。
+`types/double.zig`中需要实现multiplyHD等等..然后实现divideHD,divideHCD...然后实现比较函数，这个函数的功能就告一段落了。

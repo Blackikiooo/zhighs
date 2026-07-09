@@ -6,13 +6,14 @@ pub const HD = f64;
 
 const has_fma = switch (builtin.cpu.arch) {
     // x86 系列
-    .x86, .x86_64 => builtin.cpu.has(.fma),
+    .x86, .x86_64 => builtin.cpu.has(.x86, .fma),
     // AArch64 / ARM32
-    .aarch64, .arm => builtin.cpu.has(.fp_fma),
+    .aarch64 => builtin.cpu.has(.aarch64, .fp_armv8),
+    .arm => builtin.cpu.has(.arm, .fp_armv8),
     // RISC-V 带浮点扩展就有FMA
-    .riscv64, .riscv32 => builtin.cpu.has(.d),
+    .riscv64, .riscv32 => builtin.cpu.has(.riscv, .d),
     // PowerPC
-    .powerpc64, .powerpc32 => true,
+    .powerpc, .powerpcle, .powerpc64, .powerpc64le => true,
     // 龙芯
     .loongarch64 => true,
     else => false,
@@ -63,7 +64,7 @@ pub const HCD = struct {
 
     /// performs an exact transformation such that x + y = a * b
     /// and x = double(a * b).
-    pub fn twoProduct(a: HD, b: HD) Self {
+    pub inline fn twoProduct(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
         const x = a * b;
@@ -80,6 +81,26 @@ pub const HCD = struct {
             .high = x,
             .low = err,
         };
+    }
+
+    inline fn quickTwoSum(a: HD, b: HD) Self {
+        @setFloatMode(.strict);
+
+        const high = a + b;
+        const low = b - (high - a);
+
+        return Self{
+            .high = high,
+            .low = low,
+        };
+    }
+
+    inline fn quickThreeSum(a: HD, b: HD, c: HD) Self {
+        @setFloatMode(.strict);
+
+        const sum = a + b;
+        const err = b - (sum - a);
+        return quickTwoSum(sum, err + c);
     }
 
     pub inline fn initWithHD(value: HD) Self {
@@ -118,6 +139,85 @@ pub const HCD = struct {
         return res;
     }
 
+    pub fn addHCD(self: Self, o: HCD) HCD {
+        var res: HCD = self.clone();
+        const sum = twoSum(res.high, o.high);
+        res.high = sum.high;
+        res.low += sum.low + o.low;
+        return res;
+    }
+
+    pub fn minusHD(self: Self, o: HD) HCD {
+        var res: HCD = self.clone();
+        const sum = twoSum(res.high, -o);
+        res.high = sum.high;
+        res.low += sum.low;
+        return res;
+    }
+
+    pub fn minusHCD(self: Self, o: HCD) HCD {
+        var res: HCD = self.clone();
+        const sum = twoSum(res.high, -o.high);
+        res.high = sum.high;
+        res.low += sum.low - o.low;
+        return res;
+    }
+
+    pub inline fn multiplyHD(self: Self, o: HD) HCD {
+        const product = twoProduct(self.high, o);
+        return quickTwoSum(product.high, product.low + self.low * o);
+    }
+
+    pub inline fn multiplyHCD(self: Self, o: HCD) HCD {
+        if (o.low == 0.0) {
+            return self.multiplyHD(o.high);
+        }
+
+        const product = twoProduct(self.high, o.high);
+        const cross_products = product.low + self.high * o.low + self.low * o.high;
+        return quickTwoSum(product.high, cross_products);
+    }
+
+    pub inline fn divideHD(self: Self, o: HD) HCD {
+        @setFloatMode(.strict);
+
+        if (o == 0.0) {
+            @branchHint(.unlikely);
+            return Self.initWithHD(self.toHD() / o);
+        }
+
+        const q1 = self.high / o;
+        const product = Self.twoProduct(q1, o);
+        const q2 = (((self.high - product.high) - product.low) + self.low) / o;
+
+        return quickTwoSum(q1, q2);
+    }
+
+    pub inline fn divideHCD(self: Self, o: HCD) HCD {
+        @setFloatMode(.strict);
+
+        if (o.high == 0.0 and o.low == 0.0) {
+            @branchHint(.unlikely);
+            return Self.initWithHD(self.toHD() / o.toHD());
+        }
+        if (o.low == 0.0) {
+            return self.divideHD(o.high);
+        }
+
+        const q1 = self.high / o.high;
+        const p1 = Self.twoProduct(q1, o.high);
+        const p2 = q1 * o.low;
+        const r1 = (((self.high - p1.high) - p1.low) + self.low) - p2;
+
+        const q2 = r1 / o.high;
+        const p3 = Self.twoProduct(q2, o.high);
+        const p4 = q2 * o.low;
+        const r2 = ((r1 - p3.high) - p3.low) - p4;
+
+        const q3 = r2 / o.high;
+        return quickThreeSum(q1, q2, q3);
+    }
+
     /// The same as '+=' operator c++, but the parameter is a `HD`.
     /// This will make `.low` more and more bigger, and may introduce more and more rounding errors,
     /// so you will take account of the renorm outsiede because invoke `twoSum` is expensive.
@@ -151,88 +251,351 @@ pub const HCD = struct {
 
     /// The same as '*=' operator c++, but the parameter is a `HD`.
     pub fn multiplyHDAssign(self: *Self, o: HD) void {
-        const low_product = self.low * o;
-        const high_product = Self.twoProduct(self.high, o);
-        self.high = high_product.high;
-        self.low = high_product.low;
-        self.addHDAssign(low_product);
+        self.* = self.multiplyHD(o);
     }
 
     /// The same as '*=' operator c++, but the parameter is a `HCD`.
     pub fn multiplyHCDAssign(self: *Self, o: HCD) void {
-        const cross_product1 = self.low * o.high;
-        const cross_product2 = self.high * o.low;
-
-        const high_product = Self.twoProduct(self.high, o.high);
-        // const low_product = self.low * o.low;  //this is so small that it can be ignored, and it will be added to the low part of the result.
-        self.high = high_product.high;
-        self.low = high_product.low;
-        self.addHDAssign(cross_product1);
-        self.addHDAssign(cross_product2);
+        self.* = self.multiplyHCD(o);
     }
 
+    /// The same as '/=' operator c++, but the parameter is a `HD`.
     pub fn divideHDAssign(self: *Self, o: HD) void {
-        const d = Self.init(self.high / o, self.low / o);
-        // const c = d.multiplyHDAssign(o).
-        _ = d;
+        self.* = self.divideHD(o);
     }
 
-    // pub fn divideHCDAssign(self: *Self, o: HCD) void {}
+    /// The same as '/=' operator c++, but the parameter is a `HCD`.
+    pub fn divideHCDAssign(self: *Self, o: HCD) void {
+        self.* = self.divideHCD(o);
+    }
 
     pub fn cmp(self: Self, o: Self) std.math.Order {
-        const a = self.toHD(); // mind that this may introduce rounding errors.
-        const b = o.toHD();
-        if (a < b) return .lt;
-        if (a > b) return .gt;
+        if (self.high < o.high) return .lt;
+        if (self.high > o.high) return .gt;
+        if (self.low < o.low) return .lt;
+        if (self.low > o.low) return .gt;
         return .eq;
     }
 };
 
-test "two-sum-test" {
+test "twoSum stores rounded-away addend in low" {
     const res = HCD.twoSum(1e16, 1.0);
-    const a = res.high;
-    const b = res.low;
-    const expected = a + b;
 
-    try std.testing.expectEqual(a, 1e16);
-    try std.testing.expectEqual(b, 1.0);
-    try std.testing.expect(1e16 == expected);
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 1.0), res.low);
 }
 
-test "cmp-test" {
-    const a = HCD.initWithHD(1.0);
-    const b = HCD.initWithHD(2.0);
-    try std.testing.expectEqual(a.cmp(b), .lt);
-    try std.testing.expectEqual(b.cmp(a), .gt);
-    try std.testing.expectEqual(a.cmp(a), .eq);
+test "twoSum cancels equal opposite values" {
+    const res = HCD.twoSum(1.0, -1.0);
 
-    var d = HCD.initWithHD(1e16);
-    d.addHDAssign(1);
-    try std.testing.expectEqual(HCD.initWithHD(1e16).cmp(d), .eq);
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
 }
 
-test "two-product" {
-    const res1 = HCD.twoProduct(1e16, 1.0);
-    try std.testing.expectEqual(res1.toHD(), 1e16);
+test "split preserves zero" {
+    const res = HCD.split(0.0);
 
-    const res2 = HCD.twoProduct(1e16, 0.3);
-    try std.testing.expectEqual(res2.toHD(), 3e15);
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
 }
 
-test "split" {
-    const res = HCD.split(1e16);
-    try std.testing.expect(res.toHD() == 1e16);
+test "split recombines positive value" {
+    const value: HD = 1e16;
+    const res = HCD.split(value);
+
+    try std.testing.expectEqual(value, res.toHD());
 }
 
-test "cmp-test-with-low" {
-    var a = HCD.initWithHD(1.0);
-    const b = HCD.initWithHD(1.0);
-    a.addHDAssign(1e-16);
-    try std.testing.expectEqual(a.cmp(b), .gt);
+test "split recombines negative value" {
+    const value: HD = -1e16;
+    const res = HCD.split(value);
+
+    try std.testing.expectEqual(value, res.toHD());
 }
 
-test "add hd" {
-    var a = HCD.initWithHD(1.0);
-    a.addHDAssign(1);
-    try std.testing.expectEqual(a.toHD(), 2.0);
+test "twoProduct stores exact product error in low" {
+    const a: HD = 1e16;
+    const b: HD = 0.3;
+    const high = a * b;
+    const res = HCD.twoProduct(a, b);
+
+    try std.testing.expectEqual(high, res.high);
+    try std.testing.expectEqual(@mulAdd(HD, a, b, -high), res.low);
+}
+
+test "twoProduct returns zero for zero operand" {
+    const res = HCD.twoProduct(123.0, 0.0);
+
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "initWithHD sets low to zero" {
+    const res = HCD.initWithHD(2.5);
+
+    try std.testing.expectEqual(@as(HD, 2.5), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "init stores high and low" {
+    const res = HCD.init(2.5, 0.25);
+
+    try std.testing.expectEqual(@as(HD, 2.5), res.high);
+    try std.testing.expectEqual(@as(HD, 0.25), res.low);
+}
+
+test "clone copies high and low" {
+    const value = HCD.init(2.5, 0.25);
+    const res = value.clone();
+
+    try std.testing.expectEqual(value.high, res.high);
+    try std.testing.expectEqual(value.low, res.low);
+}
+
+test "toHD returns rounded sum" {
+    const value = HCD.init(2.5, 0.25);
+
+    try std.testing.expectEqual(@as(HD, 2.75), value.toHD());
+}
+
+test "addHD captures small addend in low" {
+    const res = HCD.initWithHD(1e16).addHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 1.0), res.low);
+}
+
+test "addHCD adds high and low parts" {
+    const res = HCD.init(1e16, 1.0).addHCD(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 2.25), res.low);
+}
+
+test "minusHD captures small subtrahend in low" {
+    const res = HCD.initWithHD(1e16).minusHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -1.0), res.low);
+}
+
+test "minusHCD subtracts high and low parts" {
+    const res = HCD.init(1e16, 1.0).minusHCD(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
+test "multiplyHD includes low part" {
+    const res = HCD.init(1e16, 1.0).multiplyHD(2.0);
+
+    try std.testing.expectEqual(@as(HD, 2e16), res.high);
+    try std.testing.expectEqual(@as(HD, 2.0), res.low);
+}
+
+test "multiplyHD by zero returns zero" {
+    const res = HCD.init(4.0, 0.5).multiplyHD(0.0);
+
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "multiplyHD by one preserves value" {
+    const res = HCD.init(4.0, 0.5).multiplyHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 4.5), res.toHD());
+}
+
+test "multiplyHD handles negative multiplier" {
+    const res = HCD.init(4.0, 0.5).multiplyHD(-2.0);
+
+    try std.testing.expectEqual(@as(HD, -9.0), res.toHD());
+}
+
+test "multiplyHCD by zero returns zero" {
+    const res = HCD.init(4.0, 0.5).multiplyHCD(HCD.initWithHD(0.0));
+
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "multiplyHCD by one preserves value" {
+    const res = HCD.init(4.0, 0.5).multiplyHCD(HCD.initWithHD(1.0));
+
+    try std.testing.expectEqual(@as(HD, 4.5), res.toHD());
+}
+
+test "multiplyHCD uses multiplier low fast path result" {
+    const res = HCD.init(1e16, 1.0).multiplyHCD(HCD.initWithHD(2.0));
+
+    try std.testing.expectEqual(@as(HD, 2e16), res.high);
+    try std.testing.expectEqual(@as(HD, 2.0), res.low);
+}
+
+test "multiplyHCD includes cross products" {
+    const res = HCD.init(1.0, 1e-16).multiplyHCD(HCD.init(2.0, 1e-16));
+
+    try std.testing.expectEqual(@as(HD, 2.0000000000000004), res.toHD());
+}
+
+test "multiplyHCD handles negative multiplier" {
+    const res = HCD.init(4.0, 0.5).multiplyHCD(HCD.initWithHD(-2.0));
+
+    try std.testing.expectEqual(@as(HD, -9.0), res.toHD());
+}
+
+test "divideHD divides by one" {
+    const res = HCD.init(4.0, 0.5).divideHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 4.5), res.toHD());
+}
+
+test "divideHD divides zero numerator" {
+    const res = HCD.initWithHD(0.0).divideHD(2.0);
+
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "divideHD keeps low part contribution" {
+    const res = HCD.init(1e16, 2.0).divideHD(2.0);
+
+    try std.testing.expectEqual(@as(HD, 5000000000000001.0), res.toHD());
+}
+
+test "divideHD handles negative divisor" {
+    const res = HCD.init(4.0, 0.5).divideHD(-2.0);
+
+    try std.testing.expectEqual(@as(HD, -2.25), res.toHD());
+}
+
+test "divideHD returns infinity for nonzero divided by zero" {
+    const res = HCD.initWithHD(1.0).divideHD(0.0);
+
+    try std.testing.expect(std.math.isPositiveInf(res.high));
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "divideHD returns nan for zero divided by zero" {
+    const res = HCD.initWithHD(0.0).divideHD(0.0);
+
+    try std.testing.expect(std.math.isNan(res.high));
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "divideHCD divides by one" {
+    const res = HCD.init(4.0, 0.5).divideHCD(HCD.initWithHD(1.0));
+
+    try std.testing.expectEqual(@as(HD, 4.5), res.toHD());
+}
+
+test "divideHCD divides zero numerator" {
+    const res = HCD.initWithHD(0.0).divideHCD(HCD.init(2.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 0.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "divideHCD accounts for denominator low part" {
+    const res = HCD.init(1.0, 3e-16).divideHCD(HCD.init(1.0, 1e-16));
+
+    try std.testing.expectEqual(@as(HD, 1.0000000000000002), res.toHD());
+}
+
+test "divideHCD handles negative divisor" {
+    const res = HCD.init(4.0, 0.5).divideHCD(HCD.initWithHD(-2.0));
+
+    try std.testing.expectEqual(@as(HD, -2.25), res.toHD());
+}
+
+test "divideHCD returns infinity for nonzero divided by zero" {
+    const res = HCD.initWithHD(1.0).divideHCD(HCD.initWithHD(0.0));
+
+    try std.testing.expect(std.math.isPositiveInf(res.high));
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
+test "addHDAssign mutates receiver" {
+    var value = HCD.initWithHD(1e16);
+
+    value.addHDAssign(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 1.0), value.low);
+}
+
+test "addHCDAssign mutates receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHCDAssign(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 2.25), value.low);
+}
+
+test "minusHDAssign mutates receiver" {
+    var value = HCD.initWithHD(1e16);
+
+    value.minusHDAssign(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -1.0), value.low);
+}
+
+test "minusHCDAssign mutates receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHCDAssign(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -0.25), value.low);
+}
+
+test "multiplyHDAssign includes low part" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.multiplyHDAssign(2.0);
+
+    try std.testing.expectEqual(@as(HD, 2e16), value.high);
+    try std.testing.expectEqual(@as(HD, 2.0), value.low);
+}
+
+test "multiplyHCDAssign includes cross products" {
+    var value = HCD.init(1.0, 1e-16);
+
+    value.multiplyHCDAssign(HCD.init(2.0, 1e-16));
+
+    try std.testing.expectEqual(@as(HD, 2.0000000000000004), value.toHD());
+}
+
+test "divideHDAssign mutates receiver" {
+    var value = HCD.init(4.0, 0.5);
+
+    value.divideHDAssign(2.0);
+
+    try std.testing.expectEqual(@as(HD, 2.25), value.toHD());
+}
+
+test "divideHCDAssign mutates receiver" {
+    var value = HCD.init(4.0, 0.5);
+
+    value.divideHCDAssign(HCD.initWithHD(2.0));
+
+    try std.testing.expectEqual(@as(HD, 2.25), value.toHD());
+}
+
+test "cmp returns lt for smaller value" {
+    try std.testing.expectEqual(std.math.Order.lt, HCD.initWithHD(1.0).cmp(HCD.initWithHD(2.0)));
+}
+
+test "cmp returns gt for greater value" {
+    try std.testing.expectEqual(std.math.Order.gt, HCD.initWithHD(2.0).cmp(HCD.initWithHD(1.0)));
+}
+
+test "cmp returns eq for equal value" {
+    try std.testing.expectEqual(std.math.Order.eq, HCD.initWithHD(1.0).cmp(HCD.initWithHD(1.0)));
+}
+
+test "cmp compares low part when high parts match" {
+    try std.testing.expectEqual(std.math.Order.gt, HCD.init(1.0, 1e-16).cmp(HCD.initWithHD(1.0)));
 }
