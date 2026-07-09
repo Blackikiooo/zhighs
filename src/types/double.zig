@@ -31,8 +31,10 @@ pub const HCD = struct {
         .low = 0.0,
     };
 
-    /// performs an exact transformation such that x + y = a + b
-    /// and x = double(a + b). The operation uses 6 flops (addition/subtraction).
+    /// Error-free transform for `a + b`.
+    /// Algorithm: Knuth two-sum, returning `high = round(a + b)` and `low`
+    /// such that `high + low` equals the exact real sum when no overflow occurs.
+    /// Example: `const r = HCD.twoSum(1e16, 1.0);`
     pub fn twoSum(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
@@ -46,8 +48,10 @@ pub const HCD = struct {
         };
     }
 
-    /// splits a 53 bit double precision number into two 26 bit parts
-    /// such that x + y = a holds exactly
+    /// Split one f64 into high and low parts.
+    /// Algorithm: Dekker split with factor `2^27 + 1`; used by `twoProduct`
+    /// when hardware FMA is unavailable.
+    /// Example: `const parts = HCD.split(1e16);`
     pub fn split(a: HD) Self {
         @setFloatMode(.strict);
 
@@ -62,8 +66,10 @@ pub const HCD = struct {
         };
     }
 
-    /// performs an exact transformation such that x + y = a * b
-    /// and x = double(a * b).
+    /// Error-free transform for `a * b`.
+    /// Algorithm: FMA residual when available, otherwise Dekker product using
+    /// `split`; returns `high = round(a * b)` and product error in `low`.
+    /// Example: `const p = HCD.twoProduct(1e16, 0.3);`
     pub inline fn twoProduct(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
@@ -83,6 +89,9 @@ pub const HCD = struct {
         };
     }
 
+    /// Fast renormalization for a dominant high part plus a small correction.
+    /// Algorithm: quick two-sum; valid when `abs(a) >= abs(b)`.
+    /// Example: `const r = HCD.quickTwoSum(1e16, 1.0);`
     inline fn quickTwoSum(a: HD, b: HD) Self {
         @setFloatMode(.strict);
 
@@ -95,6 +104,9 @@ pub const HCD = struct {
         };
     }
 
+    /// Fast renormalization of three terms where `a` is the dominant term.
+    /// Algorithm: quick two-sum on `a + b`, then folds `c` into the residual.
+    /// Example: `const r = HCD.quickThreeSum(q1, q2, q3);`
     inline fn quickThreeSum(a: HD, b: HD, c: HD) Self {
         @setFloatMode(.strict);
 
@@ -103,6 +115,18 @@ pub const HCD = struct {
         return quickTwoSum(sum, err + c);
     }
 
+    /// Full two-term renormalization.
+    /// Algorithm: `twoSum(a, b)`; use when `b` may not be tiny relative to `a`.
+    /// Example: `const r = HCD.renorm2(value.high, value.low);`
+    inline fn renorm2(a: HD, b: HD) Self {
+        @setFloatMode(.strict);
+
+        return twoSum(a, b);
+    }
+
+    /// Construct an HCD from one f64.
+    /// Algorithm: exact embedding with `low = 0`.
+    /// Example: `const x = HCD.initWithHD(1.0);`
     pub inline fn initWithHD(value: HD) Self {
         return Self{
             .high = value,
@@ -110,6 +134,9 @@ pub const HCD = struct {
         };
     }
 
+    /// Construct an HCD from explicit high and low parts.
+    /// Algorithm: direct storage; no renormalization is performed.
+    /// Example: `const x = HCD.init(1e16, 1.0);`
     pub inline fn init(high: HD, low: HD) Self {
         return Self{
             .high = high,
@@ -117,7 +144,9 @@ pub const HCD = struct {
         };
     }
 
-    /// use const x = self is clone semantics, but use clone will more clear.
+    /// Copy this value.
+    /// Algorithm: direct field copy; equivalent to value assignment, but clearer.
+    /// Example: `const y = x.clone();`
     pub inline fn clone(self: Self) Self {
         return Self{
             .high = self.high,
@@ -125,49 +154,102 @@ pub const HCD = struct {
         };
     }
 
-    /// If you need to convert this to a double, use this function,
-    /// but be aware that this may introduce rounding errors again.
+    /// Convert to one f64.
+    /// Algorithm: rounded `high + low`; this intentionally loses extra precision.
+    /// Example: `const y: HD = x.toHD();`
     pub inline fn toHD(self: Self) HD {
         return self.high + self.low;
     }
 
-    pub fn addHD(self: Self, o: HD) HCD {
-        var res: HCD = self.clone();
-        const sum = twoSum(res.high, o);
-        res.high = sum.high;
-        res.low += sum.low;
-        return res;
+    /// Return a normalized copy of this HCD.
+    /// Algorithm: full two-term renormalization of `high` and `low`.
+    /// Example: `const y = x.renorm();`
+    pub inline fn renorm(self: Self) HCD {
+        return renorm2(self.high, self.low);
     }
 
-    pub fn addHCD(self: Self, o: HCD) HCD {
-        var res: HCD = self.clone();
-        const sum = twoSum(res.high, o.high);
-        res.high = sum.high;
-        res.low += sum.low + o.low;
-        return res;
+    /// Normalize this HCD in place.
+    /// Algorithm: assign `self.renorm()` back to `self`.
+    /// Example: `x.renormAssign();`
+    pub inline fn renormAssign(self: *Self) void {
+        self.* = self.renorm();
     }
 
-    pub fn minusHD(self: Self, o: HD) HCD {
-        var res: HCD = self.clone();
-        const sum = twoSum(res.high, -o);
-        res.high = sum.high;
-        res.low += sum.low;
-        return res;
+    /// Add one f64 without final renormalization.
+    /// Algorithm: `twoSum(high, o)` and accumulate the residual into `low`.
+    /// Example: `x.addHDAssignFast(1.0); x.renormAssign();`
+    pub inline fn addHDFast(self: Self, o: HD) HCD {
+        const sum = twoSum(self.high, o);
+        return Self.init(sum.high, self.low + sum.low);
     }
 
-    pub fn minusHCD(self: Self, o: HCD) HCD {
-        var res: HCD = self.clone();
-        const sum = twoSum(res.high, -o.high);
-        res.high = sum.high;
-        res.low += sum.low - o.low;
-        return res;
+    /// Add one f64 and return a normalized result.
+    /// Algorithm: `addHDFast(o).renorm()`; safer, but costs an extra `twoSum`.
+    /// Example: `const y = x.addHD(1.0);`
+    pub inline fn addHD(self: Self, o: HD) HCD {
+        return self.addHDFast(o).renorm();
     }
 
+    /// Add another HCD without final renormalization.
+    /// Algorithm: `twoSum(high, o.high)` and accumulate both low parts.
+    /// Example: `x.addHCDAssignFast(y); x.renormAssign();`
+    pub inline fn addHCDFast(self: Self, o: HCD) HCD {
+        const sum = twoSum(self.high, o.high);
+        return Self.init(sum.high, self.low + sum.low + o.low);
+    }
+
+    /// Add another HCD and return a normalized result.
+    /// Algorithm: `addHCDFast(o).renorm()`; use when you do not want to manage
+    /// delayed renormalization manually.
+    /// Example: `const z = x.addHCD(y);`
+    pub inline fn addHCD(self: Self, o: HCD) HCD {
+        return self.addHCDFast(o).renorm();
+    }
+
+    /// Subtract one f64 without final renormalization.
+    /// Algorithm: `twoSum(high, -o)` and accumulate the residual into `low`.
+    /// Example: `x.minusHDAssignFast(1.0); x.renormAssign();`
+    pub inline fn minusHDFast(self: Self, o: HD) HCD {
+        const sum = twoSum(self.high, -o);
+        return Self.init(sum.high, self.low + sum.low);
+    }
+
+    /// Subtract one f64 and return a normalized result.
+    /// Algorithm: `minusHDFast(o).renorm()`.
+    /// Example: `const y = x.minusHD(1.0);`
+    pub inline fn minusHD(self: Self, o: HD) HCD {
+        return self.minusHDFast(o).renorm();
+    }
+
+    /// Subtract another HCD without final renormalization.
+    /// Algorithm: `twoSum(high, -o.high)` and subtract `o.low` from the low
+    /// accumulator.
+    /// Example: `x.minusHCDAssignFast(y); x.renormAssign();`
+    pub inline fn minusHCDFast(self: Self, o: HCD) HCD {
+        const sum = twoSum(self.high, -o.high);
+        return Self.init(sum.high, self.low + sum.low - o.low);
+    }
+
+    /// Subtract another HCD and return a normalized result.
+    /// Algorithm: `minusHCDFast(o).renorm()`.
+    /// Example: `const z = x.minusHCD(y);`
+    pub inline fn minusHCD(self: Self, o: HCD) HCD {
+        return self.minusHCDFast(o).renorm();
+    }
+
+    /// Multiply by one f64.
+    /// Algorithm: double-double by double fast product: `twoProduct(high, o)`
+    /// plus the cross term `low * o`, then `quickTwoSum`.
+    /// Example: `const y = x.multiplyHD(2.0);`
     pub inline fn multiplyHD(self: Self, o: HD) HCD {
         const product = twoProduct(self.high, o);
         return quickTwoSum(product.high, product.low + self.low * o);
     }
 
+    /// Multiply by another HCD.
+    /// Algorithm: fast double-double product using `twoProduct(high, o.high)`
+    /// and cross terms `high * o.low + low * o.high`; ignores `low * o.low`.
+    /// Example: `const z = x.multiplyHCD(y);`
     pub inline fn multiplyHCD(self: Self, o: HCD) HCD {
         if (o.low == 0.0) {
             return self.multiplyHD(o.high);
@@ -178,6 +260,10 @@ pub const HCD = struct {
         return quickTwoSum(product.high, cross_products);
     }
 
+    /// Divide by one f64.
+    /// Algorithm: one quotient estimate plus one residual correction:
+    /// `q1 = high / o`, correct with `(self - q1 * o) / o`, then quick sum.
+    /// Example: `const y = x.divideHD(2.0);`
     pub inline fn divideHD(self: Self, o: HD) HCD {
         @setFloatMode(.strict);
 
@@ -193,88 +279,141 @@ pub const HCD = struct {
         return quickTwoSum(q1, q2);
     }
 
+    /// Divide by another HCD.
+    /// Algorithm: two Newton-style quotient correction steps using expanded
+    /// double-double residual arithmetic; renormalizes rare `o.high == 0`
+    /// inputs and falls back to `divideHD` if `o.low = 0`.
+    /// Example: `const z = x.divideHCD(y);`
     pub inline fn divideHCD(self: Self, o: HCD) HCD {
         @setFloatMode(.strict);
 
-        if (o.high == 0.0 and o.low == 0.0) {
+        var den = o;
+        if (den.high == 0.0) {
             @branchHint(.unlikely);
-            return Self.initWithHD(self.toHD() / o.toHD());
+            den = den.renorm();
+            if (den.high == 0.0 and den.low == 0.0) {
+                return Self.initWithHD(self.toHD() / den.toHD());
+            }
         }
-        if (o.low == 0.0) {
-            return self.divideHD(o.high);
+        if (den.low == 0.0) {
+            return self.divideHD(den.high);
         }
 
-        const q1 = self.high / o.high;
-        const p1 = Self.twoProduct(q1, o.high);
-        const p2 = q1 * o.low;
+        const q1 = self.high / den.high;
+        const p1 = Self.twoProduct(q1, den.high);
+        const p2 = q1 * den.low;
         const r1 = (((self.high - p1.high) - p1.low) + self.low) - p2;
 
-        const q2 = r1 / o.high;
-        const p3 = Self.twoProduct(q2, o.high);
-        const p4 = q2 * o.low;
+        const q2 = r1 / den.high;
+        const p3 = Self.twoProduct(q2, den.high);
+        const p4 = q2 * den.low;
         const r2 = ((r1 - p3.high) - p3.low) - p4;
 
-        const q3 = r2 / o.high;
+        const q3 = r2 / den.high;
         return quickThreeSum(q1, q2, q3);
     }
 
-    /// The same as '+=' operator c++, but the parameter is a `HD`.
-    /// This will make `.low` more and more bigger, and may introduce more and more rounding errors,
-    /// so you will take account of the renorm outsiede because invoke `twoSum` is expensive.
-    pub fn addHDAssign(self: *Self, o: HD) void {
-        const sum = HCD.twoSum(self.high, o);
-        self.high = sum.high;
-        self.low += sum.low;
+    /// Add one f64 in place with automatic renormalization.
+    /// Algorithm: assign `addHD(o)` back to `self`.
+    /// Example: `x.addHDAssign(1.0);`
+    pub inline fn addHDAssign(self: *Self, o: HD) void {
+        self.* = self.addHD(o);
     }
 
-    /// The same as '+=' operator in c++, but the parameter is a `HCD`.
-    /// The same as `addHDAssign`, but the parameter is a `HCD`.
-    pub fn addHCDAssign(self: *Self, o: HCD) void {
-        const sum = HCD.twoSum(self.high, o.high);
-        self.high = sum.high;
-        self.low += sum.low + o.low;
+    /// Add one f64 in place without final renormalization.
+    /// Algorithm: assign `addHDFast(o)` back to `self`.
+    /// Example: `x.addHDAssignFast(1.0); x.renormAssign();`
+    pub inline fn addHDAssignFast(self: *Self, o: HD) void {
+        self.* = self.addHDFast(o);
     }
 
-    /// The same as '-=' operator c++, but the parameter is a `HD`.
-    pub fn minusHDAssign(self: *Self, o: HD) void {
-        const sum = HCD.twoSum(self.high, -o);
-        self.high = sum.high;
-        self.low += sum.low;
+    /// Add another HCD in place with automatic renormalization.
+    /// Algorithm: assign `addHCD(o)` back to `self`.
+    /// Example: `x.addHCDAssign(y);`
+    pub inline fn addHCDAssign(self: *Self, o: HCD) void {
+        self.* = self.addHCD(o);
     }
 
-    /// The same as '-=' operator c++, but the parameter is a `HCD`.
-    pub fn minusHCDAssign(self: *Self, o: HCD) void {
-        const sum = HCD.twoSum(self.high, -o.high);
-        self.high = sum.high;
-        self.low += sum.low - o.low;
+    /// Add another HCD in place without final renormalization.
+    /// Algorithm: assign `addHCDFast(o)` back to `self`.
+    /// Example: `x.addHCDAssignFast(y); x.renormAssign();`
+    pub inline fn addHCDAssignFast(self: *Self, o: HCD) void {
+        self.* = self.addHCDFast(o);
     }
 
-    /// The same as '*=' operator c++, but the parameter is a `HD`.
-    pub fn multiplyHDAssign(self: *Self, o: HD) void {
+    /// Subtract one f64 in place with automatic renormalization.
+    /// Algorithm: assign `minusHD(o)` back to `self`.
+    /// Example: `x.minusHDAssign(1.0);`
+    pub inline fn minusHDAssign(self: *Self, o: HD) void {
+        self.* = self.minusHD(o);
+    }
+
+    /// Subtract one f64 in place without final renormalization.
+    /// Algorithm: assign `minusHDFast(o)` back to `self`.
+    /// Example: `x.minusHDAssignFast(1.0); x.renormAssign();`
+    pub inline fn minusHDAssignFast(self: *Self, o: HD) void {
+        self.* = self.minusHDFast(o);
+    }
+
+    /// Subtract another HCD in place with automatic renormalization.
+    /// Algorithm: assign `minusHCD(o)` back to `self`.
+    /// Example: `x.minusHCDAssign(y);`
+    pub inline fn minusHCDAssign(self: *Self, o: HCD) void {
+        self.* = self.minusHCD(o);
+    }
+
+    /// Subtract another HCD in place without final renormalization.
+    /// Algorithm: assign `minusHCDFast(o)` back to `self`.
+    /// Example: `x.minusHCDAssignFast(y); x.renormAssign();`
+    pub inline fn minusHCDAssignFast(self: *Self, o: HCD) void {
+        self.* = self.minusHCDFast(o);
+    }
+
+    /// Multiply by one f64 in place.
+    /// Algorithm: assign `multiplyHD(o)` back to `self`.
+    /// Example: `x.multiplyHDAssign(2.0);`
+    pub inline fn multiplyHDAssign(self: *Self, o: HD) void {
         self.* = self.multiplyHD(o);
     }
 
-    /// The same as '*=' operator c++, but the parameter is a `HCD`.
-    pub fn multiplyHCDAssign(self: *Self, o: HCD) void {
+    /// Multiply by another HCD in place.
+    /// Algorithm: assign `multiplyHCD(o)` back to `self`.
+    /// Example: `x.multiplyHCDAssign(y);`
+    pub inline fn multiplyHCDAssign(self: *Self, o: HCD) void {
         self.* = self.multiplyHCD(o);
     }
 
-    /// The same as '/=' operator c++, but the parameter is a `HD`.
-    pub fn divideHDAssign(self: *Self, o: HD) void {
+    /// Divide by one f64 in place.
+    /// Algorithm: assign `divideHD(o)` back to `self`.
+    /// Example: `x.divideHDAssign(2.0);`
+    pub inline fn divideHDAssign(self: *Self, o: HD) void {
         self.* = self.divideHD(o);
     }
 
-    /// The same as '/=' operator c++, but the parameter is a `HCD`.
-    pub fn divideHCDAssign(self: *Self, o: HCD) void {
+    /// Divide by another HCD in place.
+    /// Algorithm: assign `divideHCD(o)` back to `self`.
+    /// Example: `x.divideHCDAssign(y);`
+    pub inline fn divideHCDAssign(self: *Self, o: HCD) void {
         self.* = self.divideHCD(o);
     }
 
-    pub fn cmp(self: Self, o: Self) std.math.Order {
+    /// Compare two already-normalized HCD values.
+    /// Algorithm: lexicographic compare on `(high, low)`; faster but assumes
+    /// both values have been normalized.
+    /// Example: `const order = x.renorm().cmpFast(y.renorm());`
+    pub inline fn cmpFast(self: Self, o: Self) std.math.Order {
         if (self.high < o.high) return .lt;
         if (self.high > o.high) return .gt;
         if (self.low < o.low) return .lt;
         if (self.low > o.low) return .gt;
         return .eq;
+    }
+
+    /// Compare two HCD values safely.
+    /// Algorithm: renormalize both operands, then use lexicographic compare.
+    /// Example: `const order = x.cmp(y);`
+    pub inline fn cmp(self: Self, o: Self) std.math.Order {
+        return self.renorm().cmpFast(o.renorm());
     }
 };
 
@@ -358,8 +497,31 @@ test "toHD returns rounded sum" {
     try std.testing.expectEqual(@as(HD, 2.75), value.toHD());
 }
 
+test "renorm folds large low part into high" {
+    const res = HCD.init(1e16, 2.25).renorm();
+
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.25), res.low);
+}
+
+test "renormAssign folds large low part into high" {
+    var value = HCD.init(1e16, 2.25);
+
+    value.renormAssign();
+
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), value.high);
+    try std.testing.expectEqual(@as(HD, 0.25), value.low);
+}
+
 test "addHD captures small addend in low" {
     const res = HCD.initWithHD(1e16).addHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 1.0), res.low);
+}
+
+test "addHDFast captures small addend in low" {
+    const res = HCD.initWithHD(1e16).addHDFast(1.0);
 
     try std.testing.expectEqual(@as(HD, 1e16), res.high);
     try std.testing.expectEqual(@as(HD, 1.0), res.low);
@@ -368,12 +530,40 @@ test "addHD captures small addend in low" {
 test "addHCD adds high and low parts" {
     const res = HCD.init(1e16, 1.0).addHCD(HCD.init(1.0, 0.25));
 
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.25), res.low);
+}
+
+test "addHCDFast leaves renormalization to caller" {
+    const res = HCD.init(1e16, 1.0).addHCDFast(HCD.init(1.0, 0.25));
+
     try std.testing.expectEqual(@as(HD, 1e16), res.high);
     try std.testing.expectEqual(@as(HD, 2.25), res.low);
 }
 
+test "addHCDFast can be manually renormalized" {
+    const res = HCD.init(1e16, 1.0).addHCDFast(HCD.init(1.0, 1.25)).renorm();
+
+    try std.testing.expectEqual(@as(HD, 10000000000000004.0), res.high);
+    try std.testing.expectEqual(@as(HD, -0.75), res.low);
+}
+
+test "addHCD handles high cancellation with larger low part" {
+    const res = HCD.init(1e16, 5.0).addHCD(HCD.init(-1e16, 7.0));
+
+    try std.testing.expectEqual(@as(HD, 12.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
+}
+
 test "minusHD captures small subtrahend in low" {
     const res = HCD.initWithHD(1e16).minusHD(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -1.0), res.low);
+}
+
+test "minusHDFast captures small subtrahend in low" {
+    const res = HCD.initWithHD(1e16).minusHDFast(1.0);
 
     try std.testing.expectEqual(@as(HD, 1e16), res.high);
     try std.testing.expectEqual(@as(HD, -1.0), res.low);
@@ -384,6 +574,20 @@ test "minusHCD subtracts high and low parts" {
 
     try std.testing.expectEqual(@as(HD, 1e16), res.high);
     try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
+test "minusHCDFast leaves renormalization to caller" {
+    const res = HCD.init(1e16, 1.0).minusHCDFast(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
+test "minusHCD handles high cancellation with larger low part" {
+    const res = HCD.init(1e16, 5.0).minusHCD(HCD.init(1e16, -7.0));
+
+    try std.testing.expectEqual(@as(HD, 12.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.0), res.low);
 }
 
 test "multiplyHD includes low part" {
@@ -496,6 +700,12 @@ test "divideHCD divides zero numerator" {
     try std.testing.expectEqual(@as(HD, 0.0), res.low);
 }
 
+test "divideHCD handles denominator stored in low part" {
+    const res = HCD.initWithHD(4.0).divideHCD(HCD.init(0.0, 2.0));
+
+    try std.testing.expectEqual(@as(HD, 2.0), res.toHD());
+}
+
 test "divideHCD accounts for denominator low part" {
     const res = HCD.init(1.0, 3e-16).divideHCD(HCD.init(1.0, 1e-16));
 
@@ -524,13 +734,40 @@ test "addHDAssign mutates receiver" {
     try std.testing.expectEqual(@as(HD, 1.0), value.low);
 }
 
+test "addHDAssignFast mutates receiver" {
+    var value = HCD.initWithHD(1e16);
+
+    value.addHDAssignFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 1.0), value.low);
+}
+
 test "addHCDAssign mutates receiver" {
     var value = HCD.init(1e16, 1.0);
 
     value.addHCDAssign(HCD.init(1.0, 0.25));
 
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), value.high);
+    try std.testing.expectEqual(@as(HD, 0.25), value.low);
+}
+
+test "addHCDAssign renormalizes accumulated low part" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHCDAssign(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 10000000000000004.0), value.high);
+    try std.testing.expectEqual(@as(HD, -0.75), value.low);
+}
+
+test "addHCDAssignFast leaves caller-controlled renormalization" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHCDAssignFast(HCD.init(1.0, 1.25));
+
     try std.testing.expectEqual(@as(HD, 1e16), value.high);
-    try std.testing.expectEqual(@as(HD, 2.25), value.low);
+    try std.testing.expectEqual(@as(HD, 3.25), value.low);
 }
 
 test "minusHDAssign mutates receiver" {
@@ -542,10 +779,28 @@ test "minusHDAssign mutates receiver" {
     try std.testing.expectEqual(@as(HD, -1.0), value.low);
 }
 
+test "minusHDAssignFast mutates receiver" {
+    var value = HCD.initWithHD(1e16);
+
+    value.minusHDAssignFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -1.0), value.low);
+}
+
 test "minusHCDAssign mutates receiver" {
     var value = HCD.init(1e16, 1.0);
 
     value.minusHCDAssign(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -0.25), value.low);
+}
+
+test "minusHCDAssignFast leaves caller-controlled renormalization" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHCDAssignFast(HCD.init(1.0, 0.25));
 
     try std.testing.expectEqual(@as(HD, 1e16), value.high);
     try std.testing.expectEqual(@as(HD, -0.25), value.low);
@@ -596,6 +851,17 @@ test "cmp returns eq for equal value" {
     try std.testing.expectEqual(std.math.Order.eq, HCD.initWithHD(1.0).cmp(HCD.initWithHD(1.0)));
 }
 
+test "cmpFast compares normalized operands" {
+    try std.testing.expectEqual(std.math.Order.gt, HCD.init(2.0, 0.0).cmpFast(HCD.init(1.0, 0.5)));
+}
+
 test "cmp compares low part when high parts match" {
     try std.testing.expectEqual(std.math.Order.gt, HCD.init(1.0, 1e-16).cmp(HCD.initWithHD(1.0)));
+}
+
+test "cmp renormalizes noncanonical operands" {
+    const a = HCD.init(1e16, 3.25);
+    const b = HCD.init(10000000000000004.0, -0.75);
+
+    try std.testing.expectEqual(std.math.Order.eq, a.cmp(b));
 }
