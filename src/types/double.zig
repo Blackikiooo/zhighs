@@ -351,10 +351,45 @@ pub const HCD = struct {
         return quickTwoSum(q1, q2);
     }
 
+    /// Divide by another HCD with one quotient correction.
+    /// Algorithm: fast double-double division: estimate `q1 = high / den.high`,
+    /// compute the expanded residual of `self - q1 * den`, then return
+    /// `quickTwoSum(q1, residual / den.high)`.
+    /// This is faster than `divideHCD`, but skips the second correction term.
+    /// Recommendation: use this explicitly in solver hot paths when one
+    /// correction is enough for the caller's tolerance; keep `divideHCD` as the
+    /// default when stability matters more than throughput.
+    /// Example: `const z = x.divideHCDFast(y);`
+    pub inline fn divideHCDFast(self: Self, o: HCD) HCD {
+        @setFloatMode(.strict);
+
+        var den = o;
+        if (den.high == 0.0) {
+            @branchHint(.unlikely);
+            den = den.renorm();
+            if (den.high == 0.0 and den.low == 0.0) {
+                return Self.initWithHD(self.toHD() / den.toHD());
+            }
+        }
+        if (den.low == 0.0) {
+            return self.divideHD(den.high);
+        }
+
+        const q1 = self.high / den.high;
+        const p1 = Self.twoProduct(q1, den.high);
+        const p2 = q1 * den.low;
+        const r1 = (((self.high - p1.high) - p1.low) + self.low) - p2;
+        const q2 = r1 / den.high;
+
+        return quickTwoSum(q1, q2);
+    }
+
     /// Divide by another HCD.
     /// Algorithm: two Newton-style quotient correction steps using expanded
     /// double-double residual arithmetic; renormalizes rare `o.high == 0`
     /// inputs and falls back to `divideHD` if `o.low = 0`.
+    /// Recommendation: use this as the default safe division path. In measured
+    /// hot paths with sufficient error budget, choose `divideHCDFast` manually.
     /// Example: `const z = x.divideHCD(y);`
     pub inline fn divideHCD(self: Self, o: HCD) HCD {
         @setFloatMode(.strict);
@@ -536,9 +571,20 @@ pub const HCD = struct {
 
     /// Divide by another HCD in place.
     /// Algorithm: assign `divideHCD(o)` back to `self`.
+    /// Recommendation: default assign path for stability; use
+    /// `divideHCDAssignFast` only when the hot path has enough error budget.
     /// Example: `x.divideHCDAssign(y);`
     pub inline fn divideHCDAssign(self: *Self, o: HCD) void {
         self.* = self.divideHCD(o);
+    }
+
+    /// Divide by another HCD in place with one quotient correction.
+    /// Algorithm: assign `divideHCDFast(o)` back to `self`.
+    /// Recommendation: hot-path assign variant; caller chooses it explicitly
+    /// when one correction is enough for the surrounding algorithm.
+    /// Example: `x.divideHCDAssignFast(y);`
+    pub inline fn divideHCDAssignFast(self: *Self, o: HCD) void {
+        self.* = self.divideHCDFast(o);
     }
 
     /// Compare two already-normalized HCD values.
@@ -912,6 +958,12 @@ test "divideHCD accounts for denominator low part" {
     try std.testing.expectEqual(@as(HD, 1.0000000000000002), res.toHD());
 }
 
+test "divideHCDFast accounts for denominator low part" {
+    const res = HCD.init(1.0, 3e-16).divideHCDFast(HCD.init(1.0, 1e-16));
+
+    try std.testing.expectEqual(@as(HD, 1.0000000000000002), res.toHD());
+}
+
 test "divideHCD handles negative divisor" {
     const res = HCD.init(4.0, 0.5).divideHCD(HCD.initWithHD(-2.0));
 
@@ -1109,6 +1161,14 @@ test "divideHCDAssign mutates receiver" {
     value.divideHCDAssign(HCD.initWithHD(2.0));
 
     try std.testing.expectEqual(@as(HD, 2.25), value.toHD());
+}
+
+test "divideHCDAssignFast mutates receiver" {
+    var value = HCD.init(1.0, 3e-16);
+
+    value.divideHCDAssignFast(HCD.init(1.0, 1e-16));
+
+    try std.testing.expectEqual(@as(HD, 1.0000000000000002), value.toHD());
 }
 
 test "cmp returns lt for smaller value" {

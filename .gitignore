@@ -2,5 +2,13 @@
 zig-cache/
 zig-out/
 *.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
 .codex
 .agents
+bench/**/*_bench
