@@ -9,7 +9,7 @@ const has_fma = switch (builtin.cpu.arch) {
     .x86, .x86_64 => builtin.cpu.has(.x86, .fma),
     // AArch64 / ARM32
     .aarch64 => builtin.cpu.has(.aarch64, .fp_armv8),
-    .arm => builtin.cpu.has(.arm, .fp_armv8),
+    .arm => builtin.cpu.hasAny(.arm, &.{ .fp_armv8, .vfp4 }),
     // RISC-V 带浮点扩展就有FMA
     .riscv64, .riscv32 => builtin.cpu.has(.riscv, .d),
     // PowerPC
@@ -50,7 +50,9 @@ pub const HCD = struct {
 
     /// Split one f64 into high and low parts.
     /// Algorithm: Dekker split with factor `2^27 + 1`; used by `twoProduct`
-    /// when hardware FMA is unavailable.
+    /// when hardware FMA is unavailable. Like most Dekker split routines, this
+    /// is intended for normal finite inputs; subnormal inputs may lose the
+    /// exact split property.
     /// Example: `const parts = HCD.split(1e16);`
     pub fn split(a: HD) Self {
         @setFloatMode(.strict);
@@ -183,6 +185,15 @@ pub const HCD = struct {
         return Self.init(sum.high, self.low + sum.low);
     }
 
+    /// Add one f64 without final renormalization when `self.high` dominates.
+    /// Algorithm: quick two-sum on `high + o`, then accumulate the residual.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.addHDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn addHDOrderedFast(self: Self, o: HD) HCD {
+        const sum = quickTwoSum(self.high, o);
+        return Self.init(sum.high, self.low + sum.low);
+    }
+
     /// Add one f64 and return a normalized result.
     /// Algorithm: `addHDFast(o).renorm()`; safer, but costs an extra `twoSum`.
     /// Example: `const y = x.addHD(1.0);`
@@ -190,11 +201,28 @@ pub const HCD = struct {
         return self.addHDFast(o).renorm();
     }
 
+    /// Add one f64 and return a normalized result when `self.high` dominates.
+    /// Algorithm: `addHDOrderedFast(o).renorm()`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `const y = x.addHDOrdered(delta);`
+    pub inline fn addHDOrdered(self: Self, o: HD) HCD {
+        return self.addHDOrderedFast(o).renorm();
+    }
+
     /// Add another HCD without final renormalization.
     /// Algorithm: `twoSum(high, o.high)` and accumulate both low parts.
     /// Example: `x.addHCDAssignFast(y); x.renormAssign();`
     pub inline fn addHCDFast(self: Self, o: HCD) HCD {
         const sum = twoSum(self.high, o.high);
+        return Self.init(sum.high, self.low + sum.low + o.low);
+    }
+
+    /// Add another HCD without final renormalization when `self.high` dominates.
+    /// Algorithm: quick two-sum on the high parts, then accumulate low parts.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.addHCDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn addHCDOrderedFast(self: Self, o: HCD) HCD {
+        const sum = quickTwoSum(self.high, o.high);
         return Self.init(sum.high, self.low + sum.low + o.low);
     }
 
@@ -206,6 +234,14 @@ pub const HCD = struct {
         return self.addHCDFast(o).renorm();
     }
 
+    /// Add another HCD and return a normalized result when `self.high` dominates.
+    /// Algorithm: `addHCDOrderedFast(o).renorm()`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `const z = x.addHCDOrdered(delta);`
+    pub inline fn addHCDOrdered(self: Self, o: HCD) HCD {
+        return self.addHCDOrderedFast(o).renorm();
+    }
+
     /// Subtract one f64 without final renormalization.
     /// Algorithm: `twoSum(high, -o)` and accumulate the residual into `low`.
     /// Example: `x.minusHDAssignFast(1.0); x.renormAssign();`
@@ -214,11 +250,28 @@ pub const HCD = struct {
         return Self.init(sum.high, self.low + sum.low);
     }
 
+    /// Subtract one f64 without final renormalization when `self.high` dominates.
+    /// Algorithm: quick two-sum on `high - o`, then accumulate the residual.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.minusHDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn minusHDOrderedFast(self: Self, o: HD) HCD {
+        const sum = quickTwoSum(self.high, -o);
+        return Self.init(sum.high, self.low + sum.low);
+    }
+
     /// Subtract one f64 and return a normalized result.
     /// Algorithm: `minusHDFast(o).renorm()`.
     /// Example: `const y = x.minusHD(1.0);`
     pub inline fn minusHD(self: Self, o: HD) HCD {
         return self.minusHDFast(o).renorm();
+    }
+
+    /// Subtract one f64 and return a normalized result when `self.high` dominates.
+    /// Algorithm: `minusHDOrderedFast(o).renorm()`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `const y = x.minusHDOrdered(delta);`
+    pub inline fn minusHDOrdered(self: Self, o: HD) HCD {
+        return self.minusHDOrderedFast(o).renorm();
     }
 
     /// Subtract another HCD without final renormalization.
@@ -230,11 +283,30 @@ pub const HCD = struct {
         return Self.init(sum.high, self.low + sum.low - o.low);
     }
 
+    /// Subtract another HCD without final renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: quick two-sum on the high parts, then accumulate low parts.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.minusHCDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn minusHCDOrderedFast(self: Self, o: HCD) HCD {
+        const sum = quickTwoSum(self.high, -o.high);
+        return Self.init(sum.high, self.low + sum.low - o.low);
+    }
+
     /// Subtract another HCD and return a normalized result.
     /// Algorithm: `minusHCDFast(o).renorm()`.
     /// Example: `const z = x.minusHCD(y);`
     pub inline fn minusHCD(self: Self, o: HCD) HCD {
         return self.minusHCDFast(o).renorm();
+    }
+
+    /// Subtract another HCD and return a normalized result when `self.high`
+    /// dominates.
+    /// Algorithm: `minusHCDOrderedFast(o).renorm()`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `const z = x.minusHCDOrdered(delta);`
+    pub inline fn minusHCDOrdered(self: Self, o: HCD) HCD {
+        return self.minusHCDOrderedFast(o).renorm();
     }
 
     /// Multiply by one f64.
@@ -327,6 +399,24 @@ pub const HCD = struct {
         self.* = self.addHDFast(o);
     }
 
+    /// Add one f64 in place with automatic renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `addHDOrdered(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.addHDOrderedAssign(delta);`
+    pub inline fn addHDOrderedAssign(self: *Self, o: HD) void {
+        self.* = self.addHDOrdered(o);
+    }
+
+    /// Add one f64 in place without final renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `addHDOrderedFast(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.addHDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn addHDOrderedAssignFast(self: *Self, o: HD) void {
+        self.* = self.addHDOrderedFast(o);
+    }
+
     /// Add another HCD in place with automatic renormalization.
     /// Algorithm: assign `addHCD(o)` back to `self`.
     /// Example: `x.addHCDAssign(y);`
@@ -339,6 +429,24 @@ pub const HCD = struct {
     /// Example: `x.addHCDAssignFast(y); x.renormAssign();`
     pub inline fn addHCDAssignFast(self: *Self, o: HCD) void {
         self.* = self.addHCDFast(o);
+    }
+
+    /// Add another HCD in place with automatic renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `addHCDOrdered(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.addHCDOrderedAssign(delta);`
+    pub inline fn addHCDOrderedAssign(self: *Self, o: HCD) void {
+        self.* = self.addHCDOrdered(o);
+    }
+
+    /// Add another HCD in place without final renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `addHCDOrderedFast(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.addHCDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn addHCDOrderedAssignFast(self: *Self, o: HCD) void {
+        self.* = self.addHCDOrderedFast(o);
     }
 
     /// Subtract one f64 in place with automatic renormalization.
@@ -355,6 +463,24 @@ pub const HCD = struct {
         self.* = self.minusHDFast(o);
     }
 
+    /// Subtract one f64 in place with automatic renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `minusHDOrdered(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.minusHDOrderedAssign(delta);`
+    pub inline fn minusHDOrderedAssign(self: *Self, o: HD) void {
+        self.* = self.minusHDOrdered(o);
+    }
+
+    /// Subtract one f64 in place without final renormalization when `self.high`
+    /// dominates.
+    /// Algorithm: assign `minusHDOrderedFast(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o)`.
+    /// Example: `x.minusHDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn minusHDOrderedAssignFast(self: *Self, o: HD) void {
+        self.* = self.minusHDOrderedFast(o);
+    }
+
     /// Subtract another HCD in place with automatic renormalization.
     /// Algorithm: assign `minusHCD(o)` back to `self`.
     /// Example: `x.minusHCDAssign(y);`
@@ -367,6 +493,24 @@ pub const HCD = struct {
     /// Example: `x.minusHCDAssignFast(y); x.renormAssign();`
     pub inline fn minusHCDAssignFast(self: *Self, o: HCD) void {
         self.* = self.minusHCDFast(o);
+    }
+
+    /// Subtract another HCD in place with automatic renormalization when
+    /// `self.high` dominates.
+    /// Algorithm: assign `minusHCDOrdered(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.minusHCDOrderedAssign(delta);`
+    pub inline fn minusHCDOrderedAssign(self: *Self, o: HCD) void {
+        self.* = self.minusHCDOrdered(o);
+    }
+
+    /// Subtract another HCD in place without final renormalization when
+    /// `self.high` dominates.
+    /// Algorithm: assign `minusHCDOrderedFast(o)` back to `self`.
+    /// Requires: `abs(self.high) >= abs(o.high)`.
+    /// Example: `x.minusHCDOrderedAssignFast(delta); x.renormAssign();`
+    pub inline fn minusHCDOrderedAssignFast(self: *Self, o: HCD) void {
+        self.* = self.minusHCDOrderedFast(o);
     }
 
     /// Multiply by one f64 in place.
@@ -527,6 +671,20 @@ test "addHDFast captures small addend in low" {
     try std.testing.expectEqual(@as(HD, 1.0), res.low);
 }
 
+test "addHDOrderedFast captures ordered small addend" {
+    const res = HCD.initWithHD(1e16).addHDOrderedFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 1.0), res.low);
+}
+
+test "addHDOrdered renormalizes ordered small addend" {
+    const res = HCD.init(1e16, 1.0).addHDOrdered(1.25);
+
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.25), res.low);
+}
+
 test "addHCD adds high and low parts" {
     const res = HCD.init(1e16, 1.0).addHCD(HCD.init(1.0, 0.25));
 
@@ -543,6 +701,20 @@ test "addHCDFast leaves renormalization to caller" {
 
 test "addHCDFast can be manually renormalized" {
     const res = HCD.init(1e16, 1.0).addHCDFast(HCD.init(1.0, 1.25)).renorm();
+
+    try std.testing.expectEqual(@as(HD, 10000000000000004.0), res.high);
+    try std.testing.expectEqual(@as(HD, -0.75), res.low);
+}
+
+test "addHCDOrderedFast leaves ordered renormalization to caller" {
+    const res = HCD.init(1e16, 1.0).addHCDOrderedFast(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, 2.25), res.low);
+}
+
+test "addHCDOrdered renormalizes ordered HCD addend" {
+    const res = HCD.init(1e16, 1.0).addHCDOrdered(HCD.init(1.0, 1.25));
 
     try std.testing.expectEqual(@as(HD, 10000000000000004.0), res.high);
     try std.testing.expectEqual(@as(HD, -0.75), res.low);
@@ -569,6 +741,20 @@ test "minusHDFast captures small subtrahend in low" {
     try std.testing.expectEqual(@as(HD, -1.0), res.low);
 }
 
+test "minusHDOrderedFast captures ordered small subtrahend" {
+    const res = HCD.initWithHD(1e16).minusHDOrderedFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -1.0), res.low);
+}
+
+test "minusHDOrdered renormalizes ordered small subtrahend" {
+    const res = HCD.init(1e16, 1.0).minusHDOrdered(1.25);
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
 test "minusHCD subtracts high and low parts" {
     const res = HCD.init(1e16, 1.0).minusHCD(HCD.init(1.0, 0.25));
 
@@ -581,6 +767,20 @@ test "minusHCDFast leaves renormalization to caller" {
 
     try std.testing.expectEqual(@as(HD, 1e16), res.high);
     try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
+test "minusHCDOrderedFast leaves ordered renormalization to caller" {
+    const res = HCD.init(1e16, 1.0).minusHCDOrderedFast(HCD.init(1.0, 0.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), res.high);
+    try std.testing.expectEqual(@as(HD, -0.25), res.low);
+}
+
+test "minusHCDOrdered renormalizes ordered HCD subtrahend" {
+    const res = HCD.init(1e16, 1.0).minusHCDOrdered(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 9999999999999998.0), res.high);
+    try std.testing.expectEqual(@as(HD, 0.75), res.low);
 }
 
 test "minusHCD handles high cancellation with larger low part" {
@@ -743,6 +943,24 @@ test "addHDAssignFast mutates receiver" {
     try std.testing.expectEqual(@as(HD, 1.0), value.low);
 }
 
+test "addHDOrderedAssign mutates and renormalizes receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHDOrderedAssign(1.25);
+
+    try std.testing.expectEqual(@as(HD, 10000000000000002.0), value.high);
+    try std.testing.expectEqual(@as(HD, 0.25), value.low);
+}
+
+test "addHDOrderedAssignFast leaves receiver unrenormalized" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHDOrderedAssignFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 2.0), value.low);
+}
+
 test "addHCDAssign mutates receiver" {
     var value = HCD.init(1e16, 1.0);
 
@@ -770,6 +988,24 @@ test "addHCDAssignFast leaves caller-controlled renormalization" {
     try std.testing.expectEqual(@as(HD, 3.25), value.low);
 }
 
+test "addHCDOrderedAssign mutates and renormalizes receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHCDOrderedAssign(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 10000000000000004.0), value.high);
+    try std.testing.expectEqual(@as(HD, -0.75), value.low);
+}
+
+test "addHCDOrderedAssignFast leaves receiver unrenormalized" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.addHCDOrderedAssignFast(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 3.25), value.low);
+}
+
 test "minusHDAssign mutates receiver" {
     var value = HCD.initWithHD(1e16);
 
@@ -788,6 +1024,24 @@ test "minusHDAssignFast mutates receiver" {
     try std.testing.expectEqual(@as(HD, -1.0), value.low);
 }
 
+test "minusHDOrderedAssign mutates and renormalizes receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHDOrderedAssign(1.25);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -0.25), value.low);
+}
+
+test "minusHDOrderedAssignFast leaves receiver unrenormalized" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHDOrderedAssignFast(1.0);
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, 0.0), value.low);
+}
+
 test "minusHCDAssign mutates receiver" {
     var value = HCD.init(1e16, 1.0);
 
@@ -804,6 +1058,24 @@ test "minusHCDAssignFast leaves caller-controlled renormalization" {
 
     try std.testing.expectEqual(@as(HD, 1e16), value.high);
     try std.testing.expectEqual(@as(HD, -0.25), value.low);
+}
+
+test "minusHCDOrderedAssign mutates and renormalizes receiver" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHCDOrderedAssign(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 9999999999999998.0), value.high);
+    try std.testing.expectEqual(@as(HD, 0.75), value.low);
+}
+
+test "minusHCDOrderedAssignFast leaves receiver unrenormalized" {
+    var value = HCD.init(1e16, 1.0);
+
+    value.minusHCDOrderedAssignFast(HCD.init(1.0, 1.25));
+
+    try std.testing.expectEqual(@as(HD, 1e16), value.high);
+    try std.testing.expectEqual(@as(HD, -1.25), value.low);
 }
 
 test "multiplyHDAssign includes low part" {
