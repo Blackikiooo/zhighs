@@ -1,8 +1,8 @@
 const std = @import("std");
-const Types = @import("types");
+const Foundation = @import("foundation");
 
-const HCD = Types.HCD;
-const HD = Types.HD;
+const HCD = Foundation.HCD;
+const HD = Foundation.HD;
 
 const n: usize = 4096;
 const repeats: usize = 20_000;

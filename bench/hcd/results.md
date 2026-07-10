@@ -1,6 +1,6 @@
 # HCD Benchmark Results
 
-This benchmark compares `src/types/double.zig` against the local HiGHS
+This benchmark compares `src/foundation/double.zig` against the local HiGHS
 `HighsCDouble` implementation at:
 
 `/home/godv/documents/codefiles/cppfiles/HiGHS/highs/util/HighsCDouble.h`
@@ -30,21 +30,13 @@ This benchmark compares `src/types/double.zig` against the local HiGHS
 ## Commands
 
 ```bash
-zig build-exe -O ReleaseFast \
-  -femit-bin=bench/hcd/zig_hcd_bench \
-  --cache-dir zig-cache \
-  --global-cache-dir /tmp/zhighs-zig-global-cache \
-  --dep types \
-  -Mroot=bench/hcd/hcd_bench.zig \
-  -Mtypes=src/types/root.zig
-
 g++ -O3 -march=native -DNDEBUG \
   -I/home/godv/documents/codefiles/cppfiles/HiGHS/highs \
   bench/hcd/highs_cdouble_bench.cpp \
   -o bench/hcd/highs_cdouble_bench
 
 bench/hcd/highs_cdouble_bench
-bench/hcd/zig_hcd_bench
+zig build bench-hcd -Doptimize=ReleaseFast
 ```
 
 ## Results

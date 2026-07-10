@@ -5,19 +5,19 @@ const HighsIntWidth = enum {
     w64,
 };
 
-pub const TypesBuild = struct {
+pub const FoundationBuild = struct {
     module: *std.Build.Module,
     test_step: *std.Build.Step,
 };
 
-pub const TypesBuildOptions = struct {
+pub const FoundationBuildOptions = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 };
 
-pub fn buildTypes(b: *std.Build, options: TypesBuildOptions) TypesBuild {
+pub fn buildFoundation(b: *std.Build, options: FoundationBuildOptions) FoundationBuild {
     const mod = b.createModule(.{
-        .root_source_file = b.path("src/types/root.zig"),
+        .root_source_file = b.path("src/foundation/root.zig"),
         .target = options.target,
         .optimize = options.optimize,
     });

@@ -1,11 +1,11 @@
 const std = @import("std");
-const buildTypes = @import("builds/types_build.zig").buildTypes;
+const buildFoundation = @import("build/foundation.zig").buildFoundation;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const types = buildTypes(b, .{
+    const foundation = buildFoundation(b, .{
         .target = target,
         .optimize = optimize,
     });
@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    mod.addImport("types", types.module);
+    mod.addImport("foundation", foundation.module);
 
     const exe = b.addExecutable(.{
         .name = "zhighs",
@@ -25,7 +25,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zhighs", .module = mod },
-                .{ .name = "types", .module = types.module },
             },
         }),
     });
@@ -59,7 +58,22 @@ pub fn build(b: *std.Build) void {
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(types.test_step);
+    test_step.dependOn(foundation.test_step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const hcd_bench = b.addExecutable(.{
+        .name = "hcd-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/hcd/hcd_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "foundation", .module = foundation.module },
+            },
+        }),
+    });
+    const run_hcd_bench = b.addRunArtifact(hcd_bench);
+    const hcd_bench_step = b.step("bench-hcd", "Run the HCD microbenchmark");
+    hcd_bench_step.dependOn(&run_hcd_bench.step);
 }
