@@ -43,6 +43,15 @@ fn IndexId(comptime kind_value: IndexKind) type {
 
             return @enumFromInt(value);
         }
+        /// Creates an identifier from the native unsigned HiGHS type,
+        /// assuming the value is valid.
+        pub inline fn initAssumeNotReserved(value: HUInt) IndexError!Self {
+            // std.debug.assert(value != none_raw);
+            _ = std.math.cast(usize, value) orelse
+                return IndexError.IndexOverflow;
+
+            return @enumFromInt(value);
+        }
 
         /// Converts an external, signed HiGHS index at an API boundary.
         pub inline fn fromHInt(value: HInt) IndexError!Self {
@@ -209,4 +218,53 @@ test "usize conversion checks configured integer width" {
             RowId.fromUsize(too_large),
         );
     }
+}
+
+test "zero round trips through all constructors" {
+    const direct = try RowId.init(0);
+    try std.testing.expectEqual(@as(HUInt, 0), direct.raw());
+    try std.testing.expectEqual(@as(usize, 0), direct.toUsize());
+
+    const from_hint = try RowId.fromHInt(0);
+    try std.testing.expectEqual(@as(HUInt, 0), from_hint.raw());
+
+    const from_usize = try RowId.fromUsize(@as(usize, 0));
+    try std.testing.expectEqual(@as(HUInt, 0), from_usize.raw());
+    try std.testing.expectEqual(@as(usize, 0), from_usize.toUsize());
+}
+
+test "maximum non-reserved value is accepted by init" {
+    if (comptime @bitSizeOf(HUInt) <= @bitSizeOf(usize)) {
+        const max_valid = none_raw - 1;
+        const row = try RowId.init(max_valid);
+        try std.testing.expectEqual(max_valid, row.raw());
+        try std.testing.expectEqual(@as(usize, max_valid), row.toUsize());
+    }
+}
+
+test "fromHInt maximum positive value" {
+    if (comptime @bitSizeOf(HInt) <= @bitSizeOf(usize)) {
+        const max_hint = std.math.maxInt(HInt);
+        const row = try RowId.fromHInt(max_hint);
+        try std.testing.expectEqual(@as(HUInt, @intCast(max_hint)), row.raw());
+    }
+}
+
+test "fromUsize rejects reserved maximum value" {
+    const max_huint = std.math.maxInt(HUInt);
+    const bounded = std.math.cast(usize, max_huint) orelse return;
+    try std.testing.expectError(
+        IndexError.ReservedIndex,
+        RowId.fromUsize(bounded),
+    );
+}
+
+test "compact optional round trips at maximum valid value" {
+    const max_valid = try RowId.init(none_raw - 1);
+    const wrapped = OptionalRowId.some(max_valid);
+
+    try std.testing.expect(wrapped.isSome());
+    try std.testing.expect(!wrapped.isNone());
+    try std.testing.expectEqual(max_valid, wrapped.get().?);
+    try std.testing.expectEqual(none_raw - 1, wrapped.raw());
 }
