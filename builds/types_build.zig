@@ -10,13 +10,16 @@ pub const TypesBuild = struct {
     test_step: *std.Build.Step,
 };
 
-pub fn buildTypes(
-    b: *std.Build,
+pub const TypesBuildOptions = struct {
     target: std.Build.ResolvedTarget,
-) TypesBuild {
+    optimize: std.builtin.OptimizeMode,
+};
+
+pub fn buildTypes(b: *std.Build, options: TypesBuildOptions) TypesBuild {
     const mod = b.createModule(.{
         .root_source_file = b.path("src/types/root.zig"),
-        .target = target,
+        .target = options.target,
+        .optimize = options.optimize,
     });
 
     const highs_int_width = b.option(HighsIntWidth, "highs-int-width", "Integer width for HighsInt: i32 or i64") orelse .w32;
