@@ -11,10 +11,6 @@
 - [x] 将基础类型迁移到 `src/foundation/`。
 - [x] 建立 `src/matrix/` 模块边界。
 - [x] 为当前目录和规划模块补充 README。
-- [x] 对照本地 HiGHS `dcc25308d8` 补齐全部核心模块骨架。
-- [x] 创建 solver、analysis、QP/IPM/PDLP、parallel 和 bindings 边界。
-- [x] 建立 HiGHS↔zhighs 功能文件对应表。
-- [x] 建立 HiGHS 模块组织与运行流程图解。
 
 验收命令：
 
@@ -26,7 +22,7 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 ## 1. 稀疏数据结构
 
-- [x] 定义基于 `HUInt` 的强类型 `RowId/ColId` 和零额外存储的 `OptionalRowId/OptionalColId`。
+- [ ] 定义强类型 `RowId` 和 `ColId`，集中实现 checked `Index -> usize`。
 - [ ] 实现 `SparseVector`。
 - [ ] 实现接受 triplet 的 `MatrixBuilder`。
 - [ ] 实现构建后冻结的规范 CSC：排序、合并重复项、删除显式零。
@@ -38,7 +34,7 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 ## 2. 模型与解
 
-- [x] 建立 `src/model/` 模块入口。
+- [ ] 建立 `src/model/`。
 - [ ] 定义目标方向、变量上下界、行上下界和变量类型。
 - [ ] 实现 `ModelBuilder -> Model` 验证和冻结流程。
 - [ ] 实现 `Solution`、`Basis`、求解状态和信息结构。
@@ -57,7 +53,7 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 ## 4. Revised Simplex 主线
 
-- [x] 建立 `src/nla/` 和 `src/lp/simplex/` 模块入口。
+- [ ] 建立 `src/nla/` 和 `src/lp/simplex/`。
 - [ ] 定义 factorization 接口和 dense LU 参考实现。
 - [ ] 实现 sparse LU、FTRAN/BTRAN 和 refactor。
 - [ ] 实现 crash basis 与 primal revised simplex。
@@ -81,8 +77,7 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 ## 6. SCIP 式组件框架
 
-- [x] 定义初始 `Stage` 和项目范围内的组件种类 `Kind`。
-- [ ] 建立 `Registry`、`Scheduler`、`Event` 和 `Services`。
+- [ ] 建立 `Stage`、`Registry`、`Scheduler`、`Event` 和 `Services`。
 - [ ] 定义统一插件生命周期和显式执行结果类型。
 - [ ] 实现 presolver、branching、heuristic 三类最小接口。
 - [ ] 添加 priority、frequency、max-depth 和 stage 合法性测试。
@@ -109,3 +104,4 @@ zig build bench-hcd -Doptimize=ReleaseFast
 - [ ] 更多 separator 与 constraint handler。
 - [ ] MPS/LP 文件读写。
 - [ ] PDLP、IPM、QP 和并行搜索。
+
