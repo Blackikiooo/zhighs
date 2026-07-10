@@ -4,6 +4,10 @@ const Int = @import("int.zig");
 const HInt = Int.HInt;
 const HUInt = Int.HUInt;
 
+const needs_huint_to_usize_check = @bitSizeOf(HUInt) > @bitSizeOf(usize);
+const needs_usize_to_huint_check = @bitSizeOf(usize) > @bitSizeOf(HUInt);
+const hint_fits_usize = @bitSizeOf(HInt) <= @bitSizeOf(usize);
+
 pub const IndexError = error{
     NegativeIndex,
     IndexOverflow,
@@ -38,17 +42,25 @@ fn IndexId(comptime kind_value: IndexKind) type {
         pub inline fn init(value: HUInt) IndexError!Self {
             if (value == none_raw) return IndexError.ReservedIndex;
 
-            _ = std.math.cast(usize, value) orelse
-                return IndexError.IndexOverflow;
+            if (comptime needs_huint_to_usize_check) {
+                _ = std.math.cast(usize, value) orelse
+                    return IndexError.IndexOverflow;
+            }
 
             return @enumFromInt(value);
         }
-        /// Creates an identifier from the native unsigned HiGHS type,
-        /// assuming the value is valid.
-        pub inline fn initAssumeNotReserved(value: HUInt) IndexError!Self {
-            // std.debug.assert(value != none_raw);
-            _ = std.math.cast(usize, value) orelse
-                return IndexError.IndexOverflow;
+
+        /// Creates an identifier without an error union for trusted hot paths.
+        ///
+        /// The caller guarantees that `value` is not reserved and fits in
+        /// `usize`. Debug builds assert these preconditions; ReleaseFast emits
+        /// only the enum conversion.
+        pub inline fn initAssumeValid(value: HUInt) Self {
+            std.debug.assert(value != none_raw);
+
+            if (comptime needs_huint_to_usize_check) {
+                std.debug.assert(std.math.cast(usize, value) != null);
+            }
 
             return @enumFromInt(value);
         }
@@ -60,12 +72,31 @@ fn IndexId(comptime kind_value: IndexKind) type {
             return init(@intCast(value));
         }
 
+        /// Converts a previously validated signed index without an error union.
+        pub inline fn fromHIntAssumeValid(value: HInt) Self {
+            std.debug.assert(value >= 0);
+            return initAssumeValid(@intCast(value));
+        }
+
         /// Converts a Zig memory index to the configured HiGHS index width.
         pub inline fn fromUsize(value: usize) IndexError!Self {
-            const raw_value = std.math.cast(HUInt, value) orelse
-                return IndexError.IndexOverflow;
+            const raw_value: HUInt =
+                if (comptime needs_usize_to_huint_check)
+                    std.math.cast(HUInt, value) orelse
+                        return IndexError.IndexOverflow
+                else
+                    @intCast(value);
 
             return init(raw_value);
+        }
+
+        /// Converts a previously validated slice index without an error union.
+        pub inline fn fromUsizeAssumeValid(value: usize) Self {
+            if (comptime needs_usize_to_huint_check) {
+                std.debug.assert(std.math.cast(HUInt, value) != null);
+            }
+
+            return initAssumeValid(@intCast(value));
         }
 
         pub inline fn raw(self: Self) HUInt {
@@ -165,6 +196,18 @@ test "signed and usize conversions round trip" {
     try std.testing.expectEqual(@as(usize, 9), col.toUsize());
 }
 
+test "trusted constructors return bare strongly typed identifiers" {
+    const direct: RowId = RowId.initAssumeValid(11);
+    const from_hint: RowId = RowId.fromHIntAssumeValid(12);
+    const from_usize: ColId = ColId.fromUsizeAssumeValid(13);
+
+    try std.testing.expectEqual(@as(HUInt, 11), direct.raw());
+    try std.testing.expectEqual(@as(HUInt, 12), from_hint.raw());
+    try std.testing.expectEqual(@as(HUInt, 13), from_usize.raw());
+    try std.testing.expect(@TypeOf(RowId.initAssumeValid(0)) == RowId);
+    try std.testing.expect(@TypeOf(ColId.fromUsizeAssumeValid(0)) == ColId);
+}
+
 test "maximum HUInt value is reserved for compact none" {
     try std.testing.expectError(
         IndexError.ReservedIndex,
@@ -211,7 +254,7 @@ test "compact optional identifiers have no storage overhead" {
 }
 
 test "usize conversion checks configured integer width" {
-    if (comptime @bitSizeOf(usize) > @bitSizeOf(HUInt)) {
+    if (comptime needs_usize_to_huint_check) {
         const too_large = @as(usize, std.math.maxInt(HUInt)) + 1;
         try std.testing.expectError(
             IndexError.IndexOverflow,
@@ -234,7 +277,7 @@ test "zero round trips through all constructors" {
 }
 
 test "maximum non-reserved value is accepted by init" {
-    if (comptime @bitSizeOf(HUInt) <= @bitSizeOf(usize)) {
+    if (comptime !needs_huint_to_usize_check) {
         const max_valid = none_raw - 1;
         const row = try RowId.init(max_valid);
         try std.testing.expectEqual(max_valid, row.raw());
@@ -243,7 +286,7 @@ test "maximum non-reserved value is accepted by init" {
 }
 
 test "fromHInt maximum positive value" {
-    if (comptime @bitSizeOf(HInt) <= @bitSizeOf(usize)) {
+    if (comptime hint_fits_usize) {
         const max_hint = std.math.maxInt(HInt);
         const row = try RowId.fromHInt(max_hint);
         try std.testing.expectEqual(@as(HUInt, @intCast(max_hint)), row.raw());
