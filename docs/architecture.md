@@ -68,6 +68,7 @@ flowchart TB
 - 输入经 `MatrixBuilder` 规范化后冻结为 CSC。
 - CSC 中索引有序、无重复项、无显式零。
 - CSR 是可重建视图，不与 CSC 同时作为可变权威数据。
+- `MatrixStore` 统一拥有 CSC、matrix revision 和按需 CSR cache；模型层只组合它，不重复实现缓存生命周期。
 - scaling、切片和算法工作区与基础存储分离。
 - MIP cuts 使用动态行存储，批量合并时才重建 relaxation 矩阵。
 

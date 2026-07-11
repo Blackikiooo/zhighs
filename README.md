@@ -85,9 +85,9 @@ zhighs/
 | 文件夹 | 职责 | 依赖约束 |
 |---|---|---|
 | `src/` | 所有可发布的库源码和 CLI 入口。 | 不放基准、生成文件或第三方源码。 |
-| `src/foundation/` | 基础整数类型、浮点与扩展精度数值、常量、容差、计时和内存辅助设施。当前包含 `HInt/HUInt/HD/HCD`。 | 只能依赖 Zig 标准库和构建配置，不能依赖模型或求解器。 |
-| `src/matrix/` | CSC/CSR、稀疏向量、矩阵构建器、矩阵视图和 scaling。当前只有模块入口。 | 可以依赖 `foundation`，不能依赖 LP、MIP 或插件。 |
-| `src/model/` | LP/MIP/QP 模型、Hessian、多目标、变量类型、解、basis、ray 和模型构建器。 | 依赖 `matrix/foundation`，不依赖具体求解算法。 |
+| `src/foundation/` | 基础整数类型、强类型 ID、紧凑 optional ID、浮点与扩展精度数值、常量、容差、计时和内存辅助设施。当前包含 `HInt/HUInt/RowId/ColId/HD/HCD`。 | 只能依赖 Zig 标准库和构建配置，不能依赖模型或求解器。 |
+| `src/matrix/` | 稀疏向量、MultiArrayList SoA 构建、权威 CSC、revision-aware CSR、乘加/HCD product、数值评估、范数、转置、切片、scaling、permutation、结构编辑、动态行和 `MatrixStore`。 | 可以依赖 `foundation`，不能依赖 LP、MIP 或插件。 |
+| `src/model/` | LP/MIP/QP 模型、Hessian、多目标、变量类型、解、basis、ray 和模型构建器。当前仅建立模块边界；不会用只有矩阵内容的结构冒充 `LpModel`。 | 依赖 `matrix/foundation`，不依赖具体求解算法。 |
 | `src/nla/` | 稠密/稀疏 LU、basis factorization、FTRAN/BTRAN、更新和奇异恢复。 | 依赖 `matrix/foundation`，不读取顶层 solver。 |
 | `src/lp/` | LP engine 的共同状态、结果与调用约定。 | 依赖 `model/nla`，供 solver 和 MIP relaxation 使用。 |
 | `src/lp/simplex/` | Primal/dual revised simplex、Phase I/II、pricing、ratio test、crash 和 warm start。 | 热循环保持静态调用，不依赖运行期插件。 |
@@ -123,8 +123,8 @@ zhighs/
 
 | 状态 | 模块 |
 |---|---|
-| 已实现 | `foundation` 中的 `HInt/HUInt/HD/HCD`、构建测试和 HCD 基准。 |
-| 骨架 | `matrix/model/nla/lp/simplex/presolve/analysis/mip/framework/plugin/solver/api/io/diagnostics`。 |
+| 已实现 | `foundation` 中的整数、强类型 ID、`HD/HCD`；`matrix` 中的稀疏向量、SoA 构建、CSC/CSR、MatrixStore、乘法、稳定范数、转置、切片、scaling、permutation、结构编辑、动态行和稀疏累加。 |
+| 骨架 | `matrix` 的 scaling 后续部分，以及 `model/nla/lp/simplex/presolve/analysis/mip/framework/plugin/solver/api/io/diagnostics`。 |
 | 延后骨架 | `ipm/pdlp/qp/parallel/bindings/plugins_builtin`。 |
 
 ## 与本地 HiGHS 的模块对应
@@ -187,8 +187,8 @@ HCD 与本机 HiGHS C++ 实现的对照环境及历史数据记录在
 
 ## 后续实现顺序
 
-1. 完成 `MatrixBuilder`、规范 CSC 和按需 CSR view。
-2. 完成 `Model`、`Solution`、`Basis` 和 KKT 检查。
+1. 创建真正包含目标方向、目标系数、行列上下界和变量类型的 `LpModelBuilder -> LpModel`。
+2. 完成顶层 `Model`、`Solution`、`Basis` 和 KKT 检查。
 3. 建立小规模 reference simplex，用 HiGHS C API 做差分测试。
 4. 实现 sparse factorization、primal/dual revised simplex 和 warm start。
 5. 实现可逆的 presolve/postsolve。

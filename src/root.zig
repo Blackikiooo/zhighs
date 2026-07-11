@@ -26,7 +26,6 @@ pub const HUInt = foundation.HUInt;
 pub const HD = foundation.HD;
 pub const HCD = foundation.HCD;
 pub const IndexError = foundation.IndexError;
-pub const OptionalId = foundation.OptionalId;
 pub const RowId = foundation.RowId;
 pub const ColId = foundation.ColId;
 pub const OptionalRowId = foundation.OptionalRowId;

@@ -1,8 +1,82 @@
 //! Sparse and dense matrix data structures.
 //!
-//! Matrix implementations will be exported from this module as they are added.
+//! Construction uses mutable SoA builders; solver kernels consume canonical,
+//! owning sparse vectors and CSC matrices.
 
 const std = @import("std");
+const sparse_vector = @import("sparse_vector.zig");
+const sparse_vector_builder = @import("sparse_vector_builder.zig");
+const csc = @import("csc.zig");
+const builder = @import("builder.zig");
+const csr_view = @import("csr_view.zig");
+const ops = @import("ops.zig");
+const transpose_module = @import("transpose.zig");
+const slice_module = @import("slice.zig");
+const scaling = @import("scaling.zig");
+const permutation = @import("permutation.zig");
+const edit = @import("edit.zig");
+const dynamic_rows = @import("dynamic_rows.zig");
+const store = @import("store.zig");
+const sparse_sum = @import("sparse_sum.zig");
+
+pub const SparseVectorError = sparse_vector.SparseVectorError;
+pub const SparseVectorView = sparse_vector.SparseVectorView;
+pub const SparseVector = sparse_vector.SparseVector;
+pub const SparseVectorBuilder = sparse_vector_builder.SparseVectorBuilder;
+pub const MatrixError = csc.MatrixError;
+pub const CscMatrix = csc.CscMatrix;
+pub const MatrixBuilder = builder.MatrixBuilder;
+pub const CsrView = csr_view.CsrView;
+pub const CsrCache = csr_view.CsrCache;
+pub const maxAbs = ops.maxAbs;
+pub const AbsoluteRange = ops.AbsoluteRange;
+pub const ValueAssessment = ops.ValueAssessment;
+pub const eql = ops.eql;
+pub const absoluteRange = ops.absoluteRange;
+pub const assessValues = ops.assessValues;
+pub const hasLargeValue = ops.hasLargeValue;
+pub const columnOneNorms = ops.columnOneNorms;
+pub const columnOneNormsAssumeValid = ops.columnOneNormsAssumeValid;
+pub const rowOneNorms = ops.rowOneNorms;
+pub const rowOneNormsAssumeValid = ops.rowOneNormsAssumeValid;
+pub const oneNorm = ops.oneNorm;
+pub const infinityNorm = ops.infinityNorm;
+pub const frobeniusNorm = ops.frobeniusNorm;
+pub const addProduct = ops.addProduct;
+pub const addProductAssumeValid = ops.addProductAssumeValid;
+pub const addTransposeProduct = ops.addTransposeProduct;
+pub const addTransposeProductAssumeValid = ops.addTransposeProductAssumeValid;
+pub const multiplyHighPrecision = ops.multiplyHighPrecision;
+pub const transposeMultiplyHighPrecision = ops.transposeMultiplyHighPrecision;
+pub const transpose = transpose_module.transpose;
+pub const transposeAssumeValid = transpose_module.transposeAssumeValid;
+pub const extractColumns = slice_module.extractColumns;
+pub const extractColumnsAssumeValid = slice_module.extractColumnsAssumeValid;
+pub const extractRows = slice_module.extractRows;
+pub const extractRowsAssumeValid = slice_module.extractRowsAssumeValid;
+pub const extractColumnRange = slice_module.extractColumnRange;
+pub const ScalingView = scaling.ScalingView;
+pub const applyScaling = scaling.apply;
+pub const applyScalingAssumeValid = scaling.applyAssumeValid;
+pub const removeScaling = scaling.remove;
+pub const removeScalingAssumeValid = scaling.removeAssumeValid;
+pub const computeMaxEquilibration = scaling.computeMaxEquilibration;
+pub const scaleColumn = scaling.scaleColumn;
+pub const scaleRow = scaling.scaleRow;
+pub const applyColumnFactors = scaling.applyColumnFactors;
+pub const applyRowFactors = scaling.applyRowFactors;
+pub const computePowerOfTwoColumnFactors = scaling.computePowerOfTwoColumnFactors;
+pub const computePowerOfTwoRowFactors = scaling.computePowerOfTwoRowFactors;
+pub const permute = permutation.permute;
+pub const permuteAssumeValid = permutation.permuteAssumeValid;
+pub const appendColumns = edit.appendColumns;
+pub const appendRows = edit.appendRows;
+pub const deleteColumns = edit.deleteColumns;
+pub const deleteRows = edit.deleteRows;
+pub const DynamicRowMatrix = dynamic_rows.DynamicRowMatrix;
+pub const MatrixStoreError = store.MatrixStoreError;
+pub const MatrixStore = store.MatrixStore;
+pub const SparseAccumulator = sparse_sum.SparseAccumulator;
 
 test {
     std.testing.refAllDecls(@This());

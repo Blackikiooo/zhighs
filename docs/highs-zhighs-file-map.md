@@ -22,7 +22,7 @@
 |---|---|---|---|
 | 顶层求解器对象 | `highs/Highs.h` | `src/api/root.zig`, `src/solver/root.zig` | 🧱 拆分公共 facade 与内部编排，避免形成单个上帝类。 |
 | 顶层对象核心实现 | `highs/lp_data/Highs.cpp` | `src/solver/solver.zig` | 📝 负责模型生命周期、presolve、求解、postsolve 和结果发布。 |
-| 模型修改和查询 API | `highs/lp_data/HighsInterface.cpp` | `src/api/solver.zig`, `src/model/builder.zig` | 📝 API 做参数检查，builder 负责模型变更。 |
+| 模型修改和查询 API | `highs/lp_data/HighsInterface.cpp` | `src/api/solver.zig`, `src/model/lp_model_builder.zig` | 📝 待真正的 LP 数据结构完成后实现；API 做参数检查，builder 负责模型变更。 |
 | LP 求解器路由 | `highs/lp_data/HighsSolve.h/.cpp` | `src/solver/solve_lp.zig` | 📝 在 Simplex、IPM、PDLP 和无约束快速路径之间选择。 |
 | LP 求解调用上下文 | `highs/lp_data/HighsLpSolverObject.h` | `src/lp/context.zig` | 📝 用显式 context 传递模型、basis、solution、info、options 和 timer。 |
 | API 返回状态 | `highs/lp_data/HighsStatus.h/.cpp` | `src/api/status.zig` | 📝 区分调用状态、模型状态、presolve/postsolve 状态。 |
@@ -53,22 +53,25 @@
 
 | 功能 | HiGHS C++ 文件 | zhighs Zig 文件 | 状态与说明 |
 |---|---|---|---|
-| LP 数据 | `highs/lp_data/HighsLp.h/.cpp` | `src/model/lp.zig` | 📝 目标、行列界、integrality、名称和基础矩阵。 |
-| 通用模型容器 | `highs/model/HighsModel.h/.cpp` | `src/model/model.zig` | 📝 组合 LP、Hessian 和多目标信息。 |
+| LP 数据 | `highs/lp_data/HighsLp.h/.cpp` | `src/model/lp_model.zig` | 📝 必须同时包含目标、行列界、integrality 和矩阵；尚未创建。 |
+| 通用模型容器 | `highs/model/HighsModel.h/.cpp` | `src/model/model.zig` | 📝 未来组合 `LpModel`、Hessian 和多目标；当前尚未创建，避免与 LP 数据结构混名。 |
 | Hessian | `HighsHessian.h/.cpp`, `HighsHessianUtils.*` | `src/model/hessian.zig` | 📝 只接受凸 QP 所需的规范存储。 |
 | 多线性目标 | `HighsLinearObjective`（`HStruct.h`） | `src/model/objective.zig` | 📝 保存 weight、priority 和容差。 |
 | 解结构 | `HighsSolution`（`HStruct.h`）, `HighsSolution.*` | `src/model/solution.zig` | 📝 primal/dual validity 和行列值分开表达。 |
 | Basis | `HighsBasis`（`HStruct.h`） | `src/model/basis.zig` | 📝 保存行列 basis status，不持有 factorization。 |
-| Scaling 数据 | `HighsScale`（`HStruct.h`） | `src/matrix/scaling.zig` | 📝 scaling 独立于权威矩阵。 |
+| Scaling 数据 | `HighsScale`（`HStruct.h`） | `src/matrix/scaling.zig` | ✅ 正因子校验、事务式应用/移除和 max equilibration。 |
 | 模型合法性检查 | `HighsLpUtils.*`, `HighsModelUtils.*` | `src/model/validate.zig` | 📝 builder freeze 时执行。 |
 | 半连续/半整数 reformulation | `HighsLpUtils.*`, `HighsLpMods` | `src/model/reformulation.zig` | 📝 形成可逆 transformation，不藏在顶层 run 内。 |
-| 稀疏矩阵 | `highs/util/HighsSparseMatrix.h/.cpp` | `src/matrix/csc.zig`, `src/matrix/csr_view.zig` | 🧱 `matrix` 入口已建；计划以 CSC 为权威、CSR 为缓存。 |
-| 矩阵构建 | `HighsSparseMatrix::addRows/addCols` 等 | `src/matrix/builder.zig` | 📝 triplet 输入后排序、合并、去零并冻结。 |
-| 矩阵切片 | `HighsMatrixSlice.h` | `src/matrix/view.zig` | 📝 使用借用 view，明确父矩阵生命周期。 |
-| 矩阵算法 | `HighsMatrixUtils.*` | `src/matrix/ops.zig` | 📝 `Ax`、`A^T y`、范数、转置和规范化。 |
-| Simplex 稀疏向量 | `HVector.h`, `HVectorBase.h/.cpp` | `src/matrix/sparse_vector.zig` | 📝 支持 dense values + active index 集合。 |
-| 稀疏向量和 | `HighsSparseVectorSum.h` | `src/matrix/sparse_sum.zig` | 📝 用于割、聚合和稀疏累加。 |
-| 动态 MIP 行矩阵 | `mip/HighsDynamicRowMatrix.*` | `src/mip/dynamic_rows.zig` | 📝 cuts 不直接修改基础 CSC。 |
+| 稀疏矩阵 | `highs/util/HighsSparseMatrix.h/.cpp` | `src/matrix/csc.zig`, `src/matrix/csr_view.zig` | ✅ 权威 CSC、列 view、`Ax/A^T y`，以及带 revision 失效检查的按需 CSR cache/view。 |
+| 矩阵构建 | `HighsSparseMatrix::addRows/addCols` 等 | `src/matrix/builder.zig` | ✅ SoA triplet 输入，按 `(col,row,ordinal)` 排序，稳定合并、去零并冻结为 CSC。 |
+| 规范稀疏行/列及构建 | `HighsMatrixSlice.h`、矩阵行列访问逻辑 | `src/matrix/sparse_vector.zig`, `sparse_vector_builder.zig` | ✅ sorted unique `(Id, f64)`、借用 view、合并重复和去零。 |
+| 矩阵算法 | `HighsMatrixUtils.*` | `src/matrix/ops.zig`, `transpose.zig`, `slice.zig`, `permutation.zig`, `edit.zig` | ✅ `Ax/A^T y`、稳定范数、转置、切片、置换及函数式结构编辑。 |
+| 矩阵乘加与高精度乘法 | `HighsSparseMatrix::alphaProductPlusY/productQuad/productTransposeQuad` | `src/matrix/ops.zig` | ✅ `y += alpha*A*x`、转置版本及基于 `HCD` 的高精度乘法。 |
+| 矩阵数值评估 | `HighsSparseMatrix::range/assessSmallValues/hasLargeValue` | `src/matrix/ops.zig` | ✅ 绝对值范围、small/large 计数和阈值查询；日志由上层 diagnostics 负责。 |
+| Simplex pricing 矩阵视图 | `createRowwisePartitioned`, `priceByRow/Column`, `collectAj`, `update` | `src/lp/simplex/pricing_matrix.zig` | 📝 依赖 basis partition、`HVector` 和 pricing 策略，不进入通用 matrix。 |
+| Simplex 稀疏工作向量 | `HVector.h`, `HVectorBase.h/.cpp` | `src/nla/sparse_work_vector.zig` | 📝 后续支持 dense values + active index 集合，不与矩阵切片混用。 |
+| 稀疏向量和 | `HighsSparseVectorSum.h` | `src/matrix/sparse_sum.zig` | ✅ dense value + generation mark + active ID，用于割、聚合和 O(1) 逻辑清空。 |
+| 动态 MIP 行矩阵 | `mip/HighsDynamicRowMatrix.*` | `src/matrix/dynamic_rows.zig` | ✅ append-only 连续行存储、checkpoint/rollback 和批量合并；cuts 不直接修改基础 CSC。 |
 
 ## 4. 数值线性代数与 Revised Simplex
 
@@ -155,7 +158,7 @@
 | Ranging | `HighsRanging.h/.cpp` | `src/analysis/ranging.zig` | 📝 依赖有效 simplex basis。 |
 | Ray/certificate | `Highs.cpp`, `HighsSolution.*`, `SimplexStruct.h` | `src/analysis/certificate.zig` | 📝 primal ray、dual ray 和 infeasibility certificate。 |
 | MPS | `io/FilereaderMps.*`, `HMPSIO.*`, `HMpsFF.*` | `src/io/mps.zig` | 🧱 I/O 入口已建。 |
-| LP 格式 | `io/FilereaderLp.*`, `io/filereaderlp/*` | `src/io/lp.zig` | 📝 parser 写入 `ModelBuilder`。 |
+| LP 格式 | `io/FilereaderLp.*`, `io/filereaderlp/*` | `src/io/lp.zig` | 📝 parser 写入 `LpModelBuilder`。 |
 | 文件读取分派 | `io/Filereader.*` | `src/io/reader.zig` | 📝 可通过 reader plugin 扩展。 |
 | 选项文件 | `io/LoadOptions.*` | `src/io/options.zig` | 📝 解析结果交给 typed options 校验。 |
 | 日志 | `io/HighsIO.*` | `src/diagnostics/logger.zig` | 🧱 diagnostics 入口已建。 |

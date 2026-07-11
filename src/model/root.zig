@@ -4,7 +4,6 @@
 //! names, solutions, bases, rays, and immutable model construction.
 
 const std = @import("std");
-
 test {
     std.testing.refAllDecls(@This());
 }

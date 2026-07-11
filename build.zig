@@ -76,4 +76,19 @@ pub fn build(b: *std.Build) void {
     const run_hcd_bench = b.addRunArtifact(hcd_bench);
     const hcd_bench_step = b.step("bench-hcd", "Run the HCD microbenchmark");
     hcd_bench_step.dependOn(&run_hcd_bench.step);
+
+    const matrix_bench = b.addExecutable(.{
+        .name = "matrix-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/matrix_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zhighs", .module = mod },
+            },
+        }),
+    });
+    const run_matrix_bench = b.addRunArtifact(matrix_bench);
+    const matrix_bench_step = b.step("bench-matrix", "Run sparse matrix microbenchmarks");
+    matrix_bench_step.dependOn(&run_matrix_bench.step);
 }
