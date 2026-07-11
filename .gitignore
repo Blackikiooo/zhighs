@@ -12,3 +12,4 @@ zig-out/
 .codex
 .agents
 bench/**/*_bench
+test/**/*_test
