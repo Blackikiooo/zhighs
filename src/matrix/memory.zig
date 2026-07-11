@@ -23,10 +23,22 @@ fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) v
         if (comptime volatile_stores) {
             const vptr: [*]volatile Vector = @ptrCast(@alignCast(remaining.ptr));
             var vi: usize = 0;
+            while (vi + 4 <= vn) : (vi += 4) {
+                vptr[vi] = zero;
+                vptr[vi + 1] = zero;
+                vptr[vi + 2] = zero;
+                vptr[vi + 3] = zero;
+            }
             while (vi < vn) : (vi += 1) vptr[vi] = zero;
         } else {
             const vptr: [*]Vector = @ptrCast(@alignCast(remaining.ptr));
             var vi: usize = 0;
+            while (vi + 4 <= vn) : (vi += 4) {
+                vptr[vi] = zero;
+                vptr[vi + 1] = zero;
+                vptr[vi + 2] = zero;
+                vptr[vi + 3] = zero;
+            }
             while (vi < vn) : (vi += 1) vptr[vi] = zero;
         }
         i += vn * 4;
@@ -40,6 +52,11 @@ fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) v
     } else {
         while (i < values.len) : (i += 1) values[i] = 0;
     }
+}
+
+/// Typed volatile SIMD clear for compact offset/index work arrays.
+pub inline fn clearTyped(comptime T: type, values: []T) void {
+    clearGeneric(T, values, true);
 }
 
 /// Explicit volatile SIMD vector stores for f64 arrays.

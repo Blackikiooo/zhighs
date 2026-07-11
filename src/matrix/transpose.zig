@@ -25,9 +25,9 @@ pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix)
     errdefer allocator.free(transposed_rows);
     const transposed_values = try allocator.alloc(f64, matrix.nnz());
     errdefer allocator.free(transposed_values);
-    const next = try allocator.alloc(usize, matrix.num_rows);
+    const next = try allocator.alloc(foundation.HUInt, matrix.num_rows);
     defer allocator.free(next);
-    try transposeIntoAssumeValid(&matrix, transposed_starts, transposed_rows, transposed_values, next);
+    try transposeIntoAssumeValid(matrix, transposed_starts, transposed_rows, transposed_values, next);
 
     return .{
         .num_rows = matrix.num_cols,
@@ -38,13 +38,14 @@ pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix)
     };
 }
 
-pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []usize) csc.MatrixError!void {
+pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     try matrix.validate();
-    return transposeIntoAssumeValid(&matrix, starts, rows, values, cursor_scratch);
+    if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
+    return transposeIntoAssumeValid(matrix, starts, rows, values, cursor_scratch);
 }
 
 /// Allocation-free explicit transpose into exact-size caller buffers.
-pub fn transposeIntoAssumeValid(matrix: *const csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []usize) csc.MatrixError!void {
+pub fn transposeIntoAssumeValid(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     if (starts.len != matrix.num_rows + 1 or rows.len != matrix.nnz() or
         values.len != matrix.nnz() or cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
@@ -52,15 +53,16 @@ pub fn transposeIntoAssumeValid(matrix: *const csc.CscMatrix, starts: []usize, r
     for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
     const next = cursor_scratch[0..matrix.num_rows];
-    @memcpy(next, starts[0..matrix.num_rows]);
+    for (next, starts[0..matrix.num_rows]) |*destination, start| destination.* = @intCast(start);
     for (0..matrix.num_cols) |source_col| {
         const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
         for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
+            const source_value = matrix.values[position];
             const target_col = matrix.row_indices[position].toUsize();
-            const destination = next[target_col];
-            rows[destination] = target_row;
-            values[destination] = matrix.values[position];
+            const destination: usize = @intCast(next[target_col]);
             next[target_col] += 1;
+            rows[destination] = target_row;
+            values[destination] = source_value;
         }
     }
 }

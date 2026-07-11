@@ -1,6 +1,6 @@
 //! Reusable sparse accumulator for row/column aggregation.
 //!
-//! Dense values provide O(1) updates; a soft sentinel tracks entries that
+//! Dense values provide O(1) updates; negative zero tracks entries that
 //! cancel to exactly zero; active IDs keep extraction proportional to the
 //! touched set. This design matches HiGHS HighsSparseVectorSum.
 //!
@@ -16,7 +16,19 @@ const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
 const memory = @import("memory.zig");
 
-const sentinel: f64 = std.math.floatMin(f64);
+// Positive zero means untouched. Negative zero is numerically zero but has a
+// distinct bit pattern, so it can mark an entry that was touched and then
+// cancelled without stealing any finite non-zero f64 value from callers.
+const sentinel: f64 = -0.0;
+const sentinel_bits: u64 = @bitCast(sentinel);
+
+inline fn isTouchedValue(value: f64) bool {
+    return @as(u64, @bitCast(value)) != 0;
+}
+
+inline fn isSentinel(value: f64) bool {
+    return @as(u64, @bitCast(value)) == sentinel_bits;
+}
 
 pub fn SparseAccumulator(comptime Id: type) type {
     const OwnedVector = sparse_vector.SparseVector(Id);
@@ -25,12 +37,16 @@ pub fn SparseAccumulator(comptime Id: type) type {
     return struct {
         dimension: usize,
         dense_values: []f64,
+        active_base_ptr: [*]Id = undefined,
         active_ptr: [*]Id = undefined,
         active_len: usize = 0,
         active_cap: usize = 0,
         alloc: std.mem.Allocator = undefined,
+        combined_storage: ?[]align(64) u8 = null,
+        active_separate: bool = true,
 
         const Self = @This();
+        const active_padding = @max(1, 64 / @sizeOf(Id));
 
         pub fn init(allocator: std.mem.Allocator, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
             if (dimension != 0) _ = Id.fromUsize(dimension - 1) catch return error.DimensionTooLarge;
@@ -39,23 +55,55 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return .{ .dimension = dimension, .dense_values = dense_values, .alloc = allocator };
         }
 
+        /// Constructs the dense values and active-ID capacity in one
+        /// cache-colored allocation. Prefer this when the touched-set upper
+        /// bound is known before entering a hot loop.
+        pub fn initWithCapacity(allocator: std.mem.Allocator, dimension: usize, touched_capacity: usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
+            if (dimension != 0) _ = Id.fromUsize(dimension - 1) catch return error.DimensionTooLarge;
+            const dense_bytes = std.math.mul(usize, dimension, @sizeOf(f64)) catch return error.DimensionTooLarge;
+            const active_bytes = std.math.mul(usize, touched_capacity, @sizeOf(Id)) catch return error.DimensionTooLarge;
+            const active_offset = std.mem.alignForward(usize, dense_bytes, 4096) + 64;
+            const storage_len = std.math.add(usize, active_offset, active_bytes) catch return error.DimensionTooLarge;
+            const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+            const dense_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr));
+            const active_ptr: [*]Id = @ptrCast(@alignCast(storage.ptr + active_offset));
+            const dense_values = dense_ptr[0..dimension];
+            memory.clearF64(dense_values);
+            return .{
+                .dimension = dimension,
+                .dense_values = dense_values,
+                .active_base_ptr = active_ptr,
+                .active_ptr = active_ptr,
+                .active_cap = touched_capacity,
+                .alloc = allocator,
+                .combined_storage = storage,
+                .active_separate = false,
+            };
+        }
+
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            allocator.free(self.dense_values);
-            if (self.active_cap > 0) allocator.free(self.active_ptr[0..self.active_cap]);
+            if (self.combined_storage) |storage| allocator.free(storage) else allocator.free(self.dense_values);
+            if (self.active_separate and self.active_cap > 0)
+                allocator.free(self.active_base_ptr[0 .. self.active_cap + active_padding]);
             self.* = undefined;
         }
 
-        pub inline fn touchedCount(self: Self) usize { return self.active_len; }
+        pub inline fn touchedCount(self: Self) usize {
+            return self.active_len;
+        }
 
         pub fn reserve(self: *Self, allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!void {
             if (cap > self.active_cap) {
-                const buf = try allocator.alloc(Id, cap);
+                const buf = try allocator.alloc(Id, cap + active_padding);
                 if (self.active_cap > 0) {
-                    @memcpy(buf[0..self.active_len], self.active_ptr[0..self.active_len]);
-                    allocator.free(self.active_ptr[0..self.active_cap]);
+                    @memcpy(buf[active_padding..][0..self.active_len], self.active_ptr[0..self.active_len]);
+                    if (self.active_separate)
+                        allocator.free(self.active_base_ptr[0 .. self.active_cap + active_padding]);
                 }
-                self.active_ptr = buf.ptr;
+                self.active_base_ptr = buf.ptr;
+                self.active_ptr = buf.ptr + active_padding;
                 self.active_cap = cap;
+                self.active_separate = true;
             }
         }
 
@@ -76,7 +124,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             if (!std.math.isFinite(value)) return error.NonFiniteValue;
             if (value == 0.0) return;
 
-            if (self.dense_values[index] != 0.0) {
+            if (isTouchedValue(self.dense_values[index])) {
                 const sum = self.dense_values[index] + value;
                 if (!std.math.isFinite(sum)) return error.NonFiniteValue;
                 self.dense_values[index] = if (sum == 0.0) sentinel else sum;
@@ -96,7 +144,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             if (value == 0.0) return;
             const index = id.toUsize();
             const dv = self.dense_values;
-            if (dv[index] != 0.0) {
+            if (isTouchedValue(dv[index])) {
                 dv[index] += value;
                 if (dv[index] == 0.0) dv[index] = sentinel;
             } else {
@@ -117,7 +165,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             const index = id.toUsize();
             std.debug.assert(index < self.dimension);
             const value = self.dense_values[index];
-            return if (value == 0.0 or value == sentinel) 0.0 else value;
+            return if (isSentinel(value)) 0.0 else value;
         }
 
         pub fn freeze(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!OwnedVector {
@@ -126,7 +174,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             std.sort.pdq(Id, slice, {}, lessThanId);
             var count: usize = 0;
             for (slice) |id| {
-                if (self.dense_values[@intFromEnum(id)] != sentinel and
+                if (!isSentinel(self.dense_values[@intFromEnum(id)]) and
                     @abs(self.dense_values[@intFromEnum(id)]) > zero_tolerance) count += 1;
             }
             const indices = try allocator.alloc(Id, count);
@@ -136,7 +184,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             var dst: usize = 0;
             for (slice) |id| {
                 const v = self.dense_values[@intFromEnum(id)];
-                if (v == sentinel or @abs(v) <= zero_tolerance) continue;
+                if (isSentinel(v) or @abs(v) <= zero_tolerance) continue;
                 indices[dst] = id;
                 vs[dst] = v;
                 dst += 1;
@@ -144,17 +192,22 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return .{ .dimension = self.dimension, .indices = indices, .values = vs };
         }
 
-        fn lessThanId(_: void, lhs: Id, rhs: Id) bool { return lhs.toUsize() < rhs.toUsize(); }
+        fn lessThanId(_: void, lhs: Id, rhs: Id) bool {
+            return lhs.toUsize() < rhs.toUsize();
+        }
 
         fn growActive(allocator: std.mem.Allocator, self: *Self) std.mem.Allocator.Error!void {
             const new_cap = @max(self.active_cap + 16, self.active_cap * 2);
-            const buf = try allocator.alloc(Id, new_cap);
+            const buf = try allocator.alloc(Id, new_cap + active_padding);
             if (self.active_cap > 0) {
-                @memcpy(buf[0..self.active_len], self.active_ptr[0..self.active_len]);
-                allocator.free(self.active_ptr[0..self.active_cap]);
+                @memcpy(buf[active_padding..][0..self.active_len], self.active_ptr[0..self.active_len]);
+                if (self.active_separate)
+                    allocator.free(self.active_base_ptr[0 .. self.active_cap + active_padding]);
             }
-            self.active_ptr = buf.ptr;
+            self.active_base_ptr = buf.ptr;
+            self.active_ptr = buf.ptr + active_padding;
             self.active_cap = new_cap;
+            self.active_separate = true;
         }
     };
 }
@@ -188,6 +241,19 @@ test "sparse accumulator handles sentinel and dense clear" {
     try std.testing.expectEqual(@as(f64, 7.0), sum.get(try foundation.RowId.init(0)));
     sum.clear();
     try std.testing.expectEqual(@as(f64, 0.0), sum.get(try foundation.RowId.init(0)));
+}
+
+test "sparse accumulator preserves the smallest positive normal value" {
+    const Accumulator = SparseAccumulator(foundation.RowId);
+    var sum = try Accumulator.init(std.testing.allocator, 1);
+    defer sum.deinit(std.testing.allocator);
+    const id = try foundation.RowId.init(0);
+    try sum.add(std.testing.allocator, id, std.math.floatMin(f64));
+    try std.testing.expectEqual(std.math.floatMin(f64), sum.get(id));
+    var vector = try sum.freeze(std.testing.allocator, 0.0);
+    defer vector.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), vector.nnz());
+    try std.testing.expectEqual(std.math.floatMin(f64), vector.values[0]);
 }
 
 test "sparse accumulator adds canonical vectors" {

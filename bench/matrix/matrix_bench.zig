@@ -7,9 +7,9 @@ const zhighs = @import("zhighs");
 const dimension: usize = 50_000;
 const nnz: usize = dimension * 3 - 2;
 const product_repeats: usize = 200;
-const quad_repeats: usize = 20;
-const transform_repeats: usize = 10;
-const accumulator_repeats: usize = 20;
+const quad_repeats: usize = 100;
+const transform_repeats: usize = 100;
+const accumulator_repeats: usize = 200;
 
 fn nowNs() i128 {
     var ts: std.posix.timespec = undefined;
@@ -33,7 +33,14 @@ fn checksum(values: []const f64) f64 {
 }
 
 inline fn clobber(values: []f64) void {
-    std.mem.doNotOptimizeAway(values.ptr);
+    clobberPtr(values.ptr);
+}
+
+inline fn clobberPtr(pointer: anytype) void {
+    asm volatile (""
+        :
+        : [pointer] "r" (pointer),
+        : .{ .memory = true });
 }
 
 fn fillSorted(builder: *zhighs.matrix.MatrixBuilder, allocator: std.mem.Allocator) !void {
@@ -67,32 +74,43 @@ pub fn main() !void {
     var matrix = try builder.freezeSortedAssumeValid(allocator, 0.0);
     defer matrix.deinit(allocator);
 
-    const cursor = try allocator.alloc(usize, dimension);
-    defer allocator.free(cursor);
+    const cursor_storage = try allocator.alloc(zhighs.HUInt, dimension + 48);
+    defer allocator.free(cursor_storage);
+    const cursor = cursor_storage[48..][0..dimension];
     var csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, cursor);
     defer csr_cache.deinit(allocator);
     const csr = csr_cache.viewAssumeCurrent();
-    const reusable_starts = try allocator.alloc(usize, dimension + 1);
-    defer allocator.free(reusable_starts);
-    const reusable_cols = try allocator.alloc(zhighs.ColId, nnz);
-    defer allocator.free(reusable_cols);
-    const reusable_rows = try allocator.alloc(zhighs.RowId, nnz);
-    defer allocator.free(reusable_rows);
-    const reusable_values = try allocator.alloc(f64, nnz);
-    defer allocator.free(reusable_values);
+    const csr_starts_storage = try allocator.alloc(zhighs.HUInt, dimension + 1 + 16);
+    defer allocator.free(csr_starts_storage);
+    const reusable_csr_starts = csr_starts_storage[16..][0 .. dimension + 1];
+    const transpose_starts_storage = try allocator.alloc(usize, dimension + 1 + 8);
+    defer allocator.free(transpose_starts_storage);
+    const reusable_transpose_starts = transpose_starts_storage[8..][0 .. dimension + 1];
+    const cols_storage = try allocator.alloc(zhighs.ColId, nnz + 32);
+    defer allocator.free(cols_storage);
+    const reusable_cols = cols_storage[32..][0..nnz];
+    const rows_storage = try allocator.alloc(zhighs.RowId, nnz + 16);
+    defer allocator.free(rows_storage);
+    const reusable_rows = rows_storage[16..][0..nnz];
+    const values_storage = try allocator.alloc(f64, nnz + 24);
+    defer allocator.free(values_storage);
+    const reusable_values = values_storage[24..][0..nnz];
 
-    const dense_x = try allocator.alloc(f64, dimension);
-    defer allocator.free(dense_x);
+    const dense_x_storage = try allocator.alloc(f64, dimension + 8);
+    defer allocator.free(dense_x_storage);
+    const dense_x = dense_x_storage[8..][0..dimension];
     const sparse_x = try allocator.alloc(f64, dimension);
     defer allocator.free(sparse_x);
     const sparse_ids = try allocator.alloc(zhighs.ColId, dimension / 20);
     defer allocator.free(sparse_ids);
     const sparse_values = try allocator.alloc(f64, dimension / 20);
     defer allocator.free(sparse_values);
-    const y = try allocator.alloc(f64, dimension);
-    defer allocator.free(y);
-    const hcd_scratch = try allocator.alloc(zhighs.HCD, dimension);
-    defer allocator.free(hcd_scratch);
+    const y_storage = try allocator.alloc(f64, dimension + 40);
+    defer allocator.free(y_storage);
+    const y = y_storage[40..][0..dimension];
+    const hcd_storage = try allocator.alloc(zhighs.HCD, dimension + 12);
+    defer allocator.free(hcd_storage);
+    const hcd_scratch = hcd_storage[12..][0..dimension];
     const row_scale = try allocator.alloc(f64, dimension);
     defer allocator.free(row_scale);
     const col_scale = try allocator.alloc(f64, dimension);
@@ -229,30 +247,30 @@ pub fn main() !void {
     start = nowNs();
     for (0..transform_repeats) |revision| {
         var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, revision, cursor);
-        std.mem.doNotOptimizeAway(cache.values.ptr);
+        clobberPtr(cache.values.ptr);
         cache.deinit(allocator);
     }
     report("csc_to_csr_scratch", transform_repeats, start, matrix.values[0]);
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.fillCsrFromCscAssumeValid(&matrix, reusable_starts, reusable_cols, reusable_values, cursor);
-        std.mem.doNotOptimizeAway(reusable_values.ptr);
+        try zhighs.matrix.fillCsrFromCscAssumeValid(matrix, reusable_csr_starts, reusable_cols, reusable_values, cursor);
+        clobberPtr(reusable_values.ptr);
     }
     report("csc_to_csr_into", transform_repeats, start, reusable_values[0]);
 
     start = nowNs();
     for (0..transform_repeats) |_| {
         var transposed = try zhighs.matrix.transposeAssumeValid(allocator, matrix);
-        std.mem.doNotOptimizeAway(transposed.values.ptr);
+        clobberPtr(transposed.values.ptr);
         transposed.deinit(allocator);
     }
     report("transpose", transform_repeats, start, matrix.values[0]);
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.transposeIntoAssumeValid(&matrix, reusable_starts, reusable_rows, reusable_values, cursor);
-        std.mem.doNotOptimizeAway(reusable_values.ptr);
+        try zhighs.matrix.transposeIntoAssumeValid(matrix, reusable_transpose_starts, reusable_rows, reusable_values, cursor);
+        clobberPtr(reusable_values.ptr);
     }
     report("transpose_into", transform_repeats, start, reusable_values[0]);
 
@@ -274,9 +292,8 @@ pub fn main() !void {
     report("builder_freeze_general", 1, start, general_checksum);
     general_matrix.deinit(allocator);
 
-    var accumulator = try zhighs.matrix.SparseAccumulator(zhighs.RowId).init(allocator, dimension);
+    var accumulator = try zhighs.matrix.SparseAccumulator(zhighs.RowId).initWithCapacity(allocator, dimension, dimension);
     defer accumulator.deinit(allocator);
-    try accumulator.reserve(allocator, dimension);
     start = nowNs();
     for (0..accumulator_repeats) |_| {
         accumulator.clear();
@@ -285,7 +302,7 @@ pub fn main() !void {
             accumulator.addAssumeValid(id, 1.0);
             accumulator.addAssumeValid(id, -0.5);
         }
-        std.mem.doNotOptimizeAway(&accumulator);
+        clobberPtr(&accumulator);
     }
     result_checksum = accumulator.get(zhighs.RowId.fromUsizeAssumeValid(dimension / 2));
     report("sparse_accumulate", accumulator_repeats, start, result_checksum);

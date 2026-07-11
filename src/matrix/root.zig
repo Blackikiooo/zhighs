@@ -19,7 +19,6 @@ const dynamic_rows = @import("dynamic_rows.zig");
 const store = @import("store.zig");
 const sparse_sum = @import("sparse_sum.zig");
 const memory = @import("memory.zig");
-const asm_kernels = @import("asm/root.zig");
 
 pub const SparseVectorError = sparse_vector.SparseVectorError;
 pub const SparseVectorView = sparse_vector.SparseVectorView;

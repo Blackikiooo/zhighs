@@ -29,7 +29,6 @@ pub fn apply(matrix: *csc.CscMatrix, factors: ScalingView) csc.MatrixError!void 
 
 /// Hot path for validated factors whose products are known representable.
 pub fn applyAssumeValid(matrix: *csc.CscMatrix, factors: ScalingView) void {
-    @setFloatMode(.optimized);
     const ncol = matrix.num_cols;
     const starts = matrix.col_starts;
     const ri = matrix.row_indices;

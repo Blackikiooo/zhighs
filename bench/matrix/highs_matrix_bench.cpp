@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <vector>
 
@@ -12,9 +13,9 @@ namespace {
 constexpr HighsInt kDimension = 50000;
 constexpr HighsInt kNnz = 3 * kDimension - 2;
 constexpr int kProductRepeats = 200;
-constexpr int kQuadRepeats = 20;
-constexpr int kTransformRepeats = 10;
-constexpr int kAccumulatorRepeats = 20;
+constexpr int kQuadRepeats = 100;
+constexpr int kTransformRepeats = 100;
+constexpr int kAccumulatorRepeats = 200;
 
 using Clock = std::chrono::steady_clock;
 
@@ -131,7 +132,24 @@ HighsSparseMatrix transposeCsc(const HighsSparseMatrix& matrix) {
   return result;
 }
 
-HighsSparseMatrix buildFromSorted(const std::vector<Triplet>& triplets) {
+// Same semantics as MatrixBuilder.freezeSortedAssumeValid: sorted coordinates
+// may still contain duplicates, non-finite sums are rejected, and exact zeros
+// are removed before canonical CSC storage is allocated.
+HighsSparseMatrix buildFromSorted(std::vector<Triplet>& triplets) {
+  size_t read = 0;
+  size_t write = 0;
+  while (read < triplets.size()) {
+    Triplet entry = triplets[read++];
+    double sum = entry.value;
+    while (read < triplets.size() && triplets[read].row == entry.row &&
+           triplets[read].col == entry.col)
+      sum += triplets[read++].value;
+    if (!std::isfinite(sum)) std::abort();
+    if (sum == 0.0) continue;
+    entry.value = sum;
+    triplets[write++] = entry;
+  }
+  triplets.resize(write);
   HighsSparseMatrix result;
   result.format_ = MatrixFormat::kColwise;
   result.num_row_ = kDimension;

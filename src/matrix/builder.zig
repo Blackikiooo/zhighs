@@ -130,12 +130,11 @@ pub const MatrixBuilder = struct {
         // Allocate col_starts before the merge loop so counting can be done
         // during the single pass (eliminates a separate O(nnz) counting pass).
         const col_starts = try allocator.alloc(usize, self.num_cols + 1);
-        errdefer allocator.free(col_starts);
+        defer allocator.free(col_starts);
         @memset(col_starts, 0);
 
         // Merge in place. Read positions never trail the write position, so no
         // temporary triplet allocation is needed after sorting.
-        @setFloatMode(.optimized);
         var read: usize = 0;
         var write: usize = 0;
         while (read < length) {
@@ -159,23 +158,44 @@ pub const MatrixBuilder = struct {
         const compact_rows = fields.items(.row);
         const compact_values = fields.items(.value);
 
-        // Allocate each output stream transactionally. Separate errdefer guards
-        // make every allocation-failure point leak- and double-free-safe.
-        const row_indices = try allocator.dupe(RowId, compact_rows);
-        errdefer allocator.free(row_indices);
-        const output_values = try allocator.dupe(f64, compact_values);
-        errdefer allocator.free(output_values);
-
         // Prefix-sum raw counts into CSC offsets (counting was done during merge).
         const ncol = self.num_cols;
         var c: usize = 0;
         while (c < ncol) : (c += 1) col_starts[c + 1] += col_starts[c];
+
+        // Store all canonical streams in one allocation at distinct page
+        // colors. This removes two allocator calls and prevents common slab
+        // allocators from giving values/indices identical 4 KiB offsets.
+        const starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
+        const rows_bytes = std.math.mul(usize, write, @sizeOf(RowId)) catch return error.DimensionTooLarge;
+        const values_bytes = std.math.mul(usize, write, @sizeOf(f64)) catch return error.DimensionTooLarge;
+        const compact_starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const compact_starts_offset = std.mem.alignForward(usize, starts_bytes, 4096) + 64;
+        const rows_offset = std.mem.alignForward(usize, compact_starts_offset + compact_starts_bytes, 4096) + 128;
+        const values_offset = std.mem.alignForward(usize, rows_offset + rows_bytes, 4096) + 192;
+        const storage_len = std.math.add(usize, values_offset, values_bytes) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        errdefer allocator.free(storage);
+        const output_starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr));
+        const compact_starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + compact_starts_offset));
+        const output_rows_ptr: [*]RowId = @ptrCast(@alignCast(storage.ptr + rows_offset));
+        const output_values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + values_offset));
+        const output_starts = output_starts_ptr[0 .. self.num_cols + 1];
+        const compact_starts = compact_starts_ptr[0 .. self.num_cols + 1];
+        const row_indices = output_rows_ptr[0..write];
+        const output_values = output_values_ptr[0..write];
+        @memcpy(output_starts, col_starts);
+        for (compact_starts, col_starts) |*destination, start| destination.* = @intCast(start);
+        @memcpy(row_indices, compact_rows);
+        @memcpy(output_values, compact_values);
         return .{
             .num_rows = self.num_rows,
             .num_cols = self.num_cols,
-            .col_starts = col_starts,
+            .col_starts = output_starts,
             .row_indices = row_indices,
             .values = output_values,
+            .storage = storage,
+            .compact_col_starts = compact_starts,
         };
     }
 

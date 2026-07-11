@@ -602,6 +602,8 @@ ns/repeat。(C++ / Zig - 1)：正数 = Zig 更快。
 
 **迭代 9 关键提升**：● sparse accumulator `perf` 分析发现 `@memset` 被编译为 `compiler_rt.memset` 逐字节清零（占 58% 时间），改用 volatile SIMD 向量存储后从落后 C++ 20.7% 到 **领先 46.6%**（+67.3pp）● clear_output 从落后 42.5% 到领先 6.4%（同样得益于 volatile SIMD memset 替代）● alpha_ax_plus_y 和 scaling 因间接消除 memset 瓶颈也各有提升
 
+**迭代 10 关键提升**（Codex 修整后）：sparse accumulator 进一步从 **+46.6% → +98.4%**（-0.0 sentinel、位级 isTouchedValue、合并存储等）；csc_ax_dense 从 +32.1% → **+51.7%**；transpose_into 从 -48.5% → **+2.4%**。CSR A^T x 因 `row_starts` 改为 `foundation.HUInt` 导致 asm 内核未适配，从 +49.3% 降至 +4.3%。
+
 ## 14. 迭代 8：Sparse Accumulator 内联 + 扁平化
 
 ### 变更背景
@@ -820,8 +822,57 @@ ns/repeat。11 轮 pinned CPU 2，ReleaseFast -Dcpu=native。
 | 迭代 7b | asm CSC→CSR scatter（失败回退） | 引发退化，回退到纯 Zig |
 | 迭代 8 | inline + 扁平化 sparse accumulator | acc 中位 -33.5%，方差 -97.6% |
 | **迭代 9** | **volatile SIMD 替代 `@memset`（perf 驱动）** | **acc -20.7% → +46.6%（+67pp）** |
+| **迭代 10** | **Codex 修整：sentinel=-0.0、HUInt 类型、`@mulAdd`、合并存储等** | **acc +46.6% → +98.4%（+52pp）；csc_ax +32%→+52%** |
 
-## 16. 复现
+## 17. 迭代 10：Codex 修整（负零 sentinel、HUInt 类型、@mulAdd 等）
+
+### 变更内容
+
+Codex 对下午的优化进行了综合修缮，主要变更包括：
+
+- `sparse_sum.zig`：sentinel 从 `floatMin(f64)` 改为 `-0.0`，使用 `@bitCast` 位级 `isTouchedValue`/`isSentinel` 检查；新增 `initWithCapacity` 合并分配 dense_values + active 为单一缓存友好存储块
+- `csr_view.zig`：`row_starts` 类型从 `[]const usize` 改为 `[]const foundation.HUInt`（32-bit）；`multiplyAssumeValid`/`transposeMultiplyAssumeValid` 改用 `@mulAdd` 替代 `+`/`*`
+- `csr_cache.zig` 等适配 `foundation.HUInt` 类型
+- `CscMatrix` 等改 `*const Self` 传参
+
+### 结果（11 轮最佳 vs 迭代 9）
+
+| Kernel | Iter9 最佳 (ns) | **Iter10 最佳 (ns)** | C++ (ns) | vs C++ | 变化 |
+|---|---:|---:|---:|:---|---:|
+| sparse_accumulate | 97,085 | **69,852** | 138,583 | **+98.4%** ✅ | **-28.1%** |
+| CSC Ax dense | 146,500 | **123,794** | 187,821 | **+51.7%** ✅ | -15.5% |
+| CSC A^T x | 107,326 | **89,767** | 138,631 | **+54.4%** ✅ | -16.4% |
+| product_quad | 277,138 | **242,854** | 367,774 | **+51.4%** ✅ | -12.4% |
+| transpose_into | 745,151 | **412,858** | 422,694 | **+2.4%** ✅ | **-44.6%** |
+| CSR Ax dense | 146,576 | **138,524** | 138,359 | -0.1% | -5.5% |
+| CSR A^T x | 128,577 | **179,024** | 186,640 | +4.3% ✅ | +39.2% ⚠️ |
+| clear_output | 3,629 | **3,674** | 3,722 | +1.3% ✅ | +1.2% |
+| alpha*A*x+y | 128,548 | **144,086** | 181,161 | **+25.7%** ✅ | +12.1% |
+| scaling | 112,400 | **116,993** | 149,495 | **+27.8%** ✅ | +4.1% |
+| CSC→CSR into | 658,863 | **595,927** | 454,549 | -23.7% | -9.6% |
+| builder sorted | 945,044 | **1,081,839** | 923,950 | -14.6% | +14.5% |
+| builder general | 2,096,046 | **2,096,381** | 3,433,282 | **+63.8%** ✅ | +0.0% |
+
+> ⚠️ CSR A^T x 从 +49.3% 降至 +4.3%，因为 `row_starts` 类型改为 `foundation.HUInt`（u32），asm 内核的 `csrTransposeMultiply` 不再适配，回退到纯 Zig 路径。需后续适配 asm 内核以支持 HUInt 类型。
+
+### 当前领先状态（迭代 10）
+
+**领先 C++ 的内核：**
+- sparse_accumulator **+98.4%** ✅（最大领先）
+- csc_atx_dense **+54.4%** ✅
+- csc_ax_dense **+51.7%** ✅
+- product_quad **+51.4%** ✅
+- builder_general **+63.8%** ✅
+- alpha_ax_plus_y **+25.7%** ✅
+- apply_scale **+27.8%** ✅
+- clear_output **+1.3%** ✅
+- transpose_into **+2.4%** ✅
+- csr_atx_dense **+4.3%** ✅
+
+**仍有差距：**
+- CSR Ax dense（-0.1%）基本持平
+- CSC→CSR into（-23.7%）
+- builder_freeze_sorted（-14.6%）
 
 脚本会重新构建 HiGHS、Zig benchmark 和 C++ harness，并把每轮原始 CSV 写到临时目录：
 

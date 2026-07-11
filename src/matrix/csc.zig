@@ -43,6 +43,8 @@ pub const CscMatrix = struct {
     col_starts: []usize,
     row_indices: []RowId,
     values: []f64,
+    storage: ?[]align(64) u8 = null,
+    compact_col_starts: ?[]foundation.HUInt = null,
 
     const Self = @This();
 
@@ -65,9 +67,13 @@ pub const CscMatrix = struct {
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.col_starts);
-        allocator.free(self.row_indices);
-        allocator.free(self.values);
+        if (self.storage) |storage| {
+            allocator.free(storage);
+        } else {
+            allocator.free(self.col_starts);
+            allocator.free(self.row_indices);
+            allocator.free(self.values);
+        }
         self.* = undefined;
     }
 
@@ -125,14 +131,13 @@ pub const CscMatrix = struct {
     }
 
     /// Computes y = A * x, checking only vector dimensions.
-    pub fn multiply(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn multiply(self: Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplyAssumeValid(x, y);
     }
 
     /// Dense-vector hot path: branchless traversal after clearing y.
-    pub fn multiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
-        @setFloatMode(.optimized);
+    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
         const starts = self.col_starts;
         const ri = self.row_indices;
@@ -145,52 +150,68 @@ pub const CscMatrix = struct {
             const end = starts[col + 1];
             while (pos < end) : (pos += 1) {
                 const row = ri[pos].toUsize();
-                y[row] += vs[pos] * x_value;
+                y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
             }
         }
     }
 
-    pub fn multiplySkippingZeros(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn multiplySkippingZeros(self: Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplySkippingZerosAssumeValid(x, y);
     }
 
     /// Prefer this over the branchless kernel only when x contains enough exact
     /// zeros to compensate for one branch per matrix column.
-    pub fn multiplySkippingZerosAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
-        @setFloatMode(.optimized);
+    pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
         const starts = self.col_starts;
         const ri = self.row_indices;
         const vs = self.values;
         memory.clearF64(y);
         var col: usize = 0;
+        while (col + 8 <= ncol) : (col += 8) {
+            inline for (0..8) |offset| {
+                const current_col = col + offset;
+                const x_value = x[current_col];
+                if ((@as(u64, @bitCast(x_value)) << 1) != 0) {
+                    var pos = starts[current_col];
+                    const end = starts[current_col + 1];
+                    while (pos < end) : (pos += 1) {
+                        const row = ri[pos].toUsize();
+                        y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
+                    }
+                }
+            }
+        }
         while (col < ncol) : (col += 1) {
             const x_value = x[col];
-            if (x_value == 0.0) continue;
+            // Bitwise +/-zero detection avoids the ordered/unordered double
+            // branch emitted for a floating comparison while preserving NaN
+            // behavior (every NaN remains non-zero and is processed).
+            if ((@as(u64, @bitCast(x_value)) << 1) == 0) continue;
             var pos = starts[col];
             const end = starts[col + 1];
             while (pos < end) : (pos += 1) {
                 const row = ri[pos].toUsize();
-                y[row] += vs[pos] * x_value;
+                y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
             }
         }
     }
 
     /// Checked Ax for a genuinely sparse input vector. Unlike scanning a dense
     /// slice for zeros, work is proportional to active columns plus output clear.
-    pub fn multiplySparse(self: *const Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+    pub fn multiplySparse(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
         if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         try x.validate();
         self.multiplySparseAssumeValid(x, y);
     }
 
-    pub fn multiplySparseAssumeValid(self: *const Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+    pub fn multiplySparseAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
         memory.clearF64(y);
         self.addSparseProductAssumeValid(x, y);
     }
 
-    pub fn addSparseProduct(self: *const Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+    pub fn addSparseProduct(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
         if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         try x.validate();
         self.addSparseProductAssumeValid(x, y);
@@ -198,31 +219,45 @@ pub const CscMatrix = struct {
 
     /// Accumulates y += A*x for sparse x without clearing y. This is the hot
     /// path when the caller already owns a zeroed/generation-marked workspace.
-    pub fn addSparseProductAssumeValid(self: *const Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
-        @setFloatMode(.optimized);
-        const starts = self.col_starts;
+    pub fn addSparseProductAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
         const ri = self.row_indices;
         const vs = self.values;
-        for (x.indices, x.values) |col_id, multiplier| {
-            const col = col_id.toUsize();
+        if (self.compact_col_starts) |starts| {
+            var active: usize = 0;
+            while (active < x.indices.len) : (active += 1) {
+                const col: usize = @intFromEnum(x.indices[active]);
+                const multiplier = x.values[active];
+                var pos: usize = @intCast(starts[col]);
+                const end: usize = @intCast(starts[col + 1]);
+                while (pos < end) : (pos += 1) {
+                    const row = ri[pos].toUsize();
+                    y[row] = @mulAdd(f64, vs[pos], multiplier, y[row]);
+                }
+            }
+            return;
+        }
+        const starts = self.col_starts;
+        var active: usize = 0;
+        while (active < x.indices.len) : (active += 1) {
+            const col: usize = @intFromEnum(x.indices[active]);
+            const multiplier = x.values[active];
             var pos = starts[col];
             const end = starts[col + 1];
             while (pos < end) : (pos += 1) {
                 const row = ri[pos].toUsize();
-                y[row] += vs[pos] * multiplier;
+                y[row] = @mulAdd(f64, vs[pos], multiplier, y[row]);
             }
         }
     }
 
     /// Computes y = transpose(A) * x, checking only vector dimensions.
-    pub fn transposeMultiply(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
         self.transposeMultiplyAssumeValid(x, y);
     }
 
     /// Hot-path transpose multiply with prevalidated dimensions and structure.
-    pub fn transposeMultiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
-        @setFloatMode(.optimized);
+    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
         const starts = self.col_starts;
         const ri = self.row_indices;
@@ -233,7 +268,7 @@ pub const CscMatrix = struct {
             var pos = starts[col];
             const end = starts[col + 1];
             while (pos < end) : (pos += 1)
-                sum += vs[pos] * x[ri[pos].toUsize()];
+                sum = @mulAdd(f64, vs[pos], x[ri[pos].toUsize()], sum);
             y[col] = sum;
         }
     }

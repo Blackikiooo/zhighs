@@ -18,7 +18,7 @@ const ColId = foundation.ColId;
 pub const CsrView = struct {
     num_rows: usize,
     num_cols: usize,
-    row_starts: []const usize,
+    row_starts: []const foundation.HUInt,
     col_indices: []const ColId,
     values: []const f64,
 
@@ -38,8 +38,8 @@ pub const CsrView = struct {
         if (self.row_starts[self.num_rows] != self.nnz()) return error.InvalidRowStarts;
 
         for (0..self.num_rows) |row_index| {
-            const begin = self.row_starts[row_index];
-            const end = self.row_starts[row_index + 1];
+            const begin: usize = @intCast(self.row_starts[row_index]);
+            const end: usize = @intCast(self.row_starts[row_index + 1]);
             if (begin > end or end > self.nnz()) return error.InvalidRowStarts;
 
             var previous_col: ?usize = null;
@@ -66,8 +66,8 @@ pub const CsrView = struct {
 
     /// Hot-path row access after the cache and row index have been validated.
     pub inline fn rowAssumeValid(self: Self, row_index: usize) sparse_vector.SparseVectorView(ColId) {
-        const begin = self.row_starts[row_index];
-        const end = self.row_starts[row_index + 1];
+        const begin: usize = @intCast(self.row_starts[row_index]);
+        const end: usize = @intCast(self.row_starts[row_index + 1]);
         return .{
             .dimension = self.num_cols,
             .indices = self.col_indices[begin..end],
@@ -77,13 +77,12 @@ pub const CsrView = struct {
 
     /// CSR-native y = A*x. Each output row is an independent contiguous dot
     /// product, avoiding the random output scatter required by CSC.
-    pub fn multiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn multiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplyAssumeValid(x, y);
     }
 
-    pub fn multiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
-        @setFloatMode(.optimized);
+    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
         const ci = self.col_indices;
@@ -91,50 +90,35 @@ pub const CsrView = struct {
         var row_idx: usize = 0;
         while (row_idx < nrow) : (row_idx += 1) {
             var sum: f64 = 0.0;
-            var pos = rs[row_idx];
-            const end = rs[row_idx + 1];
+            var pos: usize = @intCast(rs[row_idx]);
+            const end: usize = @intCast(rs[row_idx + 1]);
             while (pos < end) : (pos += 1)
-                sum += vs[pos] * x[ci[pos].toUsize()];
+                sum = @mulAdd(f64, vs[pos], x[ci[pos].toUsize()], sum);
             y[row_idx] = sum;
         }
     }
 
     /// CSR-native y = transpose(A)*x. CSC is normally faster for this direction;
     /// this API avoids a format conversion when only CSR is available.
-    pub fn transposeMultiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
         self.transposeMultiplyAssumeValid(x, y);
     }
 
-    pub fn transposeMultiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
-        if (comptime @import("builtin").cpu.arch == .x86_64) {
-            // x86-64: hand-tuned assembly keeps all pointers in callee-saved
-            // registers, eliminating LLVM's spill-to-stack issue in the
-            // scatter-add loop. See src/matrix/asm/root.zig for details.
-            const asm_kernels = @import("asm/root.zig");
-            asm_kernels.clear.clearF64(y);
-            asm_kernels.csr.csrTransposeMultiply(
-                self.num_rows,
-                @intFromPtr(self.row_starts.ptr),
-                @intFromPtr(self.col_indices.ptr),
-                @intFromPtr(self.values.ptr),
-                @intFromPtr(x.ptr),
-                @intFromPtr(y.ptr),
-            );
-        } else {
-            @setFloatMode(.optimized);
-            const nrow = self.num_rows;
-            const rs = self.row_starts;
-            const ci = self.col_indices;
-            const vs = self.values;
-            memory.clearF64(y);
-            var i: usize = 0;
-            while (i < nrow) : (i += 1) {
-                const multiplier = x[i];
-                var pos = rs[i];
-                const end = rs[i + 1];
-                while (pos < end) : (pos += 1)
-                    y[ci[pos].toUsize()] += vs[pos] * multiplier;
+    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        const nrow = self.num_rows;
+        const rs = self.row_starts;
+        const ci = self.col_indices;
+        const vs = self.values;
+        memory.clearF64(y);
+        var i: usize = 0;
+        while (i < nrow) : (i += 1) {
+            const multiplier = x[i];
+            var pos: usize = @intCast(rs[i]);
+            const end: usize = @intCast(rs[i + 1]);
+            while (pos < end) : (pos += 1) {
+                const col = ci[pos].toUsize();
+                y[col] = @mulAdd(f64, vs[pos], multiplier, y[col]);
             }
         }
     }
@@ -149,9 +133,10 @@ pub const CsrCache = struct {
     source_revision: u64,
     num_rows: usize,
     num_cols: usize,
-    row_starts: []usize,
+    row_starts: []foundation.HUInt,
     col_indices: []ColId,
     values: []f64,
+    storage: []align(64) u8,
 
     const Self = @This();
 
@@ -169,30 +154,43 @@ pub const CsrCache = struct {
     /// It avoids a redundant O(nnz) structural scan while retaining allocation
     /// and dimension-overflow errors. The caller owns the validity proof.
     pub fn buildAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64) (std.mem.Allocator.Error || csc.MatrixError)!Self {
-        const next = try allocator.alloc(usize, matrix.num_rows);
+        const next = try allocator.alloc(foundation.HUInt, matrix.num_rows);
         defer allocator.free(next);
         return buildWithScratchAssumeValid(allocator, matrix, source_revision, next);
     }
 
-    pub fn buildWithScratch(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
+    pub fn buildWithScratch(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []foundation.HUInt) (std.mem.Allocator.Error || csc.MatrixError)!Self {
         try matrix.validate();
         return buildWithScratchAssumeValid(allocator, matrix, source_revision, row_cursor_scratch);
     }
 
     /// Reuses caller-owned row cursor storage and removes one temporary
     /// allocation from repeated CSC-to-CSR conversions.
-    pub fn buildWithScratchAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
+    pub fn buildWithScratchAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []foundation.HUInt) (std.mem.Allocator.Error || csc.MatrixError)!Self {
         if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
         if (row_cursor_scratch.len < matrix.num_rows) return error.DimensionMismatch;
+        if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
 
-        const row_starts = try allocator.alloc(usize, matrix.num_rows + 1);
-        errdefer allocator.free(row_starts);
-        const col_indices = try allocator.alloc(ColId, matrix.nnz());
-        errdefer allocator.free(col_indices);
-        const values = try allocator.alloc(f64, matrix.nnz());
-        errdefer allocator.free(values);
+        // One allocation both removes allocator traffic and gives deterministic
+        // page colors. Each concurrently accessed stream gets a different
+        // 64-byte offset within its 4 KiB page, avoiding address-alias stalls.
+        const starts_bytes = std.math.mul(usize, matrix.num_rows + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const indices_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(ColId)) catch return error.DimensionTooLarge;
+        const values_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(f64)) catch return error.DimensionTooLarge;
+        const starts_offset: usize = 0;
+        const indices_offset = std.mem.alignForward(usize, starts_bytes, 4096) + 64;
+        const values_offset = std.mem.alignForward(usize, indices_offset + indices_bytes, 4096) + 128;
+        const storage_len = std.math.add(usize, values_offset, values_bytes) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        errdefer allocator.free(storage);
+        const row_starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + starts_offset));
+        const col_indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + indices_offset));
+        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + values_offset));
+        const row_starts = row_starts_ptr[0 .. matrix.num_rows + 1];
+        const col_indices = col_indices_ptr[0..matrix.nnz()];
+        const values = values_ptr[0..matrix.nnz()];
 
-        try fillFromCscAssumeValid(&matrix, row_starts, col_indices, values, row_cursor_scratch);
+        try fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
 
         return .{
             .source_revision = source_revision,
@@ -201,13 +199,12 @@ pub const CsrCache = struct {
             .row_starts = row_starts,
             .col_indices = col_indices,
             .values = values,
+            .storage = storage,
         };
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.row_starts);
-        allocator.free(self.col_indices);
-        allocator.free(self.values);
+        allocator.free(self.storage);
         self.* = undefined;
     }
 
@@ -240,16 +237,17 @@ pub const CsrCache = struct {
 };
 
 /// Allocation-free CSC-to-CSR conversion into exact-size caller buffers.
-pub fn fillFromCsc(matrix: *const csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+pub fn fillFromCsc(matrix: csc.CscMatrix, row_starts: []foundation.HUInt, col_indices: []ColId, values: []f64, row_cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     try matrix.validate();
+    if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
     return fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
 }
 
-pub fn fillFromCscAssumeValid(matrix: *const csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []foundation.HUInt, col_indices: []ColId, values: []f64, row_cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
         values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
-    memory.clearUsize(row_starts);
+    memory.clearTyped(foundation.HUInt, row_starts);
     for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
     const next = row_cursor_scratch[0..matrix.num_rows];
@@ -257,11 +255,15 @@ pub fn fillFromCscAssumeValid(matrix: *const csc.CscMatrix, row_starts: []usize,
     for (0..matrix.num_cols) |col_index| {
         const col_id = ColId.fromUsize(col_index) catch unreachable;
         for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |position| {
+            // Load the sequential source value before following the dependent
+            // row -> cursor -> destination chain, giving the CPU useful work
+            // while the cursor load is outstanding.
+            const source_value = matrix.values[position];
             const row = matrix.row_indices[position].toUsize();
-            const destination = next[row];
-            col_indices[destination] = col_id;
-            values[destination] = matrix.values[position];
+            const destination: usize = @intCast(next[row]);
             next[row] += 1;
+            col_indices[destination] = col_id;
+            values[destination] = source_value;
         }
     }
 }
@@ -283,7 +285,7 @@ test "CSC to CSR conversion preserves rows including empty rows" {
     defer cache.deinit(std.testing.allocator);
     const csr = try cache.view(17);
     try csr.validate();
-    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 2, 5 }, csr.row_starts);
+    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 2, 2, 5 }, csr.row_starts);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, -1.0, 3.0, 4.0, 5.0 }, csr.values);
 
     const empty_row = try csr.row(try RowId.init(1));
@@ -306,7 +308,7 @@ test "CSR cache rejects stale revision and invalid row" {
 }
 
 test "CSR validation rejects malformed offsets and unordered columns" {
-    var starts = [_]usize{ 0, 2 };
+    var starts = [_]foundation.HUInt{ 0, 2 };
     var duplicate_cols = [_]ColId{ try ColId.init(0), try ColId.init(0) };
     var values = [_]f64{ 1.0, 2.0 };
     const duplicate: CsrView = .{
@@ -318,7 +320,7 @@ test "CSR validation rejects malformed offsets and unordered columns" {
     };
     try std.testing.expectError(error.IndicesNotStrictlyIncreasing, duplicate.validate());
 
-    var bad_starts = [_]usize{ 1, 1 };
+    var bad_starts = [_]foundation.HUInt{ 1, 1 };
     var no_cols = [_]ColId{};
     var no_values = [_]f64{};
     const bad: CsrView = .{
@@ -373,7 +375,7 @@ test "CSR native products match CSC products and scratch build" {
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
     var values = [_]f64{ 2.0, 3.0, 4.0 };
     const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
-    var scratch: [2]usize = undefined;
+    var scratch: [2]foundation.HUInt = undefined;
     var cache = try CsrCache.buildWithScratch(std.testing.allocator, matrix, 0, &scratch);
     defer cache.deinit(std.testing.allocator);
     const csr = cache.viewAssumeCurrent();
