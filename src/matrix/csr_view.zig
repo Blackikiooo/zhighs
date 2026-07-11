@@ -84,11 +84,18 @@ pub const CsrView = struct {
 
     pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
-        for (0..self.num_rows) |row_index| {
+        const nrow = self.num_rows;
+        const rs = self.row_starts;
+        const ci = self.col_indices;
+        const vs = self.values;
+        var row_idx: usize = 0;
+        while (row_idx < nrow) : (row_idx += 1) {
             var sum: f64 = 0.0;
-            for (self.row_starts[row_index]..self.row_starts[row_index + 1]) |position|
-                sum += self.values[position] * x[self.col_indices[position].toUsize()];
-            y[row_index] = sum;
+            var pos = rs[row_idx];
+            const end = rs[row_idx + 1];
+            while (pos < end) : (pos += 1)
+                sum += vs[pos] * x[ci[pos].toUsize()];
+            y[row_idx] = sum;
         }
     }
 
@@ -101,11 +108,18 @@ pub const CsrView = struct {
 
     pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
+        const nrow = self.num_rows;
+        const rs = self.row_starts;
+        const ci = self.col_indices;
+        const vs = self.values;
         memory.clearF64(y);
-        for (0..self.num_rows) |row_index| {
-            const multiplier = x[row_index];
-            for (self.row_starts[row_index]..self.row_starts[row_index + 1]) |position|
-                y[self.col_indices[position].toUsize()] += self.values[position] * multiplier;
+        var i: usize = 0;
+        while (i < nrow) : (i += 1) {
+            const multiplier = x[i];
+            var pos = rs[i];
+            const end = rs[i + 1];
+            while (pos < end) : (pos += 1)
+                y[ci[pos].toUsize()] += vs[pos] * multiplier;
         }
     }
 };
@@ -219,7 +233,7 @@ pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []usize, col_in
     if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
         values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
-    memory.clearUsize(row_starts);
+    @memset(row_starts, 0);
     for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
     const next = row_cursor_scratch[0..matrix.num_rows];

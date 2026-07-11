@@ -127,6 +127,12 @@ pub const MatrixBuilder = struct {
         const cols = fields.items(.col);
         const values = fields.items(.value);
 
+        // Allocate col_starts before the merge loop so counting can be done
+        // during the single pass (eliminates a separate O(nnz) counting pass).
+        const col_starts = try allocator.alloc(usize, self.num_cols + 1);
+        errdefer allocator.free(col_starts);
+        @memset(col_starts, 0);
+
         // Merge in place. Read positions never trail the write position, so no
         // temporary triplet allocation is needed after sorting.
         @setFloatMode(.optimized);
@@ -143,28 +149,25 @@ pub const MatrixBuilder = struct {
             if (!std.math.isFinite(sum)) return error.NonFiniteValue;
             if (@abs(sum) <= zero_tolerance) continue;
 
+            // Count this entry's column during merge
+            col_starts[col.toUsize() + 1] += 1;
             fields.set(write, .{ .row = row, .col = col, .value = sum, .sequence = write });
             write += 1;
         }
         self.entries.shrinkRetainingCapacity(write);
         fields = self.entries.slice();
         const compact_rows = fields.items(.row);
-        const compact_cols = fields.items(.col);
         const compact_values = fields.items(.value);
 
         // Allocate each output stream transactionally. Separate errdefer guards
         // make every allocation-failure point leak- and double-free-safe.
-        const col_starts = try allocator.alloc(usize, self.num_cols + 1);
-        errdefer allocator.free(col_starts);
-        @memset(col_starts, 0);
         const row_indices = try allocator.dupe(RowId, compact_rows);
         errdefer allocator.free(row_indices);
         const output_values = try allocator.dupe(f64, compact_values);
         errdefer allocator.free(output_values);
 
-        // Count entries per column, then prefix-sum counts into CSC offsets.
+        // Prefix-sum raw counts into CSC offsets (counting was done during merge).
         const ncol = self.num_cols;
-        for (compact_cols) |col| col_starts[col.toUsize() + 1] += 1;
         var c: usize = 0;
         while (c < ncol) : (c += 1) col_starts[c + 1] += col_starts[c];
         return .{

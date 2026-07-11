@@ -84,12 +84,17 @@ pub fn SparseAccumulator(comptime Id: type) type {
         pub fn addAssumeValid(self: *Self, id: Id, value: f64) void {
             if (value == 0.0) return;
             const index = id.toUsize();
-            if (self.marks[index] != self.generation) {
-                self.marks[index] = self.generation;
-                self.dense_values[index] = value;
-                self.active.appendAssumeCapacity(id);
+            const marks = self.marks;
+            const dv = self.dense_values;
+            const gen = self.generation;
+            if (marks[index] != gen) {
+                marks[index] = gen;
+                dv[index] = value;
+                const active_items = &self.active.items;
+                active_items.ptr[active_items.len] = id;
+                active_items.len += 1;
             } else {
-                self.dense_values[index] += value;
+                dv[index] += value;
             }
         }
 

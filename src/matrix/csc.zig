@@ -133,12 +133,19 @@ pub const CscMatrix = struct {
     /// Dense-vector hot path: branchless traversal after clearing y.
     pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
+        const ncol = self.num_cols;
+        const starts = self.col_starts;
+        const ri = self.row_indices;
+        const vs = self.values;
         memory.clearF64(y);
-        for (0..self.num_cols) |col| {
+        var col: usize = 0;
+        while (col < ncol) : (col += 1) {
             const x_value = x[col];
-            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
-                const row = self.row_indices[position].toUsize();
-                y[row] += self.values[position] * x_value;
+            var pos = starts[col];
+            const end = starts[col + 1];
+            while (pos < end) : (pos += 1) {
+                const row = ri[pos].toUsize();
+                y[row] += vs[pos] * x_value;
             }
         }
     }
@@ -152,13 +159,20 @@ pub const CscMatrix = struct {
     /// zeros to compensate for one branch per matrix column.
     pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
+        const ncol = self.num_cols;
+        const starts = self.col_starts;
+        const ri = self.row_indices;
+        const vs = self.values;
         memory.clearF64(y);
-        for (0..self.num_cols) |col| {
+        var col: usize = 0;
+        while (col < ncol) : (col += 1) {
             const x_value = x[col];
             if (x_value == 0.0) continue;
-            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
-                const row = self.row_indices[position].toUsize();
-                y[row] += self.values[position] * x_value;
+            var pos = starts[col];
+            const end = starts[col + 1];
+            while (pos < end) : (pos += 1) {
+                const row = ri[pos].toUsize();
+                y[row] += vs[pos] * x_value;
             }
         }
     }
@@ -186,11 +200,16 @@ pub const CscMatrix = struct {
     /// path when the caller already owns a zeroed/generation-marked workspace.
     pub fn addSparseProductAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
         @setFloatMode(.optimized);
+        const starts = self.col_starts;
+        const ri = self.row_indices;
+        const vs = self.values;
         for (x.indices, x.values) |col_id, multiplier| {
             const col = col_id.toUsize();
-            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
-                const row = self.row_indices[position].toUsize();
-                y[row] += self.values[position] * multiplier;
+            var pos = starts[col];
+            const end = starts[col + 1];
+            while (pos < end) : (pos += 1) {
+                const row = ri[pos].toUsize();
+                y[row] += vs[pos] * multiplier;
             }
         }
     }
@@ -204,11 +223,17 @@ pub const CscMatrix = struct {
     /// Hot-path transpose multiply with prevalidated dimensions and structure.
     pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
-        for (0..self.num_cols) |col| {
+        const ncol = self.num_cols;
+        const starts = self.col_starts;
+        const ri = self.row_indices;
+        const vs = self.values;
+        var col: usize = 0;
+        while (col < ncol) : (col += 1) {
             var sum: f64 = 0.0;
-            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
-                sum += self.values[position] * x[self.row_indices[position].toUsize()];
-            }
+            var pos = starts[col];
+            const end = starts[col + 1];
+            while (pos < end) : (pos += 1)
+                sum += vs[pos] * x[ri[pos].toUsize()];
             y[col] = sum;
         }
     }
