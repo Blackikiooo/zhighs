@@ -44,7 +44,7 @@ pub fn SparseVectorView(comptime Id: type) type {
         values: []const f64,
 
         const Self = @This();
-
+        /// Computes the number of nonzero values in the vector.
         pub inline fn nnz(self: Self) usize {
             return self.indices.len;
         }
@@ -52,7 +52,7 @@ pub fn SparseVectorView(comptime Id: type) type {
         pub inline fn isEmpty(self: Self) bool {
             return self.indices.len == 0;
         }
-
+        // Validates the canonical invariants of the sparse vector view.
         pub fn validate(self: Self) SparseVectorError!void {
             if (self.indices.len != self.values.len) {
                 return SparseVectorError.LengthMismatch;

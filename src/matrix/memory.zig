@@ -3,48 +3,67 @@
 const std = @import("std");
 
 /// Generic vectorized clear for any integer or float type.
-/// Uses @Vector(4, T) for aligned stores, volatile when specified.
-/// This comptime function eliminates 3× copy-paste between f64 and usize variants.
+/// Uses comptime-unrolled @Vector(VW, T) stores for aligned hot paths.
+/// The vector width VW and unroll factor UN can be tuned per architecture.
 fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) void {
     if (values.len == 0) return;
-    const Vector = @Vector(4, T);
-    const align_mask = @alignOf(Vector) - 1;
 
-    // Align: handle leading unaligned elements one at a time
+    // Pick vector width from the target SIMD ISA.
+    // VW is chosen so that VW × @sizeOf(T) fills a single vector register.
+    const VW = comptime brk: {
+        if (@import("builtin").cpu.arch == .x86_64) {
+            const feat = @import("builtin").cpu.features;
+            if (std.Target.x86.featureSetHas(feat, .avx512f)) {
+                break :brk 64 / @sizeOf(T); // 512-bit
+            }
+            if (std.Target.x86.featureSetHas(feat, .avx2)) {
+                break :brk 32 / @sizeOf(T); // 256-bit
+            }
+            break :brk 16 / @sizeOf(T); // 128-bit SSE2 baseline
+        }
+        break :brk 32 / @sizeOf(T); // generic fallback
+    };
+    // Unroll factor tuned by microarchitecture.
+    // Zen-family benefit from deep unrolling (larger store buffers, write combining);
+    // Intel cores prefer shallower unrolling to avoid uop-cache pressure.
+    const UN = comptime if (@import("builtin").cpu.arch == .x86_64)
+        if (std.mem.indexOf(u8, @import("builtin").cpu.model.name, "zen")) |_| 4 else 2
+    else
+        2;
+
+    const Vec = @Vector(VW, T);
+    const align_mask = @alignOf(Vec) - 1;
+
+    // Leading unaligned elements, one at a time
     var i: usize = 0;
     while (i < values.len and (@intFromPtr(&values[i]) & align_mask) != 0) : (i += 1)
         values[i] = 0;
 
-    // Vector-aligned stores (4 elements per iteration)
+    // Vector-aligned bulk: VW × UN elements per outer iteration
     const remaining = values[i..];
-    const vn = remaining.len / 4;
-    const zero: Vector = @splat(0);
+    const vn = remaining.len / VW;
+    const zero: Vec = @splat(0);
+
     if (vn > 0) {
         if (comptime volatile_stores) {
-            const vptr: [*]volatile Vector = @ptrCast(@alignCast(remaining.ptr));
+            const vptr: [*]volatile Vec = @ptrCast(@alignCast(remaining.ptr));
             var vi: usize = 0;
-            while (vi + 4 <= vn) : (vi += 4) {
-                vptr[vi] = zero;
-                vptr[vi + 1] = zero;
-                vptr[vi + 2] = zero;
-                vptr[vi + 3] = zero;
+            while (vi + UN <= vn) : (vi += UN) {
+                inline for (0..UN) |u| vptr[vi + u] = zero;
             }
             while (vi < vn) : (vi += 1) vptr[vi] = zero;
         } else {
-            const vptr: [*]Vector = @ptrCast(@alignCast(remaining.ptr));
+            const vptr: [*]Vec = @ptrCast(@alignCast(remaining.ptr));
             var vi: usize = 0;
-            while (vi + 4 <= vn) : (vi += 4) {
-                vptr[vi] = zero;
-                vptr[vi + 1] = zero;
-                vptr[vi + 2] = zero;
-                vptr[vi + 3] = zero;
+            while (vi + UN <= vn) : (vi += UN) {
+                inline for (0..UN) |u| vptr[vi + u] = zero;
             }
             while (vi < vn) : (vi += 1) vptr[vi] = zero;
         }
-        i += vn * 4;
+        i += vn * VW;
     }
 
-    // Tail elements (past last full vector)
+    // Tail elements past the last full vector
     if (comptime volatile_stores) {
         const tptr: [*]volatile T = @ptrCast(values.ptr + i);
         var ti: usize = i;
