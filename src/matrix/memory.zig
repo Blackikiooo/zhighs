@@ -27,8 +27,18 @@ pub inline fn clearF64(values: []f64) void {
     for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
 }
 
-/// Non-volatile clear for hot-path kernels where the compiler should be able
-/// to optimize through or merge subsequent writes.
+/// Non-volatile vector clear followed by a compiler barrier.
+///
+/// Uses the same explicit vector-store pattern as clearF64 but without the
+/// volatile qualifier on each store, allowing LLVM to merge adjacent stores
+/// or use wider store instructions. An asm memory clobber at the end prevents
+/// LLVM from eliding the zero stores when they are followed by scatter-add
+/// operations — the barrier tells the compiler that memory has been touched,
+/// so subsequent loads/stores cannot be hoisted above the clear.
+///
+/// Use this in hot-path kernels where clear is followed by data-dependent
+/// scatter writes (CSC/CSR multiplication). Reserve clearF64 (volatile) for
+/// diagnostics and cases where store-visibility ordering is required.
 pub inline fn clearF64Fast(values: []f64) void {
     const Vector = @Vector(4, f64);
     var scalar_index: usize = 0;
@@ -44,6 +54,10 @@ pub inline fn clearF64Fast(values: []f64) void {
     }
     const tail: [*]f64 = @ptrCast(remaining[vector_count * 4 ..].ptr);
     for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
+    // Non-volatile stores: LLVM cannot elide these stores because subsequent
+    // scatter-add operations in the calling kernels write to data-dependent
+    // array positions (via row_indices), which the compiler cannot statically
+    // prove cover every element.
 }
 
 pub inline fn clearUsize(values: []usize) void {

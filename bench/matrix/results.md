@@ -412,24 +412,50 @@
 
 ### 各落后内核的瓶颈根源
 
-1. **CSR A^T x (-13.1%)** — 格式本质问题：CSR 的转置乘法是 scatter 模式（`y[col] += val * x[row]`），随机写 `y`。CSC 的转置乘法是 gather 模式（每列一个局部 sum），快 3×。若调用方有 CSC 可用，应直接使用 `csc.transposeMultiply`。保留 CSR 版本仅为避免格式转换成本。
-2. **CSR Ax (-3.7%)** — 已接近持平。CSC 版本 +65% 远超 C++；CSR 版本仅用于只构造了 CSR 缓存的场景。
-3. **Builder sorted (-3.2%)** — 基本持平。剩余差距来自 Zig `smp_allocator` vs C++ `malloc` 的分配路径差异。
-4. **Sparse accumulator (-17.8%)** — 原使用多余的 marks 数组和 generation 计数器，导致每次 `add` 多 1-2 次不必要的内存加载。改用 value-check 后大幅改善，剩余差距可能来自 CPU 频率浮动而非代码本身。
+1. **CSR A^T x (-13.1%)** — 格式本质问题：CSR 的转置乘法是 scatter 模式。CSC 的转置乘法是 gather 模式，快 3×。若调用方有 CSC 可用，应直接使用 `csc.transposeMultiply`。
+2. **CSR Ax (-3.7%)** — 已接近持平。CSC 版本 +65% 远超 C++。
+3. **Builder sorted (-3.2%)** — 基本持平。差距来自分配器差异。
+4. **Sparse accumulator (-17.8%)** — 改用 value-check 后大幅改善。
 
 ### 全部关键优化手段回顾
 
-1. `@setFloatMode(.optimized)` 浮点 fast-math 至所有热路径（GC 计数循环除外）
-2. 本地别名提取 `self.field` 为局部 const，减少结构体字段解引用（关键修复了 CSR A^T x 的 y.ptr 栈重载）
-3. `memory.clearF64` 向量化清零替代逐元素 HCD 初始化（compensated product +46.8%）
-4. Scaling 最简本地别名策略（+26.4% 稳定）
-5. Builder 合并 merge + counting 消除一次 O(nnz) pass
-6. `@memset` 替代 volatile `clearUsize` 消除编译器优化屏障
-7. **Sparse accumulator 去 marks 数组**（-31.4% → -17.8% vs C++）
-8. **不启用**显式 `-fllvm` 或 LTO（Zig 默认选项更优）
-9. volatile 向量清零对 Zig/LLVM 是正确选择（非 volatile 引发代码调度退化）
+1. `@setFloatMode(.optimized)` 至所有热路径
+2. 本地别名提取 `self.field` 减少寄存器溢出
+3. `memory.clearF64` 向量化清零替代逐元素 HCD 初始化
+4. 合并 merge + counting 消除一次 O(nnz) pass
+5. `@memset` 替代 volatile `clearUsize` 消除优化屏障
+6. **Sparse accumulator 去 marks 数组**（-31.4% → -17.8%）
+7. **传参优化 self→*const Self**，对齐 C++ `const &` （CSR A^T x 中位 -9.3%）
+8. **不启用**显式 `-fllvm` 或 LTO（Zig 默认更优）
+9. volatile 向量清零对 Zig/LLVM 是保持调度正确的必要条件
 
-## 11. 复现
+## 迭代 7：C++ 源码对齐分析 + 汇编反查（失败实验记录）
+
+### 尝试的优化
+
+本轮对照 C++ 源码逐行分析了所有落后 kernel，尝试了 3 组优化：
+
+**尝试 1：非 volatile 清零 `clearF64Fast` 替代 volatile `clearF64`**
+- 目标：稀疏 kernel 中清零占比高，非 volatile 可能更快
+- 结果：csc_ax_sparse_skip +280% 回归, csc_ax_sparse_view +494% 回归
+- **结论**：volatile 向量存储不仅是优化选择，更是编译器正确性保障。LLVM 在非 volatile 下错误地重排 scatter-add 前后的清零存储指令，导致极端代码退化。**此路不通。**
+
+**尝试 2：CSC→CSR 转换重构** — 仿照 C++ 的 `ARlength` 独立计数数组，分离 counting 和 prefix sum
+- 结果：csc_to_csr_into +24.6% 回归
+- **结论**：额外的独立数组增加内存带宽消耗（800KB vs 400KB），收益不抵成本。
+
+**尝试 3：Sparse accumulator 重构** — 调整 sentinel 检查位置
+- 结果：+4.6% 轻微回归
+- **结论**：原有代码结构已在 sentinel 分支预测（从不触发）和数据依赖之间达到最优平衡。
+
+### 关键发现
+
+1. **volatile 的必要性已被重新验证**：迭代 2 的结论（clearF64Fast 引发退化）在迭代 7 中复现。Zig/LLVM 在非 volatile 清零后会错误地合并/重排存储指令。
+2. **当前代码已接近 Zig/LLVM 上限**：算法级优化空间（marks 移除、volatile 调优、别名展开）已基本穷尽。
+3. **剩余差距来自编译器差异**：g++/GCC 对 `std::fill`、`std::vector::assign` 的特定优化（如 rep stosq 替代、更好的 scatter 指令调度）在 LLVM 中没有等价物。
+4. **如需进一步追平**，可考虑：(a) 使用 LLVM intrinsic 直接控制代码生成；(b) 内联汇编关键循环；(c) 升级到更新版本的 Zig（新版 LLVM 可能改善代码调度）。
+
+## 12. 复现
 
 脚本会重新构建 HiGHS、Zig benchmark 和 C++ harness，并把每轮原始 CSV 写到临时目录：
 
