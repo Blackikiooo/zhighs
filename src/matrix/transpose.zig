@@ -16,7 +16,6 @@ pub fn transpose(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.A
 
 /// Transposes a canonical CSC matrix without repeating structural validation.
 pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
-    // Transposed CSC has original rows as columns and therefore needs rows + 1.
     if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
 
     const transposed_starts = try allocator.alloc(usize, matrix.num_rows + 1);
@@ -51,28 +50,16 @@ pub fn transposeIntoAssumeValid(matrix: *const csc.CscMatrix, starts: []usize, r
     @memset(starts, 0);
     for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
-    @memcpy(cursor_scratch[0..matrix.num_rows], starts[0..matrix.num_rows]);
-    if (comptime @import("builtin").cpu.arch == .x86_64) {
-        @import("asm/root.zig").fillFromCscScatter(
-            matrix.num_cols,
-            @intFromPtr(matrix.col_starts.ptr),
-            @intFromPtr(matrix.row_indices.ptr),
-            @intFromPtr(matrix.values.ptr),
-            @intFromPtr(rows.ptr),
-            @intFromPtr(values.ptr),
-            @intFromPtr(cursor_scratch.ptr),
-        );
-    } else {
-        const next = cursor_scratch[0..matrix.num_rows];
-        for (0..matrix.num_cols) |source_col| {
-            const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
-            for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
-                const target_col = matrix.row_indices[position].toUsize();
-                const destination = next[target_col];
-                rows[destination] = target_row;
-                values[destination] = matrix.values[position];
-                next[target_col] += 1;
-            }
+    const next = cursor_scratch[0..matrix.num_rows];
+    @memcpy(next, starts[0..matrix.num_rows]);
+    for (0..matrix.num_cols) |source_col| {
+        const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
+        for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
+            const target_col = matrix.row_indices[position].toUsize();
+            const destination = next[target_col];
+            rows[destination] = target_row;
+            values[destination] = matrix.values[position];
+            next[target_col] += 1;
         }
     }
 }

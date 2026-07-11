@@ -112,8 +112,8 @@ pub const CsrView = struct {
             // registers, eliminating LLVM's spill-to-stack issue in the
             // scatter-add loop. See src/matrix/asm/root.zig for details.
             const asm_kernels = @import("asm/root.zig");
-            asm_kernels.clearF64(y);
-            asm_kernels.csrTransposeMultiply(
+            asm_kernels.clear.clearF64(y);
+            asm_kernels.csr.csrTransposeMultiply(
                 self.num_rows,
                 @intFromPtr(self.row_starts.ptr),
                 @intFromPtr(self.col_indices.ptr),
@@ -252,28 +252,16 @@ pub fn fillFromCscAssumeValid(matrix: *const csc.CscMatrix, row_starts: []usize,
     @memset(row_starts, 0);
     for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
-    @memcpy(row_cursor_scratch[0..matrix.num_rows], row_starts[0..matrix.num_rows]);
-    if (comptime @import("builtin").cpu.arch == .x86_64) {
-        @import("asm/root.zig").fillFromCscScatter(
-            matrix.num_cols,
-            @intFromPtr(matrix.col_starts.ptr),
-            @intFromPtr(matrix.row_indices.ptr),
-            @intFromPtr(matrix.values.ptr),
-            @intFromPtr(col_indices.ptr),
-            @intFromPtr(values.ptr),
-            @intFromPtr(row_cursor_scratch.ptr),
-        );
-    } else {
-        const next = row_cursor_scratch[0..matrix.num_rows];
-        for (0..matrix.num_cols) |col_index| {
-            const col_id = ColId.fromUsize(col_index) catch unreachable;
-            for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |position| {
-                const row = matrix.row_indices[position].toUsize();
-                const destination = next[row];
-                col_indices[destination] = col_id;
-                values[destination] = matrix.values[position];
-                next[row] += 1;
-            }
+    const next = row_cursor_scratch[0..matrix.num_rows];
+    @memcpy(next, row_starts[0..matrix.num_rows]);
+    for (0..matrix.num_cols) |col_index| {
+        const col_id = ColId.fromUsize(col_index) catch unreachable;
+        for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            const destination = next[row];
+            col_indices[destination] = col_id;
+            values[destination] = matrix.values[position];
+            next[row] += 1;
         }
     }
 }
