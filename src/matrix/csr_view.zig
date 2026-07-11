@@ -249,7 +249,7 @@ pub fn fillFromCscAssumeValid(matrix: *const csc.CscMatrix, row_starts: []usize,
     if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
         values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
-    @memset(row_starts, 0);
+    memory.clearUsize(row_starts);
     for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
     const next = row_cursor_scratch[0..matrix.num_rows];

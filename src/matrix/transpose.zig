@@ -7,6 +7,7 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const csc = @import("csc.zig");
+const memory = @import("memory.zig");
 
 /// Checked transpose for matrices entering from an untrusted boundary.
 pub fn transpose(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
@@ -47,7 +48,7 @@ pub fn transposeIntoAssumeValid(matrix: *const csc.CscMatrix, starts: []usize, r
     if (starts.len != matrix.num_rows + 1 or rows.len != matrix.nnz() or
         values.len != matrix.nnz() or cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
-    @memset(starts, 0);
+    memory.clearUsize(starts);
     for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
     const next = cursor_scratch[0..matrix.num_rows];

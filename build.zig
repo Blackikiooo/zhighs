@@ -95,4 +95,19 @@ pub fn build(b: *std.Build) void {
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);
+
+    const perf_profile = b.addExecutable(.{
+        .name = "perf-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/perf_profile.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zhighs", .module = mod },
+            },
+        }),
+    });
+    const install_perf_profile = b.addInstallArtifact(perf_profile, .{});
+    const build_perf_profile_step = b.step("build-perf-profile", "Build the perf profiling binary");
+    build_perf_profile_step.dependOn(&install_perf_profile.step);
 }

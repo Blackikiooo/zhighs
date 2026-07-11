@@ -70,6 +70,13 @@ pub inline fn clearUsize(values: []usize) void {
     clearGeneric(usize, values, true);
 }
 
+/// Non-volatile SIMD vector stores for usize arrays.
+/// Use this when the compiler barrier from volatile is not needed,
+/// e.g. clearing row_starts before a counting pass.
+pub inline fn clearUsizeFast(values: []usize) void {
+    clearGeneric(usize, values, false);
+}
+
 test "clear kernels handle short unaligned slices" {
     var floats = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0 };
     clearF64(floats[1..4]);

@@ -2,78 +2,72 @@
 //!
 //! Dense values provide O(1) updates; a soft sentinel tracks entries that
 //! cancel to exactly zero; active IDs keep extraction proportional to the
-//! touched set. This design matches HiGHS HighsSparseVectorSum: instead of a
-//! separate marks array with generation counters, we check the value itself --
-//! untouched entries are zero, touched entries are non-zero. This eliminates
-//! one memory load and one store per add() compared to a generation-based
-//! scheme, at the cost of needing to zero touched entries in clear().
+//! touched set. This design matches HiGHS HighsSparseVectorSum.
 //!
-//! The sentinel (floatMin) handles the cancellation edge case: when a
-//! sequence of adds produces exactly 0.0, we store floatMin so the active
-//! list entry remains valid; freeze() and get() both recognize the sentinel
-//! as effective zero.
-//!
-//! Intended for presolve aggregation and cut construction, not canonical
-//! persistent storage.
+//! Active list uses raw ptr/cap/len + inline hot-path for minimal overhead.
+//! The `addAssumeValid` function is marked `inline` to eliminate function
+//! call overhead (~40 instructions of prologue/epilogue/stack-spill that
+//! LLVM otherwise inserts) and to enable cross-call optimization across
+//! paired "add first touch / add accumulate" call sites.
 
 const std = @import("std");
 const foundation = @import("foundation");
 const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
+const memory = @import("memory.zig");
 
-/// Sentinel value stored when an accumulated entry cancels to exactly zero.
-/// floatMin (~2.2e-308) is far below any practical LP value and serves as a
-/// reliable "was-touched-but-now-zero" marker that preserves the active-list
-/// entry without requiring a separate marks array.
 const sentinel: f64 = std.math.floatMin(f64);
 
 pub fn SparseAccumulator(comptime Id: type) type {
-    // Instantiation validates that Id is RowId or ColId.
     const OwnedVector = sparse_vector.SparseVector(Id);
     const View = sparse_vector.SparseVectorView(Id);
 
     return struct {
         dimension: usize,
         dense_values: []f64,
-        active: std.ArrayList(Id) = .empty,
+        active_ptr: [*]Id = undefined,
+        active_len: usize = 0,
+        active_cap: usize = 0,
+        alloc: std.mem.Allocator = undefined,
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
             if (dimension != 0) _ = Id.fromUsize(dimension - 1) catch return error.DimensionTooLarge;
             const dense_values = try allocator.alloc(f64, dimension);
-            errdefer allocator.free(dense_values);
             @memset(dense_values, 0);
-            return .{ .dimension = dimension, .dense_values = dense_values };
+            return .{ .dimension = dimension, .dense_values = dense_values, .alloc = allocator };
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.dense_values);
-            self.active.deinit(allocator);
+            if (self.active_cap > 0) allocator.free(self.active_ptr[0..self.active_cap]);
             self.* = undefined;
         }
 
-        pub inline fn touchedCount(self: Self) usize {
-            return self.active.items.len;
-        }
+        pub inline fn touchedCount(self: Self) usize { return self.active_len; }
 
-        pub fn reserve(self: *Self, allocator: std.mem.Allocator, touched_capacity: usize) std.mem.Allocator.Error!void {
-            try self.active.ensureTotalCapacity(allocator, touched_capacity);
-        }
-
-        /// Clears all touched entries using a sparse-vs-dense heuristic.
-        ///
-        /// If fewer than 30% of entries were touched, iterate only the active
-        /// list; otherwise memset the entire dense array. This avoids the
-        /// per-add overhead of a generation/marks scheme while keeping clear()
-        /// proportional to the smaller of {touched, dimension}.
-        pub fn clear(self: *Self) void {
-            if (10 * self.active.items.len < 3 * self.dimension) {
-                for (self.active.items) |id| self.dense_values[id.toUsize()] = 0.0;
-            } else {
-                @memset(self.dense_values, 0);
+        pub fn reserve(self: *Self, allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!void {
+            if (cap > self.active_cap) {
+                const buf = try allocator.alloc(Id, cap);
+                if (self.active_cap > 0) {
+                    @memcpy(buf[0..self.active_len], self.active_ptr[0..self.active_len]);
+                    allocator.free(self.active_ptr[0..self.active_cap]);
+                }
+                self.active_ptr = buf.ptr;
+                self.active_cap = cap;
             }
-            self.active.clearRetainingCapacity();
+        }
+
+        pub fn clear(self: *Self) void {
+            if (10 * self.active_len < 3 * self.dimension) {
+                var i: usize = 0;
+                while (i < self.active_len) : (i += 1)
+                    self.dense_values[@intFromEnum(self.active_ptr[i])] = 0.0;
+            } else {
+                memory.clearF64(self.dense_values);
+            }
+            self.active_len = 0;
         }
 
         pub fn add(self: *Self, allocator: std.mem.Allocator, id: Id, value: f64) (std.mem.Allocator.Error || csc.MatrixError)!void {
@@ -87,17 +81,18 @@ pub fn SparseAccumulator(comptime Id: type) type {
                 if (!std.math.isFinite(sum)) return error.NonFiniteValue;
                 self.dense_values[index] = if (sum == 0.0) sentinel else sum;
             } else {
-                // Reserve before changing value so OOM leaves no hidden
-                // touched entry missing from the active list.
-                try self.active.ensureUnusedCapacity(allocator, 1);
+                if (self.active_len == self.active_cap) try growActive(allocator, self);
                 self.dense_values[index] = value;
-                self.active.appendAssumeCapacity(id);
+                self.active_ptr[self.active_len] = id;
+                self.active_len += 1;
             }
         }
 
-        /// Allocation-free update after reserve. Caller guarantees a valid ID,
-        /// finite value/sum, and enough capacity for a newly touched index.
-        pub fn addAssumeValid(self: *Self, id: Id, value: f64) void {
+        /// Allocation-free update after reserve. Inline eliminates function
+        /// call overhead (~40 stack spill instructions) and enables LLVM to
+        /// keep dense_values ptr, active_ptr, active_len in registers across
+        /// paired touch/accumulate call sites.
+        pub inline fn addAssumeValid(self: *Self, id: Id, value: f64) void {
             if (value == 0.0) return;
             const index = id.toUsize();
             const dv = self.dense_values;
@@ -106,9 +101,8 @@ pub fn SparseAccumulator(comptime Id: type) type {
                 if (dv[index] == 0.0) dv[index] = sentinel;
             } else {
                 dv[index] = value;
-                const active_items = &self.active.items;
-                active_items.ptr[active_items.len] = id;
-                active_items.len += 1;
+                self.active_ptr[self.active_len] = id;
+                self.active_len += 1;
             }
         }
 
@@ -119,8 +113,6 @@ pub fn SparseAccumulator(comptime Id: type) type {
             for (vector.indices, vector.values) |id, value| try self.add(allocator, id, alpha * value);
         }
 
-        /// Returns the current accumulated value. Untouched and cancelled-to-zero
-        /// entries both return 0.0.
         pub inline fn get(self: Self, id: Id) f64 {
             const index = id.toUsize();
             std.debug.assert(index < self.dimension);
@@ -128,34 +120,41 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return if (value == 0.0 or value == sentinel) 0.0 else value;
         }
 
-        /// Extracts sorted, unique canonical storage and removes small results.
-        /// Sentinel entries (cancelled to zero) are always discarded, even when
-        /// zero_tolerance is 0.
         pub fn freeze(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!OwnedVector {
             if (!std.math.isFinite(zero_tolerance) or zero_tolerance < 0.0) return error.InvalidTolerance;
-            std.sort.pdq(Id, self.active.items, {}, lessThanId);
+            const slice = self.active_ptr[0..self.active_len];
+            std.sort.pdq(Id, slice, {}, lessThanId);
             var count: usize = 0;
-            for (self.active.items) |id| {
-                const value = self.dense_values[id.toUsize()];
-                if (value != sentinel and @abs(value) > zero_tolerance) count += 1;
+            for (slice) |id| {
+                if (self.dense_values[@intFromEnum(id)] != sentinel and
+                    @abs(self.dense_values[@intFromEnum(id)]) > zero_tolerance) count += 1;
             }
             const indices = try allocator.alloc(Id, count);
             errdefer allocator.free(indices);
-            const values = try allocator.alloc(f64, count);
-            errdefer allocator.free(values);
-            var destination: usize = 0;
-            for (self.active.items) |id| {
-                const value = self.dense_values[id.toUsize()];
-                if (value == sentinel or @abs(value) <= zero_tolerance) continue;
-                indices[destination] = id;
-                values[destination] = value;
-                destination += 1;
+            const vs = try allocator.alloc(f64, count);
+            errdefer allocator.free(vs);
+            var dst: usize = 0;
+            for (slice) |id| {
+                const v = self.dense_values[@intFromEnum(id)];
+                if (v == sentinel or @abs(v) <= zero_tolerance) continue;
+                indices[dst] = id;
+                vs[dst] = v;
+                dst += 1;
             }
-            return .{ .dimension = self.dimension, .indices = indices, .values = values };
+            return .{ .dimension = self.dimension, .indices = indices, .values = vs };
         }
 
-        fn lessThanId(_: void, lhs: Id, rhs: Id) bool {
-            return lhs.toUsize() < rhs.toUsize();
+        fn lessThanId(_: void, lhs: Id, rhs: Id) bool { return lhs.toUsize() < rhs.toUsize(); }
+
+        fn growActive(allocator: std.mem.Allocator, self: *Self) std.mem.Allocator.Error!void {
+            const new_cap = @max(self.active_cap + 16, self.active_cap * 2);
+            const buf = try allocator.alloc(Id, new_cap);
+            if (self.active_cap > 0) {
+                @memcpy(buf[0..self.active_len], self.active_ptr[0..self.active_len]);
+                allocator.free(self.active_ptr[0..self.active_cap]);
+            }
+            self.active_ptr = buf.ptr;
+            self.active_cap = new_cap;
         }
     };
 }
@@ -177,22 +176,16 @@ test "sparse accumulator merges cancels sorts and clears" {
     try std.testing.expectEqual(@as(f64, 0.0), sum.get(try foundation.ColId.init(1)));
 }
 
-test "sparse accumulator recovers after sentinel cancellation" {
+test "sparse accumulator handles sentinel and dense clear" {
     const Accumulator = SparseAccumulator(foundation.RowId);
     var sum = try Accumulator.init(std.testing.allocator, 2);
     defer sum.deinit(std.testing.allocator);
-
-    // Add and cancel to zero → triggers sentinel
     try sum.add(std.testing.allocator, try foundation.RowId.init(0), 1e10);
     try sum.add(std.testing.allocator, try foundation.RowId.init(0), -1e10);
     try std.testing.expectEqual(@as(f64, 0.0), sum.get(try foundation.RowId.init(0)));
-
-    // Clear and re-add
     sum.clear();
     try sum.add(std.testing.allocator, try foundation.RowId.init(0), 7.0);
     try std.testing.expectEqual(@as(f64, 7.0), sum.get(try foundation.RowId.init(0)));
-
-    // Dense clear path (2 of 2 entries touched = 100%)
     sum.clear();
     try std.testing.expectEqual(@as(f64, 0.0), sum.get(try foundation.RowId.init(0)));
 }
@@ -202,8 +195,8 @@ test "sparse accumulator adds canonical vectors" {
     var sum = try Accumulator.init(std.testing.allocator, 3);
     defer sum.deinit(std.testing.allocator);
     var ids = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2) };
-    var values = [_]f64{ 2.0, -3.0 };
-    try sum.addVector(std.testing.allocator, -2.0, .{ .dimension = 3, .indices = &ids, .values = &values });
+    var vals = [_]f64{ 2.0, -3.0 };
+    try sum.addVector(std.testing.allocator, -2.0, .{ .dimension = 3, .indices = &ids, .values = &vals });
     try std.testing.expectEqual(@as(f64, -4.0), sum.get(ids[0]));
     try std.testing.expectEqual(@as(f64, 6.0), sum.get(ids[1]));
 }

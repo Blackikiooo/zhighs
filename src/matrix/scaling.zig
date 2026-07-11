@@ -7,6 +7,7 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const csc = @import("csc.zig");
+const memory = @import("memory.zig");
 
 pub const ScalingView = struct {
     row: []const f64,
@@ -131,7 +132,7 @@ pub fn computeMaxEquilibration(matrix: csc.CscMatrix, row_factors: []f64, col_fa
         col_factors[col] = if (maximum == 0.0) 1.0 else 1.0 / maximum;
     }
 
-    @memset(row_factors, 0.0);
+    memory.clearF64Fast(row_factors);
     for (0..matrix.num_cols) |col| {
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
             const row = matrix.row_indices[position].toUsize();
@@ -158,7 +159,7 @@ pub fn computePowerOfTwoColumnFactors(matrix: csc.CscMatrix, max_exponent: u10, 
 /// sequential col-then-row equilibration policy.
 pub fn computePowerOfTwoRowFactors(matrix: csc.CscMatrix, max_exponent: u10, output: []f64) csc.MatrixError!void {
     if (output.len != matrix.num_rows) return error.DimensionMismatch;
-    @memset(output, 0.0);
+    memory.clearF64Fast(output);
     for (matrix.row_indices, matrix.values) |row_id, value| {
         const row = row_id.toUsize();
         output[row] = @max(output[row], @abs(value));
