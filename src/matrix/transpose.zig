@@ -51,16 +51,28 @@ pub fn transposeIntoAssumeValid(matrix: *const csc.CscMatrix, starts: []usize, r
     @memset(starts, 0);
     for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
-    const next = cursor_scratch[0..matrix.num_rows];
-    @memcpy(next, starts[0..matrix.num_rows]);
-    for (0..matrix.num_cols) |source_col| {
-        const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
-        for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
-            const target_col = matrix.row_indices[position].toUsize();
-            const destination = next[target_col];
-            rows[destination] = target_row;
-            values[destination] = matrix.values[position];
-            next[target_col] += 1;
+    @memcpy(cursor_scratch[0..matrix.num_rows], starts[0..matrix.num_rows]);
+    if (comptime @import("builtin").cpu.arch == .x86_64) {
+        @import("asm/root.zig").fillFromCscScatter(
+            matrix.num_cols,
+            @intFromPtr(matrix.col_starts.ptr),
+            @intFromPtr(matrix.row_indices.ptr),
+            @intFromPtr(matrix.values.ptr),
+            @intFromPtr(rows.ptr),
+            @intFromPtr(values.ptr),
+            @intFromPtr(cursor_scratch.ptr),
+        );
+    } else {
+        const next = cursor_scratch[0..matrix.num_rows];
+        for (0..matrix.num_cols) |source_col| {
+            const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
+            for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
+                const target_col = matrix.row_indices[position].toUsize();
+                const destination = next[target_col];
+                rows[destination] = target_row;
+                values[destination] = matrix.values[position];
+                next[target_col] += 1;
+            }
         }
     }
 }
