@@ -2,78 +2,72 @@
 
 const std = @import("std");
 
-/// Clears f64 storage through its byte representation. Keeping this operation
-/// centralized makes target-specific replacement possible if Zig's generated
-/// memset regresses. IEEE-754 +0.0 has the all-zero bit pattern.
+/// Generic vectorized clear for any integer or float type.
+/// Uses @Vector(4, T) for aligned stores, volatile when specified.
+/// This comptime function eliminates 3× copy-paste between f64 and usize variants.
+fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) void {
+    if (values.len == 0) return;
+    const Vector = @Vector(4, T);
+    const align_mask = @alignOf(Vector) - 1;
+
+    // Align: handle leading unaligned elements one at a time
+    var i: usize = 0;
+    while (i < values.len and (@intFromPtr(&values[i]) & align_mask) != 0) : (i += 1)
+        values[i] = 0;
+
+    // Vector-aligned stores (4 elements per iteration)
+    const remaining = values[i..];
+    const vn = remaining.len / 4;
+    const zero: Vector = @splat(0);
+    if (vn > 0) {
+        if (comptime volatile_stores) {
+            const vptr: [*]volatile Vector = @ptrCast(@alignCast(remaining.ptr));
+            var vi: usize = 0;
+            while (vi < vn) : (vi += 1) vptr[vi] = zero;
+        } else {
+            const vptr: [*]Vector = @ptrCast(@alignCast(remaining.ptr));
+            var vi: usize = 0;
+            while (vi < vn) : (vi += 1) vptr[vi] = zero;
+        }
+        i += vn * 4;
+    }
+
+    // Tail elements (past last full vector)
+    if (comptime volatile_stores) {
+        const tptr: [*]volatile T = @ptrCast(values.ptr + i);
+        var ti: usize = i;
+        while (ti < values.len) : (ti += 1) tptr[ti - i] = 0;
+    } else {
+        while (i < values.len) : (i += 1) values[i] = 0;
+    }
+}
+
+/// Explicit volatile SIMD vector stores for f64 arrays.
+/// Volatile prevents LLVM from merging zero stores with subsequent
+/// scatter-add operations — essential for correctness in CSC/CSR kernels.
+pub inline fn clearF64(values: []f64) void {
+    clearGeneric(f64, values, true);
+}
+
+/// Non-volatile clear for hot-path kernels where the compiler barrier
+/// is provided externally (via asm "memory" clobber or @memset).
+/// Benchmarking shows this causes severe regressions in CSC/CSR scatter
+/// kernels because LLVM incorrectly elides zero stores. Reserved for
+/// experimental use; most callers should use clearF64 (volatile).
+pub inline fn clearF64Fast(values: []f64) void {
+    clearGeneric(f64, values, false);
+}
+
+/// Byte-level clear via sliceAsBytes. Uses @memset which generates
+/// rep stosb or SIMD stores on LLVM backends. Useful when the byte
+/// representation is needed rather than typed vector stores.
 pub inline fn clearF64Bytes(values: []f64) void {
     @memset(std.mem.sliceAsBytes(values), 0);
 }
 
-/// Explicit SIMD vector stores. Unaligned vector pointers are intentional.
-pub inline fn clearF64(values: []f64) void {
-    const Vector = @Vector(4, f64);
-    var scalar_index: usize = 0;
-    while (scalar_index < values.len and (@intFromPtr(&values[scalar_index]) & (@alignOf(Vector) - 1)) != 0) : (scalar_index += 1)
-        values[scalar_index] = 0.0;
-
-    const remaining = values[scalar_index..];
-    const vector_count = remaining.len / 4;
-    const zero: Vector = @splat(0.0);
-    if (vector_count != 0) {
-        const vectors: [*]volatile Vector = @ptrCast(@alignCast(remaining.ptr));
-        for (0..vector_count) |index| vectors[index] = zero;
-    }
-    const tail: [*]volatile f64 = @ptrCast(remaining[vector_count * 4 ..].ptr);
-    for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
-}
-
-/// Non-volatile vector clear followed by a compiler barrier.
-///
-/// Uses the same explicit vector-store pattern as clearF64 but without the
-/// volatile qualifier on each store, allowing LLVM to merge adjacent stores
-/// or use wider store instructions. An asm memory clobber at the end prevents
-/// LLVM from eliding the zero stores when they are followed by scatter-add
-/// operations — the barrier tells the compiler that memory has been touched,
-/// so subsequent loads/stores cannot be hoisted above the clear.
-///
-/// Use this in hot-path kernels where clear is followed by data-dependent
-/// scatter writes (CSC/CSR multiplication). Reserve clearF64 (volatile) for
-/// diagnostics and cases where store-visibility ordering is required.
-pub inline fn clearF64Fast(values: []f64) void {
-    const Vector = @Vector(4, f64);
-    var scalar_index: usize = 0;
-    while (scalar_index < values.len and (@intFromPtr(&values[scalar_index]) & (@alignOf(Vector) - 1)) != 0) : (scalar_index += 1)
-        values[scalar_index] = 0.0;
-
-    const remaining = values[scalar_index..];
-    const vector_count = remaining.len / 4;
-    const zero: Vector = @splat(0.0);
-    if (vector_count != 0) {
-        const vectors: [*]Vector = @ptrCast(@alignCast(remaining.ptr));
-        for (0..vector_count) |index| vectors[index] = zero;
-    }
-    const tail: [*]f64 = @ptrCast(remaining[vector_count * 4 ..].ptr);
-    for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
-    // Non-volatile stores: LLVM cannot elide these stores because subsequent
-    // scatter-add operations in the calling kernels write to data-dependent
-    // array positions (via row_indices), which the compiler cannot statically
-    // prove cover every element.
-}
-
+/// Volatile SIMD vector stores for usize arrays.
 pub inline fn clearUsize(values: []usize) void {
-    const Vector = @Vector(4, usize);
-    var scalar_index: usize = 0;
-    while (scalar_index < values.len and (@intFromPtr(&values[scalar_index]) & (@alignOf(Vector) - 1)) != 0) : (scalar_index += 1)
-        values[scalar_index] = 0;
-    const remaining = values[scalar_index..];
-    const vector_count = remaining.len / 4;
-    const zero: Vector = @splat(0);
-    if (vector_count != 0) {
-        const vectors: [*]volatile Vector = @ptrCast(@alignCast(remaining.ptr));
-        for (0..vector_count) |index| vectors[index] = zero;
-    }
-    const tail: [*]volatile usize = @ptrCast(remaining[vector_count * 4 ..].ptr);
-    for (0..remaining.len - vector_count * 4) |index| tail[index] = 0;
+    clearGeneric(usize, values, true);
 }
 
 test "clear kernels handle short unaligned slices" {
@@ -83,4 +77,32 @@ test "clear kernels handle short unaligned slices" {
     var integers = [_]usize{ 1, 2, 3, 4, 5 };
     clearUsize(integers[1..4]);
     try std.testing.expectEqualSlices(usize, &.{ 1, 0, 0, 0, 5 }, &integers);
+}
+
+test "clearGeneric matches clearF64 for f64" {
+    var a: [64]f64 = undefined;
+    var b: [64]f64 = undefined;
+    for (&a, &b, 0..) |*va, *vb, i| {
+        va.* = @floatFromInt(i + 1);
+        vb.* = @floatFromInt(i + 1);
+    }
+    clearF64(&a);
+    clearGeneric(f64, &b, true);
+    try std.testing.expectEqualSlices(f64, &a, &b);
+}
+
+test "clearGeneric handles edge cases" {
+    // Single element
+    var single: [1]f64 = [_]f64{42.0};
+    clearGeneric(f64, &single, true);
+    try std.testing.expectEqual(@as(f64, 0.0), single[0]);
+
+    // Exactly 4 elements (one vector)
+    var four: [4]f64 = [_]f64{ 1, 2, 3, 4 };
+    clearGeneric(f64, &four, true);
+    try std.testing.expectEqual(@as(f64, 0.0), four[0] + four[1] + four[2] + four[3]);
+
+    // Empty
+    var empty: [0]f64 = undefined;
+    clearGeneric(f64, &empty, true);
 }
