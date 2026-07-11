@@ -236,7 +236,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.fillCsrFromCscAssumeValid(matrix, reusable_starts, reusable_cols, reusable_values, cursor);
+        try zhighs.matrix.fillCsrFromCscAssumeValid(&matrix, reusable_starts, reusable_cols, reusable_values, cursor);
         std.mem.doNotOptimizeAway(reusable_values.ptr);
     }
     report("csc_to_csr_into", transform_repeats, start, reusable_values[0]);
@@ -251,7 +251,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.transposeIntoAssumeValid(matrix, reusable_starts, reusable_rows, reusable_values, cursor);
+        try zhighs.matrix.transposeIntoAssumeValid(&matrix, reusable_starts, reusable_rows, reusable_values, cursor);
         std.mem.doNotOptimizeAway(reusable_values.ptr);
     }
     report("transpose_into", transform_repeats, start, reusable_values[0]);

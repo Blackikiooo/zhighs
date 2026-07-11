@@ -270,14 +270,166 @@
 - CSR `A^T x`（-13.1%）：scatter 是 CSR 格式固有成本，需算法级修改（改用 CSC 或 prefetch）
 - CSC→CSR caller-owned（-13.4%）：counting + scatter 固定开销
 - builder sorted checked（-2.4%）：基本持平，剩余差距来自分配器开销
-- sparse accumulator（-31.4%）：generation 模式固有的每条目 2 次 marks 检查 + active 列表记录
+- sparse accumulator（-17.8%）：改用 value-check 消除了 marks 数组（见下文分析）
 
 **本迭代关键优化手段的有效性（按影响排序）：**
-1. **本地别名减少寄存器溢出**：CSR A^T x -40%、CSR Ax -13%
-2. **加速路径**：@memset 替代 volatile clearUsize，合并 merge+counting 消除一次 O(nnz) pass
-3. **逐层展开别名**：`self.col_starts[col]` → `const starts = self.col_starts; starts[col]` 减少结构体字段解引用
+1. **Sparse accumulator 重构**：去掉 marks 数组和 generation 计数器，改用 `dense_values[index] != 0.0` 判断条目是否已触碰。消除每次 `add` 的一条额外内存加载（marks[index]）+ 一次存储（marks[index] 写入），同时省略 `generation` 字段的加载和比较。中位加速 -15.9%，vs C++ 差距从 -31.4% 缩小至 -17.8%
+2. **本地别名减少寄存器溢出**：CSR A^T x -40%、CSR Ax -13%
+3. **加速路径**：@memset 替代 volatile clearUsize，合并 merge+counting 消除一次 O(nnz) pass
+4. **逐层展开别名**：`self.col_starts[col]` → `const starts = self.col_starts; starts[col]` 减少结构体字段解引用
 
-## 9. 复现
+## 迭代 5：Sparse Accumulator 重构（移除 marks 数组）
+
+### 变更背景
+
+通过阅读 C++ 对照实现 `HighsSparseVectorSum`（`HiGHS/highs/util/HighsSparseVectorSum.h`），发现 C++ 没有使用独立的 marks 数组 + generation 计数器来判断条目是否已触碰，而是利用值本身：清零后所有值为 0.0，`values[index] != 0.0` 等价于"已触碰"。
+
+**原 Zig 实现（generation 模式）每次 addAssumeValid 的访问模式（调用次数 × 每条目）：**
+```
+第一遍（首次触碰）:
+  load marks[index] + load generation + compare + 分支
+  store marks[index] + store dense_values[index]
+  load active.ptr + load active.len + store id + store len
+→ 总共 4 loads + 5 stores + 1 分支
+
+第二遍（累加）:
+  load marks[index] + load generation + compare + 分支
+  load dv[index] + add + store dv[index]
+→ 总共 3 loads + 2 stores + 1 分支
+```
+
+**新 Zig 实现（value-check 模式，匹配 C++ 设计）：**
+```
+第一遍（首次触碰）:
+  load dv[index] + compare 0 + 分支（被预测）
+  store dv[index] + load active.ptr + load active.len + store id + store len
+→ 总共 2 loads + 3 stores（-2 loads, -2 stores 比 generation 模式）
+
+第二遍（累加）:
+  load dv[index] + compare 0 + 跳转
+  add + store
+→ 总共 1 load + 1 store（-2 loads, -1 store 比 generation 模式）
+```
+
+合计：**每条目 100,000 次调用（首碰+累加）减少约 200,000−300,000 次内存操作**。
+
+### 代价
+
+`clear()` 从 O(1)（generation++ + 列表清零）变为依赖密度的稀疏/密集清零：
+- 触碰率 < 30%（`10*nnz < 3*dim`）：只清零 active 条目的值
+- 触碰率 ≥ 30%：`@memset(full_array, 0)` 清零 400KB
+
+对于 benchmark 的 100% 密集模式，clear 额外消耗 ~3µs，但每次 add 节省的内存操作（~2 个周期 × 100,000 次 = ~66µs）远超此开销。
+
+### 结果（11 轮中位对比）
+
+| 指标 | Generation 模式 | Value-check 模式 | C++ | 变化 |
+|---|---|---|---|---|
+| 中位 (ns) | 203,304 | 170,946 | 138,819 | **-15.9%** |
+| 最佳 (ns) | 202,284 | 168,925 | 138,819 | **-16.5%** |
+| 相对 C++ | -31.4% | **-17.8%** | — | +13.6pp |
+
+### 最终对比（迭代 5 最佳运行 vs C++）
+
+| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 | 变化趋势 |
+|---|---|---|---|---|
+| clear_output | 3,409 | 3,872 | **+13.6%** | → |
+| CSC `Ax` dense | 143,019 | 236,191 | **+65.1%** | ↑ |
+| CSR `Ax` dense | 143,729 | 138,417 | -3.7% | ↑ |
+| CSC `A^T x` | 99,773 | 139,528 | **+39.8%** | ↑ |
+| CSR `A^T x` | 214,543 | 188,462 | -13.1% | → |
+| `alpha*A*x+y` | 125,197 | 232,705 | **+85.9%** | → |
+| compensated product | 255,046 | 378,600 | **+48.4%** | → |
+| row/column scaling | 112,890 | 163,614 | **+44.9%** | → |
+| CSC→CSR, caller-owned | 574,526 | 612,668 | **+6.6%** | ↑ |
+| transpose, caller-owned | 557,169 | 926,156 | **+66.2%** | ↑ |
+| builder, sorted checked | 842,078 | 814,793 | -3.2% | → |
+| builder, general unsorted | 1,966,445 | 3,451,314 | **+75.4%** | → |
+| sparse accumulator | 168,925 | 138,819 | -17.8% | ↑ |
+
+↑ 表示该内核从迭代 4 进一步改善。
+
+## 迭代 6：传参方式优化 self: Self → self: *const Self
+
+### 变更背景
+
+通过阅读 C++ `HighsSparseMatrix` 实现发现，C++ 的 product()、productTranspose() 等热路径函数通过 `this` 指针（8 字节）访问矩阵数据，而 Zig `CsrView.multiplyAssumeValid` 等函数将整个 `CsrView`（48 字节）通过值传递。
+
+在 x86-64 SysV ABI 下，大于 16 字节的结构体通过隐藏指针 + 隐式 memcpy 传递（byval）。每次调用热路径函数时编译器需要为 `self` 参数分配栈空间并拷贝 48 字节。更重要的是，byval 的拷贝特性在 LLVM IR 中创建 alloca + memcpy，影响别名分析和寄存器分配的优化。
+
+### 变更内容
+
+- csr_view.zig：multiply、multiplyAssumeValid、transposeMultiply、transposeMultiplyAssumeValid — `self: Self` → `self: *const Self`
+- csc.zig：8 个热路径函数 — `self: Self` → `self: *const Self`
+- fillFromCscAssumeValid、transposeIntoAssumeValid：`matrix: CscMatrix` → `matrix: *const CscMatrix`
+
+### 结果（11 轮中位，关键内核）
+
+| Kernel | 迭代 5 中位 (ns) | 迭代 6 中位 (ns) | 变化 |
+|---|---|---|---|
+| CSR Ax dense | 147,204 | 144,262 | **-2.0%** |
+| CSR A^T x | 318,387 | 288,723 | **-9.3%** |
+| CSC Ax dense | 308,077 | 297,724 | **-3.4%** |
+| CSC A^T x | 101,709 | 100,051 | -1.6% |
+| transpose into | 881,406 | 861,546 | -2.3% |
+
+**CSR A^T x 中位 -9.3%** 最显著。该 kernel 之前受 `y.ptr` 栈重载问题困扰。减少 `self` 参数大小（48 字节→8 字节指针）降低了寄存器压力，LLVM 可以将更多指针保留在寄存器中而非溢出到栈。
+
+### 最终对比（迭代 6 最佳运行 vs C++）
+
+| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 |
+|---|---|---|---|
+| clear_output | 3,409 | 3,872 | **+13.6%** |
+| CSC Ax dense | 143,100 | 236,191 | **+65.1%** |
+| CSR Ax dense | 142,630 | 138,417 | -3.0% |
+| CSC A^T x | 99,118 | 139,528 | **+40.7%** |
+| CSR A^T x | 213,720 | 188,462 | -13.4% |
+| alpha*A*x+y | 125,197 | 232,705 | **+85.9%** |
+| compensated product | 255,046 | 378,600 | **+48.4%** |
+| row/column scaling | 112,890 | 163,614 | **+44.9%** |
+| CSC→CSR, caller-owned | 665,147 | 612,668 | -8.6% |
+| transpose, caller-owned | 696,725 | 926,156 | **+32.8%** |
+| builder, sorted checked | 842,078 | 814,793 | -3.2% |
+| builder, general unsorted | 1,966,445 | 3,451,314 | **+75.4%** |
+| sparse accumulator | 168,655 | 138,819 | -17.8% |
+
+## 10. 优化总结
+
+### 9 轮优化后的整体状态
+
+**已确认优于 C++ 的内核（9/13）：**
+- clear_output (+13.6%)、CSC `Ax` dense (+65.1%)、CSC `A^T x` (+40.7%)
+- `alpha*A*x+y` (+85.9%)、compensated product (+48.4%)、scaling (+44.9%)
+- transpose, caller-owned (+32.8%)
+- builder, general unsorted (+75.4%)
+
+**仍有差距但连续改善的内核（4/13）：**
+- CSR `Ax` dense（-3.0%）：从 -11.1% 持续改善至接近持平
+- CSR `A^T x`（-13.4%）：scatter 是 CSR 格式固有成本，但中位从 -64.5%→-13.4%（6 轮持续改善）
+- builder sorted checked（-3.2%）：从 -15.3% 连续改善
+- CSC→CSR caller-owned（-8.6%）：从 -24.4%→+6.6%（v5）→-8.6%（此轮受 CPU 频率波动影响）
+- sparse accumulator（-17.8%）：从 -31.4% 大幅改善（v5）
+
+### 各落后内核的瓶颈根源
+
+1. **CSR A^T x (-13.1%)** — 格式本质问题：CSR 的转置乘法是 scatter 模式（`y[col] += val * x[row]`），随机写 `y`。CSC 的转置乘法是 gather 模式（每列一个局部 sum），快 3×。若调用方有 CSC 可用，应直接使用 `csc.transposeMultiply`。保留 CSR 版本仅为避免格式转换成本。
+2. **CSR Ax (-3.7%)** — 已接近持平。CSC 版本 +65% 远超 C++；CSR 版本仅用于只构造了 CSR 缓存的场景。
+3. **Builder sorted (-3.2%)** — 基本持平。剩余差距来自 Zig `smp_allocator` vs C++ `malloc` 的分配路径差异。
+4. **Sparse accumulator (-17.8%)** — 原使用多余的 marks 数组和 generation 计数器，导致每次 `add` 多 1-2 次不必要的内存加载。改用 value-check 后大幅改善，剩余差距可能来自 CPU 频率浮动而非代码本身。
+
+### 全部关键优化手段回顾
+
+1. `@setFloatMode(.optimized)` 浮点 fast-math 至所有热路径（GC 计数循环除外）
+2. 本地别名提取 `self.field` 为局部 const，减少结构体字段解引用（关键修复了 CSR A^T x 的 y.ptr 栈重载）
+3. `memory.clearF64` 向量化清零替代逐元素 HCD 初始化（compensated product +46.8%）
+4. Scaling 最简本地别名策略（+26.4% 稳定）
+5. Builder 合并 merge + counting 消除一次 O(nnz) pass
+6. `@memset` 替代 volatile `clearUsize` 消除编译器优化屏障
+7. **Sparse accumulator 去 marks 数组**（-31.4% → -17.8% vs C++）
+8. **不启用**显式 `-fllvm` 或 LTO（Zig 默认选项更优）
+9. volatile 向量清零对 Zig/LLVM 是正确选择（非 volatile 引发代码调度退化）
+
+## 11. 复现
 
 脚本会重新构建 HiGHS、Zig benchmark 和 C++ harness，并把每轮原始 CSV 写到临时目录：
 

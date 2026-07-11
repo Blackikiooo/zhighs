@@ -77,12 +77,12 @@ pub const CsrView = struct {
 
     /// CSR-native y = A*x. Each output row is an independent contiguous dot
     /// product, avoiding the random output scatter required by CSC.
-    pub fn multiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn multiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplyAssumeValid(x, y);
     }
 
-    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub fn multiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
         const nrow = self.num_rows;
         const rs = self.row_starts;
@@ -101,12 +101,12 @@ pub const CsrView = struct {
 
     /// CSR-native y = transpose(A)*x. CSC is normally faster for this direction;
     /// this API avoids a format conversion when only CSR is available.
-    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn transposeMultiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
         self.transposeMultiplyAssumeValid(x, y);
     }
 
-    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub fn transposeMultiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         @setFloatMode(.optimized);
         const nrow = self.num_rows;
         const rs = self.row_starts;
@@ -176,7 +176,7 @@ pub const CsrCache = struct {
         const values = try allocator.alloc(f64, matrix.nnz());
         errdefer allocator.free(values);
 
-        try fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
+        try fillFromCscAssumeValid(&matrix, row_starts, col_indices, values, row_cursor_scratch);
 
         return .{
             .source_revision = source_revision,
@@ -224,12 +224,12 @@ pub const CsrCache = struct {
 };
 
 /// Allocation-free CSC-to-CSR conversion into exact-size caller buffers.
-pub fn fillFromCsc(matrix: csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+pub fn fillFromCsc(matrix: *const csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
     try matrix.validate();
     return fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
 }
 
-pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+pub fn fillFromCscAssumeValid(matrix: *const csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
     if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
         values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
         return error.DimensionMismatch;
