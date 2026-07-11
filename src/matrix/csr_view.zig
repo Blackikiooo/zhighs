@@ -9,6 +9,7 @@ const std = @import("std");
 const foundation = @import("foundation");
 const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
+const memory = @import("memory.zig");
 
 const RowId = foundation.RowId;
 const ColId = foundation.ColId;
@@ -73,6 +74,38 @@ pub const CsrView = struct {
             .values = self.values[begin..end],
         };
     }
+
+    /// CSR-native y = A*x. Each output row is an independent contiguous dot
+    /// product, avoiding the random output scatter required by CSC.
+    pub fn multiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+        if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
+        self.multiplyAssumeValid(x, y);
+    }
+
+    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        for (0..self.num_rows) |row_index| {
+            var sum: f64 = 0.0;
+            for (self.row_starts[row_index]..self.row_starts[row_index + 1]) |position|
+                sum += self.values[position] * x[self.col_indices[position].toUsize()];
+            y[row_index] = sum;
+        }
+    }
+
+    /// CSR-native y = transpose(A)*x. CSC is normally faster for this direction;
+    /// this API avoids a format conversion when only CSR is available.
+    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+        if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
+        self.transposeMultiplyAssumeValid(x, y);
+    }
+
+    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        memory.clearF64(y);
+        for (0..self.num_rows) |row_index| {
+            const multiplier = x[row_index];
+            for (self.row_starts[row_index]..self.row_starts[row_index + 1]) |position|
+                y[self.col_indices[position].toUsize()] += self.values[position] * multiplier;
+        }
+    }
 };
 
 /// Owning, rebuildable CSR cache.
@@ -104,38 +137,30 @@ pub const CsrCache = struct {
     /// It avoids a redundant O(nnz) structural scan while retaining allocation
     /// and dimension-overflow errors. The caller owns the validity proof.
     pub fn buildAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64) (std.mem.Allocator.Error || csc.MatrixError)!Self {
+        const next = try allocator.alloc(usize, matrix.num_rows);
+        defer allocator.free(next);
+        return buildWithScratchAssumeValid(allocator, matrix, source_revision, next);
+    }
+
+    pub fn buildWithScratch(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
+        try matrix.validate();
+        return buildWithScratchAssumeValid(allocator, matrix, source_revision, row_cursor_scratch);
+    }
+
+    /// Reuses caller-owned row cursor storage and removes one temporary
+    /// allocation from repeated CSC-to-CSR conversions.
+    pub fn buildWithScratchAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
         if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
+        if (row_cursor_scratch.len < matrix.num_rows) return error.DimensionMismatch;
 
         const row_starts = try allocator.alloc(usize, matrix.num_rows + 1);
         errdefer allocator.free(row_starts);
-        @memset(row_starts, 0);
-
-        // Count row entries. Index + 1 leaves row_starts[0] as the zero prefix.
-        for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
-        for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
-
         const col_indices = try allocator.alloc(ColId, matrix.nnz());
         errdefer allocator.free(col_indices);
         const values = try allocator.alloc(f64, matrix.nnz());
         errdefer allocator.free(values);
 
-        // One temporary cursor per row is the only conversion workspace. It is
-        // released immediately; the persistent cache contains exactly CSR data.
-        const next = try allocator.dupe(usize, row_starts[0..matrix.num_rows]);
-        defer allocator.free(next);
-
-        for (0..matrix.num_cols) |col_index| {
-            // Matrix dimensions were validated above, so every column offset is
-            // representable and cannot equal the reserved invalid sentinel.
-            const col_id = ColId.fromUsize(col_index) catch unreachable;
-            for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |csc_position| {
-                const row_index = matrix.row_indices[csc_position].toUsize();
-                const csr_position = next[row_index];
-                col_indices[csr_position] = col_id;
-                values[csr_position] = matrix.values[csc_position];
-                next[row_index] += 1;
-            }
-        }
+        try fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
 
         return .{
             .source_revision = source_revision,
@@ -181,6 +206,33 @@ pub const CsrCache = struct {
         return current_view.row(row_id);
     }
 };
+
+/// Allocation-free CSC-to-CSR conversion into exact-size caller buffers.
+pub fn fillFromCsc(matrix: csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+    try matrix.validate();
+    return fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
+}
+
+pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []usize, col_indices: []ColId, values: []f64, row_cursor_scratch: []usize) csc.MatrixError!void {
+    if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
+        values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
+        return error.DimensionMismatch;
+    memory.clearUsize(row_starts);
+    for (matrix.row_indices) |row_id| row_starts[row_id.toUsize() + 1] += 1;
+    for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
+    const next = row_cursor_scratch[0..matrix.num_rows];
+    @memcpy(next, row_starts[0..matrix.num_rows]);
+    for (0..matrix.num_cols) |col_index| {
+        const col_id = ColId.fromUsize(col_index) catch unreachable;
+        for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            const destination = next[row];
+            col_indices[destination] = col_id;
+            values[destination] = matrix.values[position];
+            next[row] += 1;
+        }
+    }
+}
 
 test "CSC to CSR conversion preserves rows including empty rows" {
     // Matrix rows: [2,0,-1], [0,0,0], [3,4,5].
@@ -282,4 +334,23 @@ test "random CSC and CSR represent identical coordinates" {
             try std.testing.expect(found);
         }
     }
+}
+
+test "CSR native products match CSC products and scratch build" {
+    var starts = [_]usize{ 0, 2, 3 };
+    var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
+    var values = [_]f64{ 2.0, 3.0, 4.0 };
+    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    var scratch: [2]usize = undefined;
+    var cache = try CsrCache.buildWithScratch(std.testing.allocator, matrix, 0, &scratch);
+    defer cache.deinit(std.testing.allocator);
+    const csr = cache.viewAssumeCurrent();
+    var csc_y: [2]f64 = undefined;
+    var csr_y: [2]f64 = undefined;
+    try matrix.multiply(&.{ 5.0, 6.0 }, &csc_y);
+    try csr.multiply(&.{ 5.0, 6.0 }, &csr_y);
+    try std.testing.expectEqualSlices(f64, &csc_y, &csr_y);
+    try matrix.transposeMultiply(&.{ 5.0, 6.0 }, &csc_y);
+    try csr.transposeMultiply(&.{ 5.0, 6.0 }, &csr_y);
+    try std.testing.expectEqualSlices(f64, &csc_y, &csr_y);
 }

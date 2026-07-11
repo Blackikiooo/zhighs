@@ -41,6 +41,8 @@ zig build bench-hcd -Doptimize=ReleaseFast
 - [x] 实现函数式追加/删除行列和动态行 checkpoint/rollback。
 - [x] 实现 generation-mark `SparseAccumulator`，服务于聚合、cuts 和 presolve。
 - [x] 建立 `bench-matrix` ReleaseFast 专项基准。
+- [x] 深度审计 matrix 热路径，为验证、排序、清零、稀疏乘法、格式转换和高精度计算提供显式性能取舍 API。
+- [x] 建立 HiGHS/C++ Release 对照 benchmark，并在 `bench/matrix/results.md` 记录环境、方法、结果和复现命令。
 - [x] 对照本地 HiGHS 实现 `range/assessment/alphaProductPlusY/productQuad` 等通用接口。
 - [x] 将 partitioned row-wise、pricing、collectAj 和 basis update 明确归属 `lp/simplex`。
 - [ ] 建立自动化 HiGHS C++ 矩阵差分测试，覆盖构建、乘法、scaling、切片和格式转换。

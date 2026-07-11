@@ -7,6 +7,7 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const sparse_vector = @import("sparse_vector.zig");
+const memory = @import("memory.zig");
 
 const RowId = foundation.RowId;
 const ColId = foundation.ColId;
@@ -30,6 +31,8 @@ pub const MatrixError = sparse_vector.SparseVectorError || error{
     InvalidPermutation,
     /// A dynamic-row rollback checkpoint does not belong to current storage.
     InvalidCheckpoint,
+    /// A fast builder path received triplets not ordered by (column, row).
+    TripletsNotSorted,
 };
 
 /// Owning CSC matrix. Column j occupies the half-open range described by
@@ -127,16 +130,64 @@ pub const CscMatrix = struct {
         self.multiplyAssumeValid(x, y);
     }
 
-    /// Hot-path version: dimensions and CSC invariants must already be valid.
+    /// Dense-vector hot path: branchless traversal after clearing y.
     pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
-        @memset(y, 0.0);
+        memory.clearF64(y);
         for (0..self.num_cols) |col| {
             const x_value = x[col];
-            // Exact zeros are frequent in dense simplex work vectors.
+            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
+                const row = self.row_indices[position].toUsize();
+                y[row] += self.values[position] * x_value;
+            }
+        }
+    }
+
+    pub fn multiplySkippingZeros(self: Self, x: []const f64, y: []f64) MatrixError!void {
+        if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
+        self.multiplySkippingZerosAssumeValid(x, y);
+    }
+
+    /// Prefer this over the branchless kernel only when x contains enough exact
+    /// zeros to compensate for one branch per matrix column.
+    pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        memory.clearF64(y);
+        for (0..self.num_cols) |col| {
+            const x_value = x[col];
             if (x_value == 0.0) continue;
             for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
                 const row = self.row_indices[position].toUsize();
                 y[row] += self.values[position] * x_value;
+            }
+        }
+    }
+
+    /// Checked Ax for a genuinely sparse input vector. Unlike scanning a dense
+    /// slice for zeros, work is proportional to active columns plus output clear.
+    pub fn multiplySparse(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+        if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
+        try x.validate();
+        self.multiplySparseAssumeValid(x, y);
+    }
+
+    pub fn multiplySparseAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+        memory.clearF64(y);
+        self.addSparseProductAssumeValid(x, y);
+    }
+
+    pub fn addSparseProduct(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+        if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
+        try x.validate();
+        self.addSparseProductAssumeValid(x, y);
+    }
+
+    /// Accumulates y += A*x for sparse x without clearing y. This is the hot
+    /// path when the caller already owns a zeroed/generation-marked workspace.
+    pub fn addSparseProductAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+        for (x.indices, x.values) |col_id, multiplier| {
+            const col = col_id.toUsize();
+            for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
+                const row = self.row_indices[position].toUsize();
+                y[row] += self.values[position] * multiplier;
             }
         }
     }

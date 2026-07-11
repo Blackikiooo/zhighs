@@ -18,6 +18,9 @@ const Triplet = struct {
     row: RowId,
     col: ColId,
     value: f64,
+    // Makes (col,row,sequence) a total order so unstable PDQ sorting still
+    // preserves deterministic duplicate summation order.
+    sequence: usize,
 };
 
 const TripletList = std.MultiArrayList(Triplet);
@@ -63,7 +66,7 @@ pub const MatrixBuilder = struct {
         if (!std.math.isFinite(value)) return error.NonFiniteValue;
 
         try self.reserve(allocator, 1);
-        self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value });
+        self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value, .sequence = self.len() });
     }
 
     /// Appends a canonical sparse column in one reserved batch.
@@ -74,7 +77,7 @@ pub const MatrixBuilder = struct {
 
         try self.reserve(allocator, vector.nnz());
         for (vector.indices, vector.values) |row, value| {
-            self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value });
+            self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value, .sequence = self.len() });
         }
     }
 
@@ -86,7 +89,7 @@ pub const MatrixBuilder = struct {
 
         try self.reserve(allocator, vector.nnz());
         for (vector.indices, vector.values) |col, value| {
-            self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value });
+            self.entries.appendAssumeCapacity(.{ .row = row, .col = col, .value = value, .sequence = self.len() });
         }
     }
 
@@ -94,13 +97,30 @@ pub const MatrixBuilder = struct {
     /// Values with abs(value) <= zero_tolerance are omitted after duplicates are
     /// summed. The builder remains reusable and holds the compacted triplets.
     pub fn freeze(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+        return self.freezeInternal(allocator, zero_tolerance, true);
+    }
+
+    /// Linear-time freeze for callers that already emit nondecreasing
+    /// (column,row) coordinates. A linear order check is retained.
+    pub fn freezeSorted(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+        if (!self.isSorted()) return error.TripletsNotSorted;
+        return self.freezeInternal(allocator, zero_tolerance, false);
+    }
+
+    /// Fastest construction path: caller guarantees nondecreasing coordinates.
+    /// Duplicate coordinates may remain adjacent and are merged stably.
+    pub fn freezeSortedAssumeValid(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+        return self.freezeInternal(allocator, zero_tolerance, false);
+    }
+
+    fn freezeInternal(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64, sort_entries: bool) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         if (!std.math.isFinite(zero_tolerance) or zero_tolerance < 0.0)
             return error.InvalidTolerance;
         const length = self.len();
-        // Stable sort preserves insertion order among equal coordinates, which
-        // makes duplicate floating-point summation deterministic without an
-        // extra ordinal stream.
-        self.entries.sort(SortContext{ .fields = self.entries.slice() });
+        // Zig 0.16 MultiArrayList stable context sort is insertion sort. Use
+        // PDQ plus sequence as a total tie-break key for O(n log n) behavior
+        // without sacrificing deterministic duplicate summation.
+        if (sort_entries) self.entries.sortUnstable(SortContext{ .fields = self.entries.slice() });
         var fields = self.entries.slice();
         const rows = fields.items(.row);
         const cols = fields.items(.col);
@@ -121,7 +141,7 @@ pub const MatrixBuilder = struct {
             if (!std.math.isFinite(sum)) return error.NonFiniteValue;
             if (@abs(sum) <= zero_tolerance) continue;
 
-            fields.set(write, .{ .row = row, .col = col, .value = sum });
+            fields.set(write, .{ .row = row, .col = col, .value = sum, .sequence = write });
             write += 1;
         }
         self.entries.shrinkRetainingCapacity(write);
@@ -151,6 +171,19 @@ pub const MatrixBuilder = struct {
             .values = output_values,
         };
     }
+
+    fn isSorted(self: Self) bool {
+        const fields = self.entries.slice();
+        const rows = fields.items(.row);
+        const cols = fields.items(.col);
+        for (1..self.entries.len) |index| {
+            const previous_col = cols[index - 1].toUsize();
+            const current_col = cols[index].toUsize();
+            if (current_col < previous_col) return false;
+            if (current_col == previous_col and rows[index].toUsize() < rows[index - 1].toUsize()) return false;
+        }
+        return true;
+    }
 };
 
 inline fn sameCoordinate(a_row: RowId, a_col: ColId, b_row: RowId, b_col: ColId) bool {
@@ -168,7 +201,11 @@ const SortContext = struct {
         const b_col = cols[b].toUsize();
         if (a_col != b_col) return a_col < b_col;
         const rows = self.fields.items(.row);
-        return rows[a].toUsize() < rows[b].toUsize();
+        const a_row = rows[a].toUsize();
+        const b_row = rows[b].toUsize();
+        if (a_row != b_row) return a_row < b_row;
+        const sequences = self.fields.items(.sequence);
+        return sequences[a] < sequences[b];
     }
 };
 
@@ -277,4 +314,20 @@ test "randomized CSC multiply agrees with dense reference" {
     var actual: [row_count]f64 = undefined;
     try matrix.multiply(&x, &actual);
     try std.testing.expectEqualSlices(f64, &expected, &actual);
+}
+
+test "sorted freeze avoids sorting and rejects unordered coordinates" {
+    var builder = try MatrixBuilder.init(2, 2);
+    defer builder.deinit(std.testing.allocator);
+    try builder.append(std.testing.allocator, try RowId.init(0), try ColId.init(0), 1.0);
+    try builder.append(std.testing.allocator, try RowId.init(1), try ColId.init(0), 2.0);
+    try builder.append(std.testing.allocator, try RowId.init(0), try ColId.init(1), 3.0);
+    var matrix = try builder.freezeSorted(std.testing.allocator, 0.0);
+    defer matrix.deinit(std.testing.allocator);
+    try matrix.validate();
+
+    builder.clearRetainingCapacity();
+    try builder.append(std.testing.allocator, try RowId.init(0), try ColId.init(1), 1.0);
+    try builder.append(std.testing.allocator, try RowId.init(0), try ColId.init(0), 2.0);
+    try std.testing.expectError(error.TripletsNotSorted, builder.freezeSorted(std.testing.allocator, 0.0));
 }

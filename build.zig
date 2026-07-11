@@ -91,4 +91,8 @@ pub fn build(b: *std.Build) void {
     const run_matrix_bench = b.addRunArtifact(matrix_bench);
     const matrix_bench_step = b.step("bench-matrix", "Run sparse matrix microbenchmarks");
     matrix_bench_step.dependOn(&run_matrix_bench.step);
+
+    const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
+    const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
+    build_matrix_bench_step.dependOn(&install_matrix_bench.step);
 }

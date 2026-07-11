@@ -7,6 +7,7 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const csc = @import("csc.zig");
+const memory = @import("memory.zig");
 
 /// Checked transpose for matrices entering from an untrusted boundary.
 pub fn transpose(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
@@ -21,27 +22,13 @@ pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix)
 
     const transposed_starts = try allocator.alloc(usize, matrix.num_rows + 1);
     errdefer allocator.free(transposed_starts);
-    @memset(transposed_starts, 0);
-    for (matrix.row_indices) |row_id| transposed_starts[row_id.toUsize() + 1] += 1;
-    for (0..matrix.num_rows) |row| transposed_starts[row + 1] += transposed_starts[row];
-
     const transposed_rows = try allocator.alloc(foundation.RowId, matrix.nnz());
     errdefer allocator.free(transposed_rows);
     const transposed_values = try allocator.alloc(f64, matrix.nnz());
     errdefer allocator.free(transposed_values);
-    const next = try allocator.dupe(usize, transposed_starts[0..matrix.num_rows]);
+    const next = try allocator.alloc(usize, matrix.num_rows);
     defer allocator.free(next);
-
-    for (0..matrix.num_cols) |source_col| {
-        const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
-        for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
-            const target_col = matrix.row_indices[position].toUsize();
-            const destination = next[target_col];
-            transposed_rows[destination] = target_row;
-            transposed_values[destination] = matrix.values[position];
-            next[target_col] += 1;
-        }
-    }
+    try transposeIntoAssumeValid(matrix, transposed_starts, transposed_rows, transposed_values, next);
 
     return .{
         .num_rows = matrix.num_cols,
@@ -50,6 +37,33 @@ pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix)
         .row_indices = transposed_rows,
         .values = transposed_values,
     };
+}
+
+pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []usize) csc.MatrixError!void {
+    try matrix.validate();
+    return transposeIntoAssumeValid(matrix, starts, rows, values, cursor_scratch);
+}
+
+/// Allocation-free explicit transpose into exact-size caller buffers.
+pub fn transposeIntoAssumeValid(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []usize) csc.MatrixError!void {
+    if (starts.len != matrix.num_rows + 1 or rows.len != matrix.nnz() or
+        values.len != matrix.nnz() or cursor_scratch.len < matrix.num_rows)
+        return error.DimensionMismatch;
+    memory.clearUsize(starts);
+    for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
+    for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
+    const next = cursor_scratch[0..matrix.num_rows];
+    @memcpy(next, starts[0..matrix.num_rows]);
+    for (0..matrix.num_cols) |source_col| {
+        const target_row = foundation.RowId.fromUsize(source_col) catch unreachable;
+        for (matrix.col_starts[source_col]..matrix.col_starts[source_col + 1]) |position| {
+            const target_col = matrix.row_indices[position].toUsize();
+            const destination = next[target_col];
+            rows[destination] = target_row;
+            values[destination] = matrix.values[position];
+            next[target_col] += 1;
+        }
+    }
 }
 
 test "explicit transpose is canonical and swaps dimensions" {

@@ -45,6 +45,10 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return self.active.items.len;
         }
 
+        pub fn reserve(self: *Self, allocator: std.mem.Allocator, touched_capacity: usize) std.mem.Allocator.Error!void {
+            try self.active.ensureTotalCapacity(allocator, touched_capacity);
+        }
+
         /// Logical clear is O(1) except once per 2^32 generations.
         pub fn clear(self: *Self) void {
             self.active.clearRetainingCapacity();
@@ -72,6 +76,20 @@ pub fn SparseAccumulator(comptime Id: type) type {
                 const sum = self.dense_values[index] + value;
                 if (!std.math.isFinite(sum)) return error.NonFiniteValue;
                 self.dense_values[index] = sum;
+            }
+        }
+
+        /// Allocation-free update after reserve. Caller guarantees a valid ID,
+        /// finite value/sum, and enough capacity for a newly touched index.
+        pub fn addAssumeValid(self: *Self, id: Id, value: f64) void {
+            if (value == 0.0) return;
+            const index = id.toUsize();
+            if (self.marks[index] != self.generation) {
+                self.marks[index] = self.generation;
+                self.dense_values[index] = value;
+                self.active.appendAssumeCapacity(id);
+            } else {
+                self.dense_values[index] += value;
             }
         }
 

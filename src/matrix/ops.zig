@@ -143,6 +143,21 @@ pub fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, 
     if (alpha == 0.0) return;
     for (0..matrix.num_cols) |col| {
         const multiplier = alpha * x[col];
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position|
+            y[matrix.row_indices[position].toUsize()] += multiplier * matrix.values[position];
+    }
+}
+
+pub fn addProductSkippingZeros(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
+    if (x.len != matrix.num_cols or y.len != matrix.num_rows) return error.DimensionMismatch;
+    if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
+    addProductSkippingZerosAssumeValid(matrix, alpha, x, y);
+}
+
+pub fn addProductSkippingZerosAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
+    if (alpha == 0.0) return;
+    for (0..matrix.num_cols) |col| {
+        const multiplier = alpha * x[col];
         if (multiplier == 0.0) continue;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position|
             y[matrix.row_indices[position].toUsize()] += multiplier * matrix.values[position];
@@ -170,6 +185,10 @@ pub fn addTransposeProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []co
 pub fn multiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) csc.MatrixError!void {
     if (x.len != matrix.num_cols or y.len != matrix.num_rows or scratch.len != matrix.num_rows)
         return error.DimensionMismatch;
+    multiplyHighPrecisionAssumeValid(matrix, x, y, scratch);
+}
+
+pub fn multiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
     for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
     for (0..matrix.num_cols) |col| {
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -180,14 +199,67 @@ pub fn multiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64, sc
     for (y, scratch) |*result, sum| result.* = sum.toHD();
 }
 
+/// HiGHS-compatible fast HCD accumulation: residuals are accumulated without
+/// per-entry renormalization. Faster, but the robust variant above is preferred
+/// when a row may contain very many terms or extreme dynamic range.
+pub fn multiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
+    for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
+    for (0..matrix.num_cols) |col| {
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            scratch[row] = scratch[row].addHCDFast(foundation.HCD.twoProduct(matrix.values[position], x[col]));
+        }
+    }
+    for (y, scratch) |*result, sum| result.* = sum.toHD();
+}
+
+/// Matches HiGHS productQuad semantics: multiplication rounds to f64, while
+/// accumulation uses an HCD residual. This is faster than exact two-product.
+pub fn multiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
+    for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
+    for (0..matrix.num_cols) |col| {
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            scratch[row] = scratch[row].addHDFast(matrix.values[position] * x[col]);
+        }
+    }
+    for (y, scratch) |*result, sum| result.* = sum.toHD();
+}
+
 /// High-precision y = transpose(A)*x; CSC needs only one HCD accumulator.
 pub fn transposeMultiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_rows or y.len != matrix.num_cols) return error.DimensionMismatch;
+    transposeMultiplyHighPrecisionAssumeValid(matrix, x, y);
+}
+
+pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
             const row = matrix.row_indices[position].toUsize();
             sum = sum.addHCD(foundation.HCD.twoProduct(matrix.values[position], x[row]));
+        }
+        y[col] = sum.toHD();
+    }
+}
+
+pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
+    for (0..matrix.num_cols) |col| {
+        var sum = foundation.HCD.initWithHD(0.0);
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            sum = sum.addHCDFast(foundation.HCD.twoProduct(matrix.values[position], x[row]));
+        }
+        y[col] = sum.toHD();
+    }
+}
+
+pub fn transposeMultiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
+    for (0..matrix.num_cols) |col| {
+        var sum = foundation.HCD.initWithHD(0.0);
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
+            const row = matrix.row_indices[position].toUsize();
+            sum = sum.addHDFast(matrix.values[position] * x[row]);
         }
         y[col] = sum.toHD();
     }
