@@ -132,6 +132,7 @@ pub const CscMatrix = struct {
 
     /// Dense-vector hot path: branchless traversal after clearing y.
     pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        @setFloatMode(.optimized);
         memory.clearF64(y);
         for (0..self.num_cols) |col| {
             const x_value = x[col];
@@ -150,6 +151,7 @@ pub const CscMatrix = struct {
     /// Prefer this over the branchless kernel only when x contains enough exact
     /// zeros to compensate for one branch per matrix column.
     pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        @setFloatMode(.optimized);
         memory.clearF64(y);
         for (0..self.num_cols) |col| {
             const x_value = x[col];
@@ -183,6 +185,7 @@ pub const CscMatrix = struct {
     /// Accumulates y += A*x for sparse x without clearing y. This is the hot
     /// path when the caller already owns a zeroed/generation-marked workspace.
     pub fn addSparseProductAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+        @setFloatMode(.optimized);
         for (x.indices, x.values) |col_id, multiplier| {
             const col = col_id.toUsize();
             for (self.col_starts[col]..self.col_starts[col + 1]) |position| {
@@ -200,6 +203,7 @@ pub const CscMatrix = struct {
 
     /// Hot-path transpose multiply with prevalidated dimensions and structure.
     pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        @setFloatMode(.optimized);
         for (0..self.num_cols) |col| {
             var sum: f64 = 0.0;
             for (self.col_starts[col]..self.col_starts[col + 1]) |position| {

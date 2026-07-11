@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const foundation = @import("foundation");
+const memory = @import("memory.zig");
 const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
 
@@ -128,6 +129,7 @@ pub const MatrixBuilder = struct {
 
         // Merge in place. Read positions never trail the write position, so no
         // temporary triplet allocation is needed after sorting.
+        @setFloatMode(.optimized);
         var read: usize = 0;
         var write: usize = 0;
         while (read < length) {
@@ -161,8 +163,10 @@ pub const MatrixBuilder = struct {
         errdefer allocator.free(output_values);
 
         // Count entries per column, then prefix-sum counts into CSC offsets.
+        const ncol = self.num_cols;
         for (compact_cols) |col| col_starts[col.toUsize() + 1] += 1;
-        for (0..self.num_cols) |col| col_starts[col + 1] += col_starts[col];
+        var c: usize = 0;
+        while (c < ncol) : (c += 1) col_starts[c + 1] += col_starts[c];
         return .{
             .num_rows = self.num_rows,
             .num_cols = self.num_cols,

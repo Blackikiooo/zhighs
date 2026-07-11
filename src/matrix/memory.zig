@@ -9,8 +9,7 @@ pub inline fn clearF64Bytes(values: []f64) void {
     @memset(std.mem.sliceAsBytes(values), 0);
 }
 
-/// Explicit vector stores avoid a slow scalar memset lowering observed with
-/// Zig 0.16 on some x86-64 targets. Unaligned vector pointers are intentional.
+/// Explicit SIMD vector stores. Unaligned vector pointers are intentional.
 pub inline fn clearF64(values: []f64) void {
     const Vector = @Vector(4, f64);
     var scalar_index: usize = 0;
@@ -25,6 +24,25 @@ pub inline fn clearF64(values: []f64) void {
         for (0..vector_count) |index| vectors[index] = zero;
     }
     const tail: [*]volatile f64 = @ptrCast(remaining[vector_count * 4 ..].ptr);
+    for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
+}
+
+/// Non-volatile clear for hot-path kernels where the compiler should be able
+/// to optimize through or merge subsequent writes.
+pub inline fn clearF64Fast(values: []f64) void {
+    const Vector = @Vector(4, f64);
+    var scalar_index: usize = 0;
+    while (scalar_index < values.len and (@intFromPtr(&values[scalar_index]) & (@alignOf(Vector) - 1)) != 0) : (scalar_index += 1)
+        values[scalar_index] = 0.0;
+
+    const remaining = values[scalar_index..];
+    const vector_count = remaining.len / 4;
+    const zero: Vector = @splat(0.0);
+    if (vector_count != 0) {
+        const vectors: [*]Vector = @ptrCast(@alignCast(remaining.ptr));
+        for (0..vector_count) |index| vectors[index] = zero;
+    }
+    const tail: [*]f64 = @ptrCast(remaining[vector_count * 4 ..].ptr);
     for (0..remaining.len - vector_count * 4) |index| tail[index] = 0.0;
 }
 

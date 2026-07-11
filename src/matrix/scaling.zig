@@ -28,11 +28,19 @@ pub fn apply(matrix: *csc.CscMatrix, factors: ScalingView) csc.MatrixError!void 
 
 /// Hot path for validated factors whose products are known representable.
 pub fn applyAssumeValid(matrix: *csc.CscMatrix, factors: ScalingView) void {
-    for (0..matrix.num_cols) |col| {
+    @setFloatMode(.optimized);
+    const ncol = matrix.num_cols;
+    const starts = matrix.col_starts;
+    const ri = matrix.row_indices;
+    const vs = matrix.values;
+    var col: usize = 0;
+    while (col < ncol) : (col += 1) {
         const col_factor = factors.col[col];
-        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            const row = matrix.row_indices[position].toUsize();
-            matrix.values[position] *= factors.row[row] * col_factor;
+        var position = starts[col];
+        const end = starts[col + 1];
+        while (position < end) : (position += 1) {
+            const row: usize = @intFromEnum(ri[position]);
+            vs[position] *= factors.row[row] * col_factor;
         }
     }
 }

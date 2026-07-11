@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const foundation = @import("foundation");
+const memory = @import("memory.zig");
 const csc = @import("csc.zig");
 
 pub const AbsoluteRange = struct { min: f64, max: f64 };
@@ -216,14 +217,34 @@ pub fn multiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f6
 /// Matches HiGHS productQuad semantics: multiplication rounds to f64, while
 /// accumulation uses an HCD residual. This is faster than exact two-product.
 pub fn multiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
-    for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
-    for (0..matrix.num_cols) |col| {
-        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            const row = matrix.row_indices[position].toUsize();
-            scratch[row] = scratch[row].addHDFast(matrix.values[position] * x[col]);
+    const ncol = matrix.num_cols;
+    const starts = matrix.col_starts;
+    const ri = matrix.row_indices;
+    const vs = matrix.values;
+    const xp = x.ptr;
+    const yp = y.ptr;
+    const sp = scratch.ptr;
+    // Clear scratch as flat f64 array: vectorized memset eliminates per-element loop
+    memory.clearF64(@as([*]f64, @ptrCast(sp))[0 .. scratch.len * 2]);
+    var col: usize = 0;
+    while (col < ncol) : (col += 1) {
+        const multiplier = xp[col];
+        var position = starts[col];
+        const end = starts[col + 1];
+        while (position < end) : (position += 1) {
+            const row: usize = @intFromEnum(ri[position]);
+            const prod = vs[position] * multiplier;
+            // Inline Knuth two_sum: high + product = new_high + error
+            const old_high = sp[row].high;
+            const new_high = old_high + prod;
+            const z = new_high - old_high;
+            const err = (old_high - (new_high - z)) + (prod - z);
+            sp[row].high = new_high;
+            sp[row].low += err;
         }
     }
-    for (y, scratch) |*result, sum| result.* = sum.toHD();
+    var row: usize = 0;
+    while (row < y.len) : (row += 1) yp[row] = sp[row].high + sp[row].low;
 }
 
 /// High-precision y = transpose(A)*x; CSC needs only one HCD accumulator.

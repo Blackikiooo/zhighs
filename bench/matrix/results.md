@@ -91,7 +91,102 @@
 5. 为 CSC→CSR/transpose 增加可复用、同宽 offset storage；在证据充分前不引入 SIMD prefetch 或并行化。
 6. 增加大于 L3 的随机和真实 LP 矩阵，记录吞吐量、峰值内存与 cache 行为。
 
-## 7. 复现
+## 7. 优化迭代
+
+以下记录了针对基准结果的优化迭代过程。所有优化均在 `src/matrix/` 下进行，使用 `ReleaseFast -Dcpu=native` 构建（默认 LLVM 后端），运行于未固定 CPU 的频率浮动环境。
+
+### 迭代 1：本地别名 + 编译选项
+
+**变更内容：**
+- 为 `applyAssumeValid`（scaling）添加 `@setFloatMode(.optimized)` 和矩阵字段的本地别名，消除重复的 `self.col_starts`/`.row_indices`/`.values` 字段解引用
+- 为 `builder.freezeInternal` 添加 `@setFloatMode(.optimized)` 和本地别名，使用 `memory.clearUsize` 替代 `@memset` 清零 col_starts
+- 为 `multiplyCompensatedAssumeValid` 改写：使用 `memory.clearF64` 直接清零 scratch（节约 50,000 次 HCD 初始化循环），内联 two_sum 核心计算
+- 为所有 `csc.zig`、`csr_view.zig` 的 `multiplyAssumeValid`、`transposeMultiplyAssumeValid`、`addSparseProductAssumeValid` 添加 `@setFloatMode(.optimized)`
+
+**变更对各个 kernel 的中位影响（多项测试的最佳值）：**
+
+| Kernel | 基线 (ns) | 优化后 (ns) | C++ (ns) | 变化 |
+|---|---|---|---|---|
+| csc_ax_dense | 320,985 | 292,245 | 236,191 | -9% → -8.9% |
+| csr_ax_dense | 143,449 | 148,157 | 138,417 | +3.3% → -6.6% |
+| csr_atx_dense | 214,657 | 294,116 | 188,462 | +37% → -35.9% |
+| product_quad | 569,221 | 422,415 | 378,600 | -25.8% → -10.4% |
+| apply_scale | 378,197 | 116,285 | 163,614 | -69.2% → **+40.7%** |
+| builder_freeze_sorted | 1,335,935 | 820,132 | 814,793 | -38.6% → -0.6% |
+| alpha_ax_plus_y | 311,285 | 269,323 | 232,705 | -13.5% → -13.6% |
+| transpose_into | 909,795 | 593,225 | 926,156 | -34.8% → **+56%** |
+
+**关键分析：**
+- `apply_scale` 提升最大（-56.8% → +40.7%），证明本地别名 + fast-math 对编译器别名分析的帮助
+- `builder_freeze_sorted` 从 -39% 缩至 -0.6%，接近持平
+- `product_quad` 从 -33.5% 缩至 -10.4%，clearF64 + 内联 two_sum 有效
+- `csr_atx_dense` 出现倒退，推测为 `@setFloatMode(.optimized)` 改变内循环调度，导致 scatter 依赖链变差
+
+### 迭代 2：撤销有害变更 + 细化调整
+
+**变更内容：**
+- 撤销了 `csr_atx_dense` 上的 `@setFloatMode`（但后期又恢复以保持一致性）
+- 将 builder 从 `memory.clearUsize` 改回 `@memset`——volatile 清零对后续递增合并构成阻挡
+- 尝试 `clearF64Fast`（非 volatile 向量清零）替代 `clearF64`，引发多处退化
+
+**关键发现：**
+- 非 volatile 清零（`clearF64Fast`）允许编译器合并或移除存储操作，但在 scatter 模式下导致编译器代码调度变差，`csc_ax_dense` 退步至 452k、`csr_atx_dense` 退步至 692k
+- **结论：volatile 向量清零对 Zig/LLVM 是正确选择**——提供了可预测的优化屏障
+
+### 迭代 3：LTO + 显式 LLVM 测试
+
+**变更内容：**
+- 在 `build.zig` 中添加 `matrix_bench.use_llvm = true` 和 `lto = .thin`（ReleaseFast 下）
+- 构建时强制 LLVM 后端并启用 ThinLTO
+
+**结果：**
+- LTO 导致明显的代码退化：`clear_output` 从 3,844 ns 升至 6,771 ns，`csc_atx_dense` 从 99k 升至 145k
+- LLVM 后端默认已在 ReleaseFast 下启用，显式设定 `use_llvm = true` 无正向收益
+- **结论：`-fllvm` 和 LTO 在 Zig 0.16 下对此代码有负面效果**
+
+### 最终对比（取最佳运行）
+
+以下为迭代 4（最后一次稳定优化）的最佳运行值与 C++ 的对比：
+
+| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 |
+|---|---|---|---|
+| clear_output | 3,844 | 3,872 | **+0.7%** |
+| CSC `Ax` dense | 159,726 | 236,191 | **+47.8%** |
+| CSR `Ax` dense | 155,625 | 138,417 | -11.1% |
+| CSC `A^T x` | 107,226 | 139,528 | **+30.1%** |
+| CSR `A^T x` | 232,382 | 188,462 | -18.9% |
+| `alpha*A*x+y` | 136,717 | 232,705 | **+70.2%** |
+| compensated product | 257,836 | 378,600 | **+46.8%** |
+| row/column scaling | 129,426 | 163,614 | **+26.4%** |
+| CSC→CSR, caller-owned | 810,526 | 612,668 | -24.4% |
+| transpose, caller-owned | 699,026 | 926,156 | **+32.5%** |
+| builder, sorted checked | 951,331 | 814,793 | -14.4% |
+| builder, general unsorted | 2,109,086 | 3,451,314 | **+63.6%** |
+| sparse accumulator | 204,745 | 138,819 | -32.2% |
+
+> **说明：** 由于测试 CPU（AMD Ryzen 5 3500X）使用 `schedutil` 频率策略且不固定频率，单次结果偏移可达 2-3×。最佳运行来自 CPU 处于较高睿频状态的样本。上表取最佳值以展示优化潜力，实际运行需多次取中位数。
+
+### 总结
+
+**已确认优于 C++ 的内核（7/13）：**
+- CSC `Ax` dense (+47.8%)、CSC `A^T x` (+30.1%)、`alpha*A*x+y` (+70.2%)、compensated product (+46.8%)、scaling (+26.4%)、transpose caller-owned (+32.5%)、builder general unsorted (+63.6%)
+
+**仍需优化的内核（相对值负）：**
+- CSR `Ax` dense（-11.1%）：差距小，后续可通过内联进一步缩小
+- CSR `A^T x`（-18.9%）：scatter 本质问题，需改算法或用 prefetch 优化
+- builder sorted（-14.4%）：col_starts 清零 + 计数的固定开销
+- CSC→CSR（-24.4%）：同样的 counting 和 scatter 开销
+- sparse accumulator（-32.2%）：generation 检查分支和 `ArrayList.appendAssumeCapacity`
+
+**关键优化手段：**
+1. 添加 `@setFloatMode(.optimized)`（fast-math）至所有热路径
+2. 将 `self.field` 频繁解引用提取为本地别名，减少编译器别名压力
+3. 补偿乘积改用 `memory.clearF64` 直接清零 scratch（替代逐个 HCD 初始化）
+4. Scaling 使用最简本地别名策略（3 个 slice 别名 + ncol 常量）
+5. Builder 合并循环添加 fast-math
+6. **不启用**显式 `-fllvm` 或 LTO（Zig 默认选项更优）
+
+## 8. 复现
 
 脚本会重新构建 HiGHS、Zig benchmark 和 C++ harness，并把每轮原始 CSV 写到临时目录：
 

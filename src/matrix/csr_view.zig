@@ -83,6 +83,7 @@ pub const CsrView = struct {
     }
 
     pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        @setFloatMode(.optimized);
         for (0..self.num_rows) |row_index| {
             var sum: f64 = 0.0;
             for (self.row_starts[row_index]..self.row_starts[row_index + 1]) |position|
@@ -99,6 +100,7 @@ pub const CsrView = struct {
     }
 
     pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+        @setFloatMode(.optimized);
         memory.clearF64(y);
         for (0..self.num_rows) |row_index| {
             const multiplier = x[row_index];
