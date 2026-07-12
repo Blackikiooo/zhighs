@@ -63,14 +63,26 @@ pub const Var = struct {
 
     // ── Convenience accessors (most common attributes) ────────────────────
 
-    pub fn getLB(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.lb, self.index); }
-    pub fn setLB(self: *Self, lb: f64) ModelError!void { try self.model.setDblAttrElement(.lb, self.index, lb); }
+    pub fn getLB(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.lb, self.index);
+    }
+    pub fn setLB(self: *Self, lb: f64) ModelError!void {
+        try self.model.setDblAttrElement(.lb, self.index, lb);
+    }
 
-    pub fn getUB(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.ub, self.index); }
-    pub fn setUB(self: *Self, ub: f64) ModelError!void { try self.model.setDblAttrElement(.ub, self.index, ub); }
+    pub fn getUB(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.ub, self.index);
+    }
+    pub fn setUB(self: *Self, ub: f64) ModelError!void {
+        try self.model.setDblAttrElement(.ub, self.index, ub);
+    }
 
-    pub fn getObj(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.obj, self.index); }
-    pub fn setObj(self: *Self, obj: f64) ModelError!void { try self.model.setDblAttrElement(.obj, self.index, obj); }
+    pub fn getObj(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.obj, self.index);
+    }
+    pub fn setObj(self: *Self, obj: f64) ModelError!void {
+        try self.model.setDblAttrElement(.obj, self.index, obj);
+    }
 
     pub fn getType(self: Self) ModelError!VarType {
         const code = try self.model.getCharAttrElement(.v_type, self.index);
@@ -81,10 +93,14 @@ pub const Var = struct {
     }
 
     /// Primal solution value (attribute `X`), available after `optimize`.
-    pub fn getX(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.x, self.index); }
+    pub fn getX(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.x, self.index);
+    }
 
     /// Reduced cost (attribute `RC`), available after `optimize`.
-    pub fn getRC(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.rc, self.index); }
+    pub fn getRC(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.rc, self.index);
+    }
 
     pub fn getVarName(self: Self) ModelError![]const u8 {
         return self.model.getStrAttrElement(.var_name, self.index);
@@ -101,14 +117,26 @@ pub const Var = struct {
         try self.model.setIntAttrElement(.v_basis, self.index, @intFromEnum(status));
     }
 
-    pub fn getStart(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.start, self.index); }
-    pub fn setStart(self: *Self, value: f64) ModelError!void { try self.model.setDblAttrElement(.start, self.index, value); }
+    pub fn getStart(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.start, self.index);
+    }
+    pub fn setStart(self: *Self, value: f64) ModelError!void {
+        try self.model.setDblAttrElement(.start, self.index, value);
+    }
 
-    pub fn getPStart(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.p_start, self.index); }
-    pub fn setPStart(self: *Self, value: f64) ModelError!void { try self.model.setDblAttrElement(.p_start, self.index, value); }
+    pub fn getPStart(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.p_start, self.index);
+    }
+    pub fn setPStart(self: *Self, value: f64) ModelError!void {
+        try self.model.setDblAttrElement(.p_start, self.index, value);
+    }
 
-    pub fn getDStart(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.d_start, self.index); }
-    pub fn setDStart(self: *Self, value: f64) ModelError!void { try self.model.setDblAttrElement(.d_start, self.index, value); }
+    pub fn getDStart(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.d_start, self.index);
+    }
+    pub fn setDStart(self: *Self, value: f64) ModelError!void {
+        try self.model.setDblAttrElement(.d_start, self.index, value);
+    }
 
     // ── Comparison ────────────────────────────────────────────────────────
 

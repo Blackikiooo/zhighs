@@ -22,9 +22,13 @@ pub const QConstrArray = struct {
     lind: std.ArrayListUnmanaged(usize) = .{},
     lval: std.ArrayListUnmanaged(f64) = .{},
 
-    pub inline fn len(self: QConstrArray) usize { return self.inner.len; }
+    pub inline fn len(self: QConstrArray) usize {
+        return self.inner.len;
+    }
 
-    pub inline fn get(self: QConstrArray, index: usize) QConstrData { return self.inner.get(index); }
+    pub inline fn get(self: QConstrArray, index: usize) QConstrData {
+        return self.inner.get(index);
+    }
 
     pub fn deinit(self: *QConstrArray, allocator: std.mem.Allocator) void {
         for (self.inner.items(.name)) |n| if (n) |s| allocator.free(s);

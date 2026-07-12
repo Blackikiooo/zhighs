@@ -60,12 +60,20 @@ pub const Constr = struct {
         try self.model.setCharAttrElement(.sense, self.index, @intFromEnum(sense));
     }
 
-    pub fn getRHS(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.rhs, self.index); }
-    pub fn setRHS(self: *Self, rhs: f64) ModelError!void { try self.model.setDblAttrElement(.rhs, self.index, rhs); }
+    pub fn getRHS(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.rhs, self.index);
+    }
+    pub fn setRHS(self: *Self, rhs: f64) ModelError!void {
+        try self.model.setDblAttrElement(.rhs, self.index, rhs);
+    }
 
-    pub fn getPi(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.pi, self.index); }
+    pub fn getPi(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.pi, self.index);
+    }
 
-    pub fn getSlack(self: Self) ModelError!f64 { return self.model.getDblAttrElement(.slack, self.index); }
+    pub fn getSlack(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.slack, self.index);
+    }
 
     pub fn getConstrName(self: Self) ModelError![]const u8 {
         return self.model.getStrAttrElement(.constr_name, self.index);

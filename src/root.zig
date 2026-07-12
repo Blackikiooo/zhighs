@@ -2,7 +2,7 @@ pub const std = @import("std");
 pub const foundation = @import("foundation");
 /// Compatibility alias for callers using the pre-refactor module name.
 pub const types = foundation;
-pub const matrix = @import("matrix/root.zig");
+pub const matrix = @import("matrix");
 pub const model = @import("model/root.zig");
 pub const nla = @import("nla/root.zig");
 pub const lp = @import("lp/root.zig");

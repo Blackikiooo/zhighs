@@ -7,7 +7,7 @@
 - `[x]` 已实现并通过当前测试。
 - `[ ]` 尚未实现或仍需补充验证。
 
-当前主线：完成真正的 `LpModelBuilder -> LpModel`，然后建立小规模 LP 正确性闭环。
+当前主线：核心模型 IR（LinearModel / QuadraticModel / NonlinearModel / CompiledModel）已完成，等待 Codex 审核。
 
 ## 0. 工程基线
 
@@ -51,16 +51,25 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 当前验收状态：随机矩阵运算与朴素实现一致，CSC/CSR 转换不改变矩阵语义；外部 HiGHS 自动差分和大型数据集性能验证待补。
 
-## 2. 模型与解
+## 2. 模型核心 IR（本轮完成）
 
 - [x] 建立 `src/model/` 模块边界。
-- [ ] 定义目标方向、变量上下界、行上下界和变量类型。
-- [ ] 实现包含目标函数、行列上下界和变量类型的 `LpModelBuilder -> LpModel` 冻结流程。
-- [ ] 实现 `Solution`、`Basis`、求解状态和信息结构。
-- [ ] 实现 primal/dual residual 与 KKT 检查。
-- [ ] 建立 HiGHS C API 小模型差分测试。
-
-验收：内存模型能够表达 `L <= Ax <= U, l <= x <= u`，非法输入有明确错误。
+- [x] 定义 ProblemClass 分类体系（8 类：LP/MILP/QP/MIQP/QCP/MIQCP/NLP/MINLP）。
+- [x] 实现 LinearModel（原 LpModel 重构） — SoA 布局，owning MatrixStore。
+- [x] 实现 LinearModelBuilder — 收集坐标、validate、freeze 为 LinearModel。
+- [x] 实现 Integrality 枚举（continuous/integer/semi-continuous/semi-integer）。
+- [x] 实现 Hessian 存储（triangular/diagonal，1/2 xᵀQx 语义）。
+- [x] 实现 QuadraticModel（LinearModel + Hessian + QuadraticConstraint 数组）。
+- [x] 实现 ExpressionGraph（DAG，SoA 布局，reference evaluator）。
+- [x] 实现 NonlinearModel（QuadraticModel + ExpressionGraph 组合）。
+- [x] 实现 CompiledModel（union(enum) 分派：linear/quadratic/nonlinear）。
+- [x] 实现 SolverCapability 查询类型。
+- [x] 实现 validate 分层框架（Linear → Hessian → Quadratic → Expression → Nonlinear → Compiled）。
+- [x] 模型层 w32/w64 独立测试（`zig build test-model`）。
+- [ ] 实现 `Solution`、`Basis`、求解状态和信息结构（下一阶段）。
+- [ ] 实现 primal/dual residual 与 KKT 检查（下一阶段）。
+- [ ] 建立 HiGHS C API 小模型差分测试（下一阶段）。
+- [ ] 实现 `Model -> CompiledModel` 编译路径（下一阶段）。
 
 ## 3. LP 正确性闭环
 
@@ -126,10 +135,10 @@ zig build bench-hcd -Doptimize=ReleaseFast
 
 ## 当前建议执行顺序
 
-1. 定义 LP 目标、行列上下界和变量类型。
-2. 实现 `LpModelBuilder -> LpModel` 的验证、冻结和所有权测试。
-3. 实现 `Solution/Basis` 与 primal/dual residual、KKT 检查。
-4. 建立 dense/reference simplex 和 HiGHS C API 小模型差分测试。
-5. 实现 NLA factorization、FTRAN/BTRAN，再进入 primal/dual revised simplex。
-6. 在 LP 状态流稳定后实现 presolve/postsolve 和 SCIP 式组件框架。
-7. 最后建立最小 branch-and-bound，并逐步加入 cuts、传播和启发式。
+1. ✅ 完成核心模型 IR 分类体系（本轮任务，等待审核）。
+2. [ ] 实现 `Model -> CompiledModel` 编译路径（`compile_model.zig`）。
+3. [ ] 实现 `Solution/Basis` 与 primal/dual residual、KKT 检查。
+4. [ ] 建立 dense/reference simplex 和 HiGHS C API 小模型差分测试。
+5. [ ] 实现 NLA factorization、FTRAN/BTRAN，再进入 primal/dual revised simplex。
+6. [ ] 在 LP 状态流稳定后实现 presolve/postsolve 和 SCIP 式组件框架。
+7. [ ] 最后建立最小 branch-and-bound，并逐步加入 cuts、传播和启发式。

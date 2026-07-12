@@ -27,13 +27,10 @@ const foundation = @import("foundation");
 const RowId = foundation.RowId;
 
 // Matrix infrastructure
-const matrix_root = @import("../matrix/root.zig");
-const store_mod = @import("../matrix/store.zig");
-const csc_mod = @import("../matrix/csc.zig");
-
-const MatrixStore = store_mod.MatrixStore;
-const CscMatrix = csc_mod.CscMatrix;
-const MatrixBuilder = matrix_root.MatrixBuilder;
+const matrix = @import("matrix");
+const MatrixStore = matrix.MatrixStore;
+const CscMatrix = matrix.CscMatrix;
+const MatrixBuilder = matrix.MatrixBuilder;
 
 const Env = env_module.Env;
 const VarType = types.VarType;

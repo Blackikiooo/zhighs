@@ -53,9 +53,13 @@
 
 | 功能 | HiGHS C++ 文件 | zhighs Zig 文件 | 状态与说明 |
 |---|---|---|---|
-| LP 数据 | `highs/lp_data/HighsLp.h/.cpp` | `src/model/lp_model.zig` | 📝 必须同时包含目标、行列界、integrality 和矩阵；尚未创建。 |
-| 通用模型容器 | `highs/model/HighsModel.h/.cpp` | `src/model/model.zig` | 📝 未来组合 `LpModel`、Hessian 和多目标；当前尚未创建，避免与 LP 数据结构混名。 |
-| Hessian | `HighsHessian.h/.cpp`, `HighsHessianUtils.*` | `src/model/hessian.zig` | 📝 只接受凸 QP 所需的规范存储。 |
+| LP 数据 | `highs/lp_data/HighsLp.h/.cpp` | `src/model/linear_model.zig` | ✅ `LinearModel` 含目标、行列界、integrality 和 CSC 矩阵。初始实现源自 `LpModel` 重构。`LinearModelBuilder` 在 `linear_model_builder.zig`。 |
+| 通用模型容器 | `highs/model/HighsModel.h/.cpp` | `src/model/compiled_model.zig` | ✅ `CompiledModel` 为 `union(enum) { linear, quadratic, nonlinear }`。持有求解器内部数学 IR。LinearModel/QuadraticModel/NonlinearModel 的组合。 |
+| Hessian | `HighsHessian.h/.cpp`, `HighsHessianUtils.*` | `src/model/hessian.zig` | ✅ 三角/对角格式，1/2 xᵀQx 语义。`Curvature` 枚举（unknown/convex/concave/indefinite）。凸性检查待实现。 |
+| 问题分类 | —（HiGHS 中隐式） | `src/model/problem_class.zig` | ✅ 8 类 ProblemClass（LP/MILP/QP/MIQP/QCP/MIQCP/NLP/MINLP）。正交维度（DomainClass/ObjectiveClass/ConstraintClass）。自动归类。 |
+| 二次约束与二次模型 | `HighsHessianUtils.*` 相关部分 | `src/model/quadratic_model.zig` | ✅ `QuadraticConstraint`（线性项 + Hessian + 界）。`QuadraticModel`（LinearModel + Hessian + 二次约束数组）。QP/MIQP/QCP/MIQCP。 |
+| 表达式 DAG（非线性） | —（HiGHS 预处理为其他形式） | `src/model/expression_graph.zig` | ✅ ExpressionGraph：SoA 布局，16 种 Opcode（常数、变量、算术、三角、幂、ABS、min/max）。NodeId 强类型。DAG 环检测。Reference evaluator。 |
+| 非线性模型 | — | `src/model/nonlinear_model.zig` | ✅ `NonlinearModel`（QuadraticModel + ExpressionGraph + 非线性目标/约束）。NLP/MINLP。 |
 | 多线性目标 | `HighsLinearObjective`（`HStruct.h`） | `src/model/objective.zig` | 📝 保存 weight、priority 和容差。 |
 | 解结构 | `HighsSolution`（`HStruct.h`）, `HighsSolution.*` | `src/model/solution.zig` | 📝 primal/dual validity 和行列值分开表达。 |
 | Basis | `HighsBasis`（`HStruct.h`） | `src/model/basis.zig` | 📝 保存行列 basis status，不持有 factorization。 |

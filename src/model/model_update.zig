@@ -7,15 +7,14 @@ const std = @import("std");
 const types = @import("types.zig");
 const Model = @import("model.zig").Model;
 const foundation = @import("foundation");
-const csc_mod = @import("../matrix/csc.zig");
-const store_mod = @import("../matrix/store.zig");
+const matrix = @import("matrix");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
 const Sense = types.Sense;
 const RowId = foundation.RowId;
-const CscMatrix = csc_mod.CscMatrix;
-const MatrixStore = store_mod.MatrixStore;
+const CscMatrix = matrix.CscMatrix;
+const MatrixStore = matrix.MatrixStore;
 
 /// Apply all queued modifications.
 ///

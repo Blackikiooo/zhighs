@@ -8,8 +8,12 @@ const ConstrData = @import("data.zig").ConstrData;
 pub const ConstrArray = struct {
     inner: std.MultiArrayList(ConstrData) = .{},
 
-    pub inline fn len(self: ConstrArray) usize { return self.inner.len; }
-    pub inline fn capacity(self: ConstrArray) usize { return self.inner.capacity; }
+    pub inline fn len(self: ConstrArray) usize {
+        return self.inner.len;
+    }
+    pub inline fn capacity(self: ConstrArray) usize {
+        return self.inner.capacity;
+    }
 
     pub inline fn get(self: ConstrArray, index: usize) ConstrData {
         return self.inner.get(index);
@@ -41,6 +45,7 @@ pub const ConstrArray = struct {
         _ = self.inner.swapRemove(index);
     }
 
+    /// Clones the array, note that data is deep-cloned.
     pub fn clone(self: ConstrArray, allocator: std.mem.Allocator) !ConstrArray {
         var new: ConstrArray = .{};
         try new.inner.ensureTotalCapacity(allocator, self.inner.len);

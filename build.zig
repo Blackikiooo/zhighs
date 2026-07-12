@@ -85,6 +85,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
         },
     });
+    // Make matrix available to model files (used via @import("matrix")).
+    mod.addImport("matrix", matrix_module);
 
     const matrix_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/matrix/root.zig"),
@@ -149,4 +151,34 @@ pub fn build(b: *std.Build) void {
     const run_matrix_tests = b.addRunArtifact(matrix_tests);
     const matrix_test_step = b.step("test-matrix", "Run matrix-only tests (no model/API)");
     matrix_test_step.dependOn(&run_matrix_tests.step);
+
+    // ── Model core test (no API/solver/presolve dependency) ─────
+    // Tests the solver-internal model IR layer independently of the
+    // Gurobi-style user Model, API bindings, presolve, and simplex.
+
+    const model_module = b.createModule(.{
+        .root_source_file = b.path("src/model/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+        },
+    });
+
+    const model_test_root = b.createModule(.{
+        .root_source_file = b.path("test/model/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "model", .module = model_module },
+        },
+    });
+
+    const model_tests = b.addTest(.{
+        .root_module = model_test_root,
+    });
+    const run_model_tests = b.addRunArtifact(model_tests);
+    const model_test_step = b.step("test-model", "Run model core tests (no API/solver)");
+    model_test_step.dependOn(&run_model_tests.step);
 }

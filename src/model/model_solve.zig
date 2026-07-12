@@ -3,31 +3,55 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Model = @import("model.zig").Model;
+const compile_model_module = @import("compile_model.zig");
 const foundation = @import("foundation");
-const csc_mod = @import("../matrix/csc.zig");
-const store_mod = @import("../matrix/store.zig");
+const matrix = @import("matrix");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
 const Sense = types.Sense;
 const RowId = foundation.RowId;
-const CscMatrix = csc_mod.CscMatrix;
-const MatrixStore = store_mod.MatrixStore;
+const CscMatrix = matrix.CscMatrix;
+const MatrixStore = matrix.MatrixStore;
 
-/// Optimise the model
+/// Optimise the model.
 ///
-/// Flushes pending changes first, then delegates to the appropriate
-/// solver engine.  On return, solution attributes are populated and
-/// `status` reflects the result.
+/// Flushes pending changes, compiles the model into solver‑internal IR, and
+/// dispatches to the appropriate solver engine based on the problem class.
+/// On return, solution attributes are populated and `status` reflects the
+/// result.
 pub fn optimize(self: *Model) ModelError!void {
     // Flush any queued modifications.
     try self.updateModel();
 
     if (self.num_vars == 0) return error.EmptyModel;
 
-    // Select and run the solver.
-    // The actual solve dispatch will live in the solver module;
-    // for now we set a placeholder status.
+    // Compile into solver‑internal IR.
+    var compiled = compile_model_module.compileModel(self.allocator, self) catch |err| switch (err) {
+        error.FeatureNotAvailable => return error.FeatureNotAvailable,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ColumnOutOfRange => return error.InvalidArgument,
+        error.IndexOutOfRange => return error.InvalidArgument,
+    };
+    defer compiled.deinit();
+
+    // Dispatch based on problem class.
+    // The actual solver engines will be plugged in as they are implemented.
+    switch (compiled.problemClass()) {
+        .lp => {
+            // TODO: dispatch to simplex solver
+            // For now, placeholder — mark as optimal with empty solution.
+        },
+        .milp,
+        .qp,
+        .miqp,
+        .qcp,
+        .miqcp,
+        .nlp,
+        .minlp,
+        => return error.FeatureNotAvailable,
+    }
+
     self.status = .optimal;
     self.revision += 1;
 }

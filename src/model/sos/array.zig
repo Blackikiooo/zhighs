@@ -19,9 +19,13 @@ pub const SosArray = struct {
     indices: std.ArrayListUnmanaged(usize) = .{},
     weights: std.ArrayListUnmanaged(f64) = .{},
 
-    pub inline fn len(self: SosArray) usize { return self.inner.len; }
+    pub inline fn len(self: SosArray) usize {
+        return self.inner.len;
+    }
 
-    pub inline fn get(self: SosArray, index: usize) SosData { return self.inner.get(index); }
+    pub inline fn get(self: SosArray, index: usize) SosData {
+        return self.inner.get(index);
+    }
 
     /// Returns the range of member indices for SOS `i`.
     pub inline fn memberRange(self: SosArray, index: usize) struct { start: usize, end: usize } {

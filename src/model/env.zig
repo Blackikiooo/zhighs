@@ -234,45 +234,45 @@ pub const Env = struct {
     fn setDefaults(self: *Self) ModelError!void {
         const defaults = [_]struct { name: []const u8, value: ParamValue }{
             // ── Algorithm control ──────────────────────────────────────
-            .{ .name = "Method",           .value = .{ .int = -1 } },     // -1=auto
-            .{ .name = "Threads",          .value = .{ .int = 0 } },      // 0=auto
-            .{ .name = "Presolve",         .value = .{ .int = -1 } },     // -1=auto
-            .{ .name = "DualReductions",   .value = .{ .int = 1 } },
-            .{ .name = "InfUnbdInfo",      .value = .{ .int = 0 } },
-            .{ .name = "NormAdjust",       .value = .{ .int = -1 } },
-            .{ .name = "Crossover",        .value = .{ .int = 0 } },     // 0=auto
-            .{ .name = "BarHomogeneous",   .value = .{ .int = 1 } },
-            .{ .name = "BarOrder",         .value = .{ .int = -1 } },    // -1=auto
-            .{ .name = "SimplexPricing",   .value = .{ .int = -1 } },
+            .{ .name = "Method", .value = .{ .int = -1 } }, // -1=auto
+            .{ .name = "Threads", .value = .{ .int = 0 } }, // 0=auto
+            .{ .name = "Presolve", .value = .{ .int = -1 } }, // -1=auto
+            .{ .name = "DualReductions", .value = .{ .int = 1 } },
+            .{ .name = "InfUnbdInfo", .value = .{ .int = 0 } },
+            .{ .name = "NormAdjust", .value = .{ .int = -1 } },
+            .{ .name = "Crossover", .value = .{ .int = 0 } }, // 0=auto
+            .{ .name = "BarHomogeneous", .value = .{ .int = 1 } },
+            .{ .name = "BarOrder", .value = .{ .int = -1 } }, // -1=auto
+            .{ .name = "SimplexPricing", .value = .{ .int = -1 } },
 
             // ── Tolerances ─────────────────────────────────────────────
-            .{ .name = "FeasibilityTol",   .value = .{ .double = 1e-6 } },
-            .{ .name = "OptimalityTol",    .value = .{ .double = 1e-6 } },
-            .{ .name = "BarQCPConvTol",    .value = .{ .double = 1e-6 } },
-            .{ .name = "MarkowitzTol",     .value = .{ .double = 0.5 } },
-            .{ .name = "PSDTol",           .value = .{ .double = 1e-6 } },
+            .{ .name = "FeasibilityTol", .value = .{ .double = 1e-6 } },
+            .{ .name = "OptimalityTol", .value = .{ .double = 1e-6 } },
+            .{ .name = "BarQCPConvTol", .value = .{ .double = 1e-6 } },
+            .{ .name = "MarkowitzTol", .value = .{ .double = 0.5 } },
+            .{ .name = "PSDTol", .value = .{ .double = 1e-6 } },
 
             // ── Limits ─────────────────────────────────────────────────
-            .{ .name = "TimeLimit",        .value = .{ .double = INFINITY } },
-            .{ .name = "IterationLimit",   .value = .{ .int = std.math.maxInt(i64) } },
-            .{ .name = "NodeLimit",        .value = .{ .int = std.math.maxInt(i64) } },
-            .{ .name = "SolutionLimit",    .value = .{ .int = std.math.maxInt(i64) } },
-            .{ .name = "GapLimit",         .value = .{ .double = 1e-10 } },
-            .{ .name = "BarIterLimit",     .value = .{ .int = std.math.maxInt(i64) } },
+            .{ .name = "TimeLimit", .value = .{ .double = INFINITY } },
+            .{ .name = "IterationLimit", .value = .{ .int = std.math.maxInt(i64) } },
+            .{ .name = "NodeLimit", .value = .{ .int = std.math.maxInt(i64) } },
+            .{ .name = "SolutionLimit", .value = .{ .int = std.math.maxInt(i64) } },
+            .{ .name = "GapLimit", .value = .{ .double = 1e-10 } },
+            .{ .name = "BarIterLimit", .value = .{ .int = std.math.maxInt(i64) } },
 
             // ── Output ─────────────────────────────────────────────────
-            .{ .name = "OutputFlag",       .value = .{ .int = 1 } },
-            .{ .name = "LogToConsole",     .value = .{ .int = 1 } },
-            .{ .name = "DisplayInterval",  .value = .{ .int = 5 } },
-            .{ .name = "MIPGap",           .value = .{ .double = 1e-4 } },
-            .{ .name = "MIPGapAbs",        .value = .{ .double = 1e-10 } },
+            .{ .name = "OutputFlag", .value = .{ .int = 1 } },
+            .{ .name = "LogToConsole", .value = .{ .int = 1 } },
+            .{ .name = "DisplayInterval", .value = .{ .int = 5 } },
+            .{ .name = "MIPGap", .value = .{ .double = 1e-4 } },
+            .{ .name = "MIPGapAbs", .value = .{ .double = 1e-10 } },
 
             // ── LP-specific ────────────────────────────────────────────
-            .{ .name = "LPWarmStart",      .value = .{ .int = 1 } },
-            .{ .name = "ObjScale",         .value = .{ .int = 0 } },
+            .{ .name = "LPWarmStart", .value = .{ .int = 1 } },
+            .{ .name = "ObjScale", .value = .{ .int = 0 } },
 
             // ── QP-specific ────────────────────────────────────────────
-            .{ .name = "QCPDual",          .value = .{ .int = 0 } },
+            .{ .name = "QCPDual", .value = .{ .int = 0 } },
         };
 
         for (&defaults) |d| {

@@ -16,9 +16,13 @@ pub const GenConstrArray = struct {
     nvars: std.ArrayListUnmanaged(usize) = .{},
     indices: std.ArrayListUnmanaged(usize) = .{},
 
-    pub inline fn len(self: GenConstrArray) usize { return self.inner.len; }
+    pub inline fn len(self: GenConstrArray) usize {
+        return self.inner.len;
+    }
 
-    pub inline fn get(self: GenConstrArray, index: usize) GenConstrData { return self.inner.get(index); }
+    pub inline fn get(self: GenConstrArray, index: usize) GenConstrData {
+        return self.inner.get(index);
+    }
 
     pub fn deinit(self: *GenConstrArray, allocator: std.mem.Allocator) void {
         for (self.inner.items(.name)) |n| if (n) |s| allocator.free(s);

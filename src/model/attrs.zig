@@ -39,84 +39,156 @@ pub const AttributeInfo = struct {
 /// ```
 pub const Attr = enum {
     // ── Model scalar attributes ─────────────────────────────────────────
+
+    /// Number of variables in the model.
     num_vars,
+    /// Number of linear constraints.
     num_constrs,
+    /// Number of non‑zero coefficients in the constraint matrix.
     num_nz,
+    /// Optimisation status code (`Status` enum).
     status,
+    /// Objective value of the current solution.
     obj_val,
+    /// Best available objective bound.
     obj_bound,
+    /// Objective constant (offset) term `c₀`.
     obj_con,
+    /// Model objective sense: 1 = minimise, -1 = maximise.
     model_sense,
+    /// Whether the model contains any integer variables (`0`/`1`).
     is_mip,
+    /// Number of simplex iterations performed.
     iter_count,
+    /// Number of branch‑and‑bound nodes explored.
     node_count,
+    /// Number of barrier iterations performed.
     bar_iter_count,
+    /// Number of non‑zero entries in the quadratic objective matrix `Q`.
     num_qnz,
+    /// Number of SOS constraints.
     num_sos,
+    /// Number of solutions stored in the solution pool.
     sol_count,
+    /// Model name string.
     model_name,
+    /// Human‑readable label for the current optimisation status.
     status_label,
 
-    // ── Variable attributes (per-element) ───────────────────────────────
+    // ── Variable attributes (per‑element) ──────────────────────────────
+
+    /// Variable lower bound.
     lb,
+    /// Variable upper bound.
     ub,
+    /// Variable objective (cost) coefficient.
     obj,
+    /// Variable type (`VarType` enum: C/B/I/S/N).
     v_type,
+    /// Primal solution vector `x`.
     x,
+    /// Reduced cost vector `c − Aᵀπ`.
     rc,
+    /// Variable name string.
     var_name,
+    /// MIP start vector (Start attribute).
     start,
+    /// Primal start vector (PStart, warm‑start hint).
     p_start,
+    /// Dual start vector (DStart, warm‑start hint).
     d_start,
+    /// Variable basis status (`BasisStatus` enum).
     v_basis,
 
-    // ── Constraint attributes (per-element) ─────────────────────────────
+    // ── Constraint attributes (per‑element) ────────────────────────────
+
+    /// Constraint sense (`Sense` enum: `<`, `=`, `>`).
     sense,
+    /// Constraint right‑hand side value.
     rhs,
+    /// Constraint name string.
     constr_name,
+    /// Dual solution (pi) vector `π`.
     pi,
+    /// Constraint slack vector `Ax − b`.
     slack,
+    /// Constraint basis status (`BasisStatus` enum).
     c_basis,
 
     // ── IIS attributes ─────────────────────────────────────────────────
+
+    /// Whether the computed IIS is guaranteed minimal (`0`/`1`).
     iis_minimal,
+    /// Whether the variable lower bound participates in the IIS.
     iis_lb,
+    /// Whether the variable upper bound participates in the IIS.
     iis_ub,
+    /// Whether the constraint sense participates in the IIS.
     iis_sense,
+    /// Whether the constraint RHS participates in the IIS.
     iis_rhs,
+    /// Whether a quadratic constraint participates in the IIS.
     iis_qconstr,
+    /// Whether a general constraint participates in the IIS.
     iis_genconstr,
+    /// Whether an SOS constraint participates in the IIS.
     iis_sos,
 
     // ── MIP pool attributes ─────────────────────────────────────────────
+
+    /// Objective value of a solution in the MIP solution pool.
     pool_obj_val,
+    /// Objective bound for the MIP solution pool.
     pool_obj_bound,
+    /// Number of solutions stored in the MIP pool.
     pool_solutions,
+    /// MIP search mode: 1 = traditional, 2 = solution pool, 3 = sos.
     pool_search_mode,
 
     // ── MIP gap / quality ───────────────────────────────────────────────
+
+    /// Relative MIP optimality gap `|best − bound| / |best|`.
     mip_gap,
+    /// Absolute MIP optimality gap `|best − bound|`.
     mip_gap_abs,
 
     // ── Sensitivity ─────────────────────────────────────────────────────
+
+    /// Lowest objective coefficient for which the basis remains optimal.
     sa_obj_low,
+    /// Highest objective coefficient for which the basis remains optimal.
     sa_obj_up,
+    /// Lowest RHS value for which the basis remains optimal.
     sa_rhs_low,
+    /// Highest RHS value for which the basis remains optimal.
     sa_rhs_up,
 
-    // ── Multi-objective ─────────────────────────────────────────────────
+    // ── Multi‑objective ─────────────────────────────────────────────────
+
+    /// Objective value for the `n`‑th sub‑objective.
     obj_n_val,
+    /// Weight assigned to the `n`‑th sub‑objective.
     obj_n_weight,
+    /// Priority level of the `n`‑th sub‑objective (lower = higher priority).
     obj_n_priority,
+    /// Relative tolerance for the `n`‑th sub‑objective.
     obj_n_rel_tol,
+    /// Absolute tolerance for the `n`‑th sub‑objective.
     obj_n_abs_tol,
+    /// Name for the `n`‑th sub‑objective.
     obj_n_name,
 
     // ── Count / misc ────────────────────────────────────────────────────
+
+    /// Number of binary variables (`vtype = B`).
     num_bin_vars,
+    /// Number of integer variables (`vtype = I`, excluding binary).
     num_int_vars,
+    /// Number of general constraints.
     num_gen_constrs,
+    /// Number of quadratic constraints.
     num_q_constrs,
+    /// Number of piecewise‑linear objective functions.
     num_pwl_obj,
 
     // ──────────────────────────────────────────────────────────────────────
