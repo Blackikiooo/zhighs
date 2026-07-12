@@ -146,7 +146,7 @@ pub fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, 
         const multiplier = alpha * x[col];
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
             const row = matrix.row_indices[position].toUsize();
-            y[row] = @mulAdd(f64, multiplier, matrix.values[position], y[row]);
+            y[row] += multiplier * matrix.values[position];
         }
     }
 }
@@ -164,7 +164,7 @@ pub fn addProductSkippingZerosAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: 
         if (multiplier == 0.0) continue;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
             const row = matrix.row_indices[position].toUsize();
-            y[row] = @mulAdd(f64, multiplier, matrix.values[position], y[row]);
+            y[row] += multiplier * matrix.values[position];
         }
     }
 }
@@ -181,7 +181,7 @@ pub fn addTransposeProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []co
     for (0..matrix.num_cols) |col| {
         var sum: f64 = 0.0;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position|
-            sum = @mulAdd(f64, matrix.values[position], x[matrix.row_indices[position].toUsize()], sum);
+            sum += matrix.values[position] * x[matrix.row_indices[position].toUsize()];
         y[col] += alpha * sum;
     }
 }

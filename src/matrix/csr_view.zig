@@ -93,7 +93,7 @@ pub const CsrView = struct {
             var pos: usize = @intCast(rs[row_idx]);
             const end: usize = @intCast(rs[row_idx + 1]);
             while (pos < end) : (pos += 1)
-                sum = @mulAdd(f64, vs[pos], x[ci[pos].toUsize()], sum);
+                sum += vs[pos] * x[ci[pos].toUsize()];
             y[row_idx] = sum;
         }
     }
@@ -118,7 +118,7 @@ pub const CsrView = struct {
             const end: usize = @intCast(rs[i + 1]);
             while (pos < end) : (pos += 1) {
                 const col = ci[pos].toUsize();
-                y[col] = @mulAdd(f64, vs[pos], multiplier, y[col]);
+                y[col] += vs[pos] * multiplier;
             }
         }
     }

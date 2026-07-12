@@ -152,7 +152,27 @@ pub const CscMatrix = struct {
             const end = starts[col + 1];
             while (pos < end) : (pos += 1) {
                 const row = ri[pos].toUsize();
-                y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
+                y[row] += vs[pos] * x_value;
+            }
+        }
+    }
+
+    /// Experimental: like multiplyAssumeValid but uses non-volatile clear so the
+    /// compiler can reorder or merge the zero-fill with the subsequent scatter.
+    pub fn multiplyAssumeValidFastClear(self: Self, x: []const f64, y: []f64) void {
+        const ncol = self.num_cols;
+        const starts = self.col_starts;
+        const ri = self.row_indices;
+        const vs = self.values;
+        memory.clearF64Fast(y);
+        var col: usize = 0;
+        while (col < ncol) : (col += 1) {
+            const x_value = x[col];
+            var pos = starts[col];
+            const end = starts[col + 1];
+            while (pos < end) : (pos += 1) {
+                const row = ri[pos].toUsize();
+                y[row] += vs[pos] * x_value;
             }
         }
     }
@@ -210,7 +230,7 @@ pub const CscMatrix = struct {
             const end = starts[col + 1];
             while (pos < end) : (pos += 1) {
                 const row = ri[pos].toUsize();
-                y[row] = @mulAdd(f64, vs[pos], multiplier, y[row]);
+                y[row] += vs[pos] * multiplier;
             }
         }
     }
@@ -233,7 +253,7 @@ pub const CscMatrix = struct {
             var pos = starts[col];
             const end = starts[col + 1];
             while (pos < end) : (pos += 1)
-                sum = @mulAdd(f64, vs[pos], x[ri[pos].toUsize()], sum);
+                sum += vs[pos] * x[ri[pos].toUsize()];
             y[col] = sum;
         }
     }
@@ -313,7 +333,7 @@ noinline fn addSparseProductCompact(
         const end: usize = @intCast(starts[col + 1]);
         while (pos < end) : (pos += 1) {
             const row = row_indices[pos].toUsize();
-            y[row] = @mulAdd(f64, matrix_values[pos], multiplier, y[row]);
+            y[row] += matrix_values[pos] * multiplier;
         }
     }
 }
@@ -342,7 +362,7 @@ noinline fn multiplySkippingZerosKernel(
                     const end: usize = @intCast(starts[current_col + 1]);
                     while (pos < end) : (pos += 1) {
                         const row = row_indices[pos].toUsize();
-                        y[row] = @mulAdd(f64, matrix_values[pos], x_value, y[row]);
+                        y[row] += matrix_values[pos] * x_value;
                     }
                 }
             }
@@ -357,7 +377,7 @@ noinline fn multiplySkippingZerosKernel(
         const end: usize = @intCast(starts[col + 1]);
         while (pos < end) : (pos += 1) {
             const row = row_indices[pos].toUsize();
-            y[row] = @mulAdd(f64, matrix_values[pos], x_value, y[row]);
+            y[row] += matrix_values[pos] * x_value;
         }
     }
 }

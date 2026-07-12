@@ -119,6 +119,46 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
     };
 }
 
+/// Owning transpose using HUInt (4-byte) internal starts for reduced memory
+/// traffic.  Otherwise identical to `transposeLeanAssumeValid`.
+pub fn transposeLeanAssumeValidCompact(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+    if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
+    const nnz = matrix.nnz();
+    const new_num_cols = matrix.num_rows;
+    const starts_compact = try allocator.alloc(foundation.HUInt, new_num_cols + 1);
+    defer allocator.free(starts_compact);
+
+    const starts_bytes = std.math.mul(usize, new_num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
+    const rows_bytes = std.math.mul(usize, nnz, @sizeOf(foundation.RowId)) catch return error.DimensionTooLarge;
+    const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
+    const layout = memory.computeLayout(3, .{ starts_bytes, rows_bytes, values_bytes }, .{ @alignOf(usize), @alignOf(foundation.RowId), @alignOf(f64) }) catch return error.DimensionTooLarge;
+    const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+    errdefer allocator.free(storage);
+    const starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. new_num_cols + 1];
+    const rows = @as([*]foundation.RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[1])))[0..nnz];
+    const out_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..nnz];
+
+    const cursor = try allocator.alloc(foundation.HUInt, new_num_cols);
+    defer allocator.free(cursor);
+
+    // Histogram + prefix on HUInt (4-byte, matching C++)
+    memory.clearTyped(foundation.HUInt, starts_compact);
+    for (matrix.row_indices) |row_id| starts_compact[row_id.toUsize() + 1] += 1;
+    for (0..new_num_cols) |row| starts_compact[row + 1] += starts_compact[row];
+
+    // Convert HUInt → usize for output, copy cursor
+    for (starts[0..new_num_cols], starts_compact[0..new_num_cols]) |*dest, s| dest.* = @intCast(s);
+    starts[new_num_cols] = @intCast(starts_compact[new_num_cols]);
+    for (cursor, starts_compact[0..new_num_cols]) |*dest, s| dest.* = s;
+
+    if (matrix.compact_col_starts) |source_starts| {
+        fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, cursor, rows, out_values);
+    } else {
+        fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, cursor, rows, out_values);
+    }
+    return .{ .num_rows = matrix.num_cols, .num_cols = matrix.num_rows, .col_starts = starts, .row_indices = rows, .values = out_values, .storage = storage, .compact_col_starts = null };
+}
+
 pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     try matrix.validate();
     if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
@@ -135,6 +175,36 @@ pub fn transposeIntoAssumeValid(matrix: csc.CscMatrix, starts: []usize, rows: []
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
     const next = cursor_scratch[0..matrix.num_rows];
     for (next, starts[0..matrix.num_rows]) |*destination, start| destination.* = @intCast(start);
+    if (matrix.compact_col_starts) |source_starts|
+        return fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, next, rows, values);
+    return fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, rows, values);
+}
+
+/// Like `transposeIntoAssumeValid` but uses `[]HUInt` (4-byte) for the internal
+/// histogram and prefix-sum phases, matching C++ `HighsInt` data width.
+/// `starts_compact` is the work array; `starts_out` receives the final `usize`
+/// offsets.  Callers that already own a `[]HUInt` scratch region (e.g. the
+/// `compact_starts` field of `TransposeBuffers`) can reuse it here.
+pub fn transposeIntoAssumeValidCompact(matrix: csc.CscMatrix, starts_compact: []foundation.HUInt, starts_out: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
+    if (starts_compact.len != matrix.num_rows + 1 or starts_out.len != matrix.num_rows + 1 or
+        rows.len != matrix.nnz() or values.len != matrix.nnz() or
+        cursor_scratch.len < matrix.num_rows)
+        return error.DimensionMismatch;
+
+    // Histogram on HUInt (4 bytes per write, matches C++)
+    memory.clearTyped(foundation.HUInt, starts_compact);
+    for (matrix.row_indices) |row_id| starts_compact[row_id.toUsize() + 1] += 1;
+
+    // Prefix sum on HUInt
+    for (0..matrix.num_rows) |row| starts_compact[row + 1] += starts_compact[row];
+
+    // Copy cursor (same type, no cast)
+    const next = cursor_scratch[0..matrix.num_rows];
+    @memcpy(next, starts_compact[0..matrix.num_rows]);
+
+    // Convert HUInt → usize for output
+    for (starts_out[0 .. matrix.num_rows + 1], starts_compact[0 .. matrix.num_rows + 1]) |*dest, src| dest.* = @intCast(src);
+
     if (matrix.compact_col_starts) |source_starts|
         return fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, next, rows, values);
     return fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, rows, values);

@@ -68,8 +68,10 @@ pub const transposeMultiplyCompensatedAssumeValid = ops.transposeMultiplyCompens
 pub const transpose = transpose_module.transpose;
 pub const transposeAssumeValid = transpose_module.transposeAssumeValid;
 pub const transposeLeanAssumeValid = transpose_module.transposeLeanAssumeValid;
+pub const transposeLeanAssumeValidCompact = transpose_module.transposeLeanAssumeValidCompact;
 pub const transposeInto = transpose_module.transposeInto;
 pub const transposeIntoAssumeValid = transpose_module.transposeIntoAssumeValid;
+pub const transposeIntoAssumeValidCompact = transpose_module.transposeIntoAssumeValidCompact;
 pub const TransposeBuffers = transpose_module.TransposeBuffers;
 pub const extractColumns = slice_module.extractColumns;
 pub const extractColumnsAssumeValid = slice_module.extractColumnsAssumeValid;
@@ -99,8 +101,6 @@ pub const MatrixStoreError = store.MatrixStoreError;
 pub const MatrixStore = store.MatrixStore;
 pub const SparseAccumulator = sparse_sum.SparseAccumulator;
 pub const clearF64 = memory.clearF64;
-pub const computeLayout = memory.computeLayout;
-pub const computePageColoredLayout = memory.computePageColoredLayout;
 
 test {
     std.testing.refAllDecls(@This());
