@@ -39,8 +39,11 @@ pub fn SparseVectorView(comptime Id: type) type {
     requireMatrixId(Id);
 
     return struct {
+        /// The dimension of the original vector.
         dimension: usize,
+        /// The indices at the sparse vector of nonzero elements.
         indices: []const Id,
+        /// The values of the elements in the original vector for indices.
         values: []const f64,
 
         const Self = @This();

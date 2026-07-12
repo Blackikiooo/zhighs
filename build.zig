@@ -77,6 +77,15 @@ pub fn build(b: *std.Build) void {
     const hcd_bench_step = b.step("bench-hcd", "Run the HCD microbenchmark");
     hcd_bench_step.dependOn(&run_hcd_bench.step);
 
+    const matrix_bench_module = b.createModule(.{
+        .root_source_file = b.path("src/matrix/bench_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+        },
+    });
+
     const matrix_bench = b.addExecutable(.{
         .name = "matrix-bench",
         .root_module = b.createModule(.{
@@ -84,7 +93,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zhighs", .module = mod },
+                .{ .name = "zhighs", .module = matrix_bench_module },
             },
         }),
     });
@@ -103,11 +112,31 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zhighs", .module = mod },
+                .{ .name = "zhighs", .module = matrix_bench_module },
             },
         }),
     });
     const install_perf_profile = b.addInstallArtifact(perf_profile, .{});
     const build_perf_profile_step = b.step("build-perf-profile", "Build the perf profiling binary");
     build_perf_profile_step.dependOn(&install_perf_profile.step);
+
+    // ── Matrix-only test (no model/API dependency) ──────────────
+    // Used during matrix performance work so tests stay green while
+    // higher layers (model, API) are being edited independently.
+
+    const matrix_test_root = b.createModule(.{
+        .root_source_file = b.path("src/matrix/test_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+        },
+    });
+
+    const matrix_tests = b.addTest(.{
+        .root_module = matrix_test_root,
+    });
+    const run_matrix_tests = b.addRunArtifact(matrix_tests);
+    const matrix_test_step = b.step("test-matrix", "Run matrix-only tests (no model/API)");
+    matrix_test_step.dependOn(&run_matrix_tests.step);
 }

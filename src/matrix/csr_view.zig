@@ -124,6 +124,41 @@ pub const CsrView = struct {
     }
 };
 
+/// Caller-owned CSC-to-CSR output and cursor in one page-colored allocation.
+pub const CsrBuffers = struct {
+    storage: []align(64) u8,
+    row_starts: []foundation.HUInt,
+    col_indices: []ColId,
+    values: []f64,
+    cursor: []foundation.HUInt,
+
+    pub fn init(allocator: std.mem.Allocator, num_rows: usize, nnz: usize) (std.mem.Allocator.Error || csc.MatrixError)!CsrBuffers {
+        if (num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
+        const starts_bytes = std.math.mul(usize, num_rows + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const indices_bytes = std.math.mul(usize, nnz, @sizeOf(ColId)) catch return error.DimensionTooLarge;
+        const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
+        const cursor_bytes = std.math.mul(usize, num_rows, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
+        const indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
+        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
+        const cursor_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[3]));
+        return .{
+            .storage = storage,
+            .row_starts = starts_ptr[0 .. num_rows + 1],
+            .col_indices = indices_ptr[0..nnz],
+            .values = values_ptr[0..nnz],
+            .cursor = cursor_ptr[0..num_rows],
+        };
+    }
+
+    pub fn deinit(self: *CsrBuffers, allocator: std.mem.Allocator) void {
+        allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
 /// Owning, rebuildable CSR cache.
 ///
 /// The revision is supplied by the owner of the authoritative CSC matrix. The
@@ -171,21 +206,17 @@ pub const CsrCache = struct {
         if (row_cursor_scratch.len < matrix.num_rows) return error.DimensionMismatch;
         if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
 
-        // One allocation both removes allocator traffic and gives deterministic
-        // page colors. Each concurrently accessed stream gets a different
-        // 64-byte offset within its 4 KiB page, avoiding address-alias stalls.
+        // A single allocation reduces allocator traffic. The streams use
+        // distinct 64-byte page offsets to avoid 4 KiB address-alias stalls.
         const starts_bytes = std.math.mul(usize, matrix.num_rows + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
         const indices_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(ColId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(f64)) catch return error.DimensionTooLarge;
-        const starts_offset: usize = 0;
-        const indices_offset = std.mem.alignForward(usize, starts_bytes, 4096) + 64;
-        const values_offset = std.mem.alignForward(usize, indices_offset + indices_bytes, 4096) + 128;
-        const storage_len = std.math.add(usize, values_offset, values_bytes) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        const layout = memory.computePageColoredLayout(3, .{ starts_bytes, indices_bytes, values_bytes }, .{ 0, 64, 128 }) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
         errdefer allocator.free(storage);
-        const row_starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + starts_offset));
-        const col_indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + indices_offset));
-        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + values_offset));
+        const row_starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
+        const col_indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
+        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
         const row_starts = row_starts_ptr[0 .. matrix.num_rows + 1];
         const col_indices = col_indices_ptr[0..matrix.nnz()];
         const values = values_ptr[0..matrix.nnz()];
@@ -252,14 +283,31 @@ pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []foundation.HU
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
     const next = row_cursor_scratch[0..matrix.num_rows];
     @memcpy(next, row_starts[0..matrix.num_rows]);
-    for (0..matrix.num_cols) |col_index| {
+    if (matrix.compact_col_starts) |starts|
+        return fillEntries(foundation.HUInt, matrix.num_cols, starts, matrix.row_indices, matrix.values, next, col_indices, values);
+    return fillEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, col_indices, values);
+}
+
+noinline fn fillEntries(
+    comptime Offset: type,
+    num_cols: usize,
+    starts: []const Offset,
+    source_rows: []const RowId,
+    source_values: []const f64,
+    next: []foundation.HUInt,
+    col_indices: []ColId,
+    values: []f64,
+) void {
+    for (0..num_cols) |col_index| {
         const col_id = ColId.fromUsize(col_index) catch unreachable;
-        for (matrix.col_starts[col_index]..matrix.col_starts[col_index + 1]) |position| {
+        const begin: usize = @intCast(starts[col_index]);
+        const end: usize = @intCast(starts[col_index + 1]);
+        for (begin..end) |position| {
             // Load the sequential source value before following the dependent
             // row -> cursor -> destination chain, giving the CPU useful work
             // while the cursor load is outstanding.
-            const source_value = matrix.values[position];
-            const row = matrix.row_indices[position].toUsize();
+            const source_value = source_values[position];
+            const row = source_rows[position].toUsize();
             const destination: usize = @intCast(next[row]);
             next[row] += 1;
             col_indices[destination] = col_id;

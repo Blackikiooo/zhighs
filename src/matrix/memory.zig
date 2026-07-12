@@ -78,18 +78,16 @@ pub inline fn clearTyped(comptime T: type, values: []T) void {
     clearGeneric(T, values, true);
 }
 
-/// Explicit volatile SIMD vector stores for f64 arrays.
-/// Volatile prevents LLVM from merging zero stores with subsequent
-/// scatter-add operations — essential for correctness in CSC/CSR kernels.
+/// Explicit volatile SIMD vector stores for f64 arrays. Volatile keeps this
+/// small kernel's generated stores predictable when followed immediately by a
+/// scatter-add loop; callers must benchmark before selecting a faster policy.
 pub inline fn clearF64(values: []f64) void {
     clearGeneric(f64, values, true);
 }
 
-/// Non-volatile clear for hot-path kernels where the compiler barrier
-/// is provided externally (via asm "memory" clobber or @memset).
-/// Benchmarking shows this causes severe regressions in CSC/CSR scatter
-/// kernels because LLVM incorrectly elides zero stores. Reserved for
-/// experimental use; most callers should use clearF64 (volatile).
+/// Non-volatile alternative for callers whose following loop benefits from
+/// LLVM combining or moving stores. It has identical value semantics, but its
+/// code generation can be less stable for scatter kernels on some targets.
 pub inline fn clearF64Fast(values: []f64) void {
     clearGeneric(f64, values, false);
 }
@@ -99,6 +97,54 @@ pub inline fn clearF64Fast(values: []f64) void {
 /// representation is needed rather than typed vector stores.
 pub inline fn clearF64Bytes(values: []f64) void {
     @memset(std.mem.sliceAsBytes(values), 0);
+}
+
+/// Checked consecutive-array layout calculator.
+///
+/// Given `N` arrays with sizes `sizes[i]` and alignments `aligns[i]`, returns
+/// the starting offset of each array and the total allocation size.  Every
+/// intermediate addition is overflow-checked, including the alignment step.
+///
+/// Usage:
+///   const layout = try computeLayout(3, .{ s_bytes, r_bytes, v_bytes },
+///                                    .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) });
+///   // layout.offsets[0..2], layout.total
+pub fn computeLayout(comptime N: usize, sizes: [N]usize, aligns: [N]usize) error{Overflow}!struct { offsets: [N]usize, total: usize } {
+    var result: [N]usize = undefined;
+    var cursor: usize = 0;
+    const max_usize = std.math.maxInt(usize);
+    for (sizes, aligns, 0..) |size, al, i| {
+        // Prevent alignForward overflow: cursor + (al - 1) must not wrap
+        if (al > 1 and cursor > max_usize - (al - 1)) return error.Overflow;
+        const aligned = std.mem.alignForward(usize, cursor, al);
+        result[i] = aligned;
+        cursor = std.math.add(usize, aligned, size) catch return error.Overflow;
+    }
+    return .{ .offsets = result, .total = cursor };
+}
+
+/// Page-colored layout for cache-alias avoidance.  The first field starts at
+/// offset 0; every subsequent field is placed at the next 4 KiB boundary plus
+/// a unique 64-byte offset within the page.
+///
+/// `page_offsets[0]` must be 0; `page_offsets[i>0]` is typically 64, 128, 192, …
+pub fn computePageColoredLayout(comptime N: usize, sizes: [N]usize, page_offsets: [N]usize) error{Overflow}!struct { offsets: [N]usize, total: usize } {
+    var result: [N]usize = undefined;
+    var cursor: usize = 0;
+    const max_usize = std.math.maxInt(usize);
+    for (sizes, page_offsets, 0..) |size, poff, i| {
+        if (i == 0) {
+            result[i] = 0;
+        } else {
+            // Prevent alignForward(4096) overflow
+            if (cursor > max_usize - 4095) return error.Overflow;
+            const page_aligned = std.mem.alignForward(usize, cursor, 4096);
+            const aligned = std.math.add(usize, page_aligned, poff) catch return error.Overflow;
+            result[i] = aligned;
+        }
+        cursor = std.math.add(usize, result[i], size) catch return error.Overflow;
+    }
+    return .{ .offsets = result, .total = cursor };
 }
 
 /// Volatile SIMD vector stores for usize arrays.
@@ -148,4 +194,60 @@ test "clearGeneric handles edge cases" {
     // Empty
     var empty: [0]f64 = undefined;
     clearGeneric(f64, &empty, true);
+}
+
+test "computeLayout basic" {
+    const layout = try computeLayout(3, .{ 8, 4, 8 }, .{ 8, 4, 8 });
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
+    try std.testing.expectEqual(@as(usize, 8), layout.offsets[1]);
+    try std.testing.expectEqual(@as(usize, 16), layout.offsets[2]);
+    try std.testing.expectEqual(@as(usize, 24), layout.total);
+}
+
+test "computeLayout alignment padding" {
+    // starts=8 (align 8), rows=4 (align 4 → already at offset 8 which is 4-aligned),
+    // values=8 (align 8 → offset 12 rounds up to 16)
+    const layout = try computeLayout(3, .{ 8, 5, 8 }, .{ 8, 4, 8 });
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
+    try std.testing.expectEqual(@as(usize, 8), layout.offsets[1]); // 8 is 4-aligned
+    try std.testing.expectEqual(@as(usize, 16), layout.offsets[2]); // (8+5=13) aligned to 8 → 16
+    try std.testing.expectEqual(@as(usize, 24), layout.total);
+}
+
+test "computeLayout empty fields" {
+    const layout = try computeLayout(3, .{ 0, 0, 0 }, .{ 8, 4, 8 });
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[1]);
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[2]);
+    try std.testing.expectEqual(@as(usize, 0), layout.total);
+}
+
+test "computeLayout align overflow caught" {
+    // Push cursor near max, then use alignment that forces wrap
+    const near_max = std.math.maxInt(usize) - 2;
+    try std.testing.expectError(error.Overflow, computeLayout(2, .{ near_max, 1 }, .{ 1, 8 }));
+}
+
+test "computeLayout add overflow caught" {
+    // size = max causes aligned + size to overflow
+    try std.testing.expectError(error.Overflow, computeLayout(2, .{ 1, std.math.maxInt(usize) }, .{ 1, 1 }));
+}
+
+test "computePageColoredLayout basic" {
+    const layout = try computePageColoredLayout(3, .{ 100, 200, 300 }, .{ 0, 64, 128 });
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
+    try std.testing.expectEqual(@as(usize, 4096 + 64), layout.offsets[1]);          // alignForward(100,4096)+64 = 4160
+    try std.testing.expectEqual(@as(usize, 4096*2 + 128), layout.offsets[2]);       // alignForward(4360,4096)+128 = 8192+128 = 8320
+}
+
+test "computePageColoredLayout zero-size fields" {
+    const layout = try computePageColoredLayout(3, .{ 0, 0, 0 }, .{ 0, 64, 128 });
+    try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
+    try std.testing.expectEqual(@as(usize, 64), layout.offsets[1]);                 // alignForward(0,4096)=0, +64=64
+    try std.testing.expectEqual(@as(usize, 4096 + 128), layout.offsets[2]);         // alignForward(64,4096)=4096, +128=4224
+}
+
+test "computePageColoredLayout overflow caught" {
+    const big: usize = std.math.maxInt(usize) - 10;
+    try std.testing.expectError(error.Overflow, computePageColoredLayout(2, .{ big, 1 }, .{ 0, 64 }));
 }

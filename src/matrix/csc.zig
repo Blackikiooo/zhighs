@@ -33,6 +33,8 @@ pub const MatrixError = sparse_vector.SparseVectorError || error{
     InvalidCheckpoint,
     /// A fast builder path received triplets not ordered by (column, row).
     TripletsNotSorted,
+    /// A caller-owned buffer has insufficient capacity for the requested operation.
+    BufferTooSmall,
 };
 
 /// Owning CSC matrix. Column j occupies the half-open range described by
@@ -164,38 +166,12 @@ pub const CscMatrix = struct {
     /// zeros to compensate for one branch per matrix column.
     pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
-        const starts = self.col_starts;
         const ri = self.row_indices;
         const vs = self.values;
         memory.clearF64(y);
-        var col: usize = 0;
-        while (col + 8 <= ncol) : (col += 8) {
-            inline for (0..8) |offset| {
-                const current_col = col + offset;
-                const x_value = x[current_col];
-                if ((@as(u64, @bitCast(x_value)) << 1) != 0) {
-                    var pos = starts[current_col];
-                    const end = starts[current_col + 1];
-                    while (pos < end) : (pos += 1) {
-                        const row = ri[pos].toUsize();
-                        y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
-                    }
-                }
-            }
-        }
-        while (col < ncol) : (col += 1) {
-            const x_value = x[col];
-            // Bitwise +/-zero detection avoids the ordered/unordered double
-            // branch emitted for a floating comparison while preserving NaN
-            // behavior (every NaN remains non-zero and is processed).
-            if ((@as(u64, @bitCast(x_value)) << 1) == 0) continue;
-            var pos = starts[col];
-            const end = starts[col + 1];
-            while (pos < end) : (pos += 1) {
-                const row = ri[pos].toUsize();
-                y[row] = @mulAdd(f64, vs[pos], x_value, y[row]);
-            }
-        }
+        if (self.compact_col_starts) |starts|
+            return multiplySkippingZerosKernel(foundation.HUInt, ncol, starts, ri, vs, x, y);
+        return multiplySkippingZerosKernel(usize, ncol, self.col_starts, ri, vs, x, y);
     }
 
     /// Checked Ax for a genuinely sparse input vector. Unlike scanning a dense
@@ -223,18 +199,7 @@ pub const CscMatrix = struct {
         const ri = self.row_indices;
         const vs = self.values;
         if (self.compact_col_starts) |starts| {
-            var active: usize = 0;
-            while (active < x.indices.len) : (active += 1) {
-                const col: usize = @intFromEnum(x.indices[active]);
-                const multiplier = x.values[active];
-                var pos: usize = @intCast(starts[col]);
-                const end: usize = @intCast(starts[col + 1]);
-                while (pos < end) : (pos += 1) {
-                    const row = ri[pos].toUsize();
-                    y[row] = @mulAdd(f64, vs[pos], multiplier, y[row]);
-                }
-            }
-            return;
+            return addSparseProductCompact(starts, ri, vs, x, y);
         }
         const starts = self.col_starts;
         var active: usize = 0;
@@ -272,7 +237,130 @@ pub const CscMatrix = struct {
             y[col] = sum;
         }
     }
+
+    /// Borrowed, non-owning view of a CSC matrix.  Returned by functions that
+    /// write into externally-managed buffers so the caller retains full control
+    /// over allocation lifetime.
+    pub fn view(self: Self) CscView {
+        return .{ .num_rows = self.num_rows, .num_cols = self.num_cols, .col_starts = self.col_starts, .row_indices = self.row_indices, .values = self.values };
+    }
 };
+
+/// Non-owning CSC matrix view.  All slices are borrowed `[]const` references
+/// into caller-owned buffers; the view itself can be copied freely.
+pub const CscView = struct {
+    num_rows: usize,
+    num_cols: usize,
+    col_starts: []const usize,
+    row_indices: []const RowId,
+    values: []const f64,
+
+    pub inline fn nnz(self: CscView) usize {
+        return self.values.len;
+    }
+
+    /// Full structural validation matching CscMatrix.validate semantics.
+    pub fn validate(self: CscView) MatrixError!void {
+        try validateDimensions(self.num_rows, self.num_cols);
+        if (self.col_starts.len != self.num_cols + 1) return error.InvalidColumnStarts;
+        if (self.row_indices.len != self.values.len) return error.InconsistentStorage;
+        if (self.col_starts[0] != 0) return error.InvalidColumnStarts;
+        if (self.col_starts[self.num_cols] != self.nnz()) return error.InvalidColumnStarts;
+
+        for (0..self.num_cols) |col| {
+            const begin = self.col_starts[col];
+            const end = self.col_starts[col + 1];
+            if (begin > end or end > self.nnz()) return error.InvalidColumnStarts;
+            var prev: ?usize = null;
+            for (begin..end) |pos| {
+                const row = self.row_indices[pos].toUsize();
+                const value = self.values[pos];
+                if (row >= self.num_rows) return error.IndexOutOfBounds;
+                if (prev) |p| if (row <= p) return error.IndicesNotStrictlyIncreasing;
+                if (!std.math.isFinite(value)) return error.NonFiniteValue;
+                if (value == 0.0) return error.ExplicitZero;
+                prev = row;
+            }
+        }
+    }
+};
+
+/// Kept as a leaf function to avoid duplicating compact and usize-offset
+/// kernels into every large solver caller. This also keeps the prefetch loop
+/// within the instruction cache when many matrix operations are inlined nearby.
+noinline fn addSparseProductCompact(
+    starts: []const foundation.HUInt,
+    row_indices: []const RowId,
+    matrix_values: []const f64,
+    x: sparse_vector.SparseVectorView(ColId),
+    y: []f64,
+) void {
+    var active: usize = 0;
+    while (active < x.indices.len) : (active += 1) {
+        const prefetch_distance = 16;
+        if (active + prefetch_distance < x.indices.len) {
+            const future_col: usize = @intFromEnum(x.indices[active + prefetch_distance]);
+            const future_pos: usize = @intCast(starts[future_col]);
+            const future_end: usize = @intCast(starts[future_col + 1]);
+            if (future_pos < future_end) {
+                @prefetch(&row_indices[future_pos], .{});
+                @prefetch(&matrix_values[future_pos], .{});
+            }
+        }
+        const col: usize = @intFromEnum(x.indices[active]);
+        const multiplier = x.values[active];
+        var pos: usize = @intCast(starts[col]);
+        const end: usize = @intCast(starts[col + 1]);
+        while (pos < end) : (pos += 1) {
+            const row = row_indices[pos].toUsize();
+            y[row] = @mulAdd(f64, matrix_values[pos], multiplier, y[row]);
+        }
+    }
+}
+
+noinline fn multiplySkippingZerosKernel(
+    comptime Offset: type,
+    num_cols: usize,
+    starts: []const Offset,
+    row_indices: []const RowId,
+    matrix_values: []const f64,
+    x: []const f64,
+    y: []f64,
+) void {
+    var col: usize = 0;
+    const ScanVector = @Vector(4, f64);
+    const zero: ScanVector = @splat(0.0);
+    while (col + 4 <= num_cols) : (col += 4) {
+        const block_ptr: *align(1) const ScanVector = @ptrCast(x.ptr + col);
+        const block = block_ptr.*;
+        if (!@reduce(.And, block == zero)) {
+            inline for (0..4) |offset| {
+                const current_col = col + offset;
+                const x_value = block[offset];
+                if ((@as(u64, @bitCast(x_value)) << 1) != 0) {
+                    var pos: usize = @intCast(starts[current_col]);
+                    const end: usize = @intCast(starts[current_col + 1]);
+                    while (pos < end) : (pos += 1) {
+                        const row = row_indices[pos].toUsize();
+                        y[row] = @mulAdd(f64, matrix_values[pos], x_value, y[row]);
+                    }
+                }
+            }
+        }
+    }
+    while (col < num_cols) : (col += 1) {
+        const x_value = x[col];
+        // Bitwise +/-zero detection avoids the ordered/unordered double branch
+        // while preserving NaN behavior: every NaN remains non-zero.
+        if ((@as(u64, @bitCast(x_value)) << 1) == 0) continue;
+        var pos: usize = @intCast(starts[col]);
+        const end: usize = @intCast(starts[col + 1]);
+        while (pos < end) : (pos += 1) {
+            const row = row_indices[pos].toUsize();
+            y[row] = @mulAdd(f64, matrix_values[pos], x_value, y[row]);
+        }
+    }
+}
 
 /// Checks whether dimensions can be represented by the strong ID types.
 pub fn validateDimensions(num_rows: usize, num_cols: usize) MatrixError!void {

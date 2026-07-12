@@ -166,6 +166,37 @@ HighsSparseMatrix buildFromSorted(std::vector<Triplet>& triplets) {
   }
   return result;
 }
+
+/// Const-input variant matching zhighs freezeFromSortedArraysAssumeValid.
+/// The caller provides immutable sorted triplets. An internal working copy is
+/// allocated inside the function so the input is never modified. This is the
+/// correct reference for the builder_freeze_prepopulated kernel — both
+/// implementations receive const data and do their own internal allocation.
+HighsSparseMatrix buildFromSortedConst(const std::vector<Triplet>& input) {
+  std::vector<Triplet> triplets = input;  // internal copy, matched by Zig's temp arrays
+  return buildFromSorted(triplets);
+}
+
+/// Canonical-input variant matching zhighs freezeFromCanonicalArraysAssumeValid.
+/// Caller guarantees: sorted, no duplicates, no zeros, all finite.
+/// No merge loop — just count + prefix + copy.
+HighsSparseMatrix buildFromCanonical(const std::vector<Triplet>& input) {
+  HighsSparseMatrix result;
+  result.format_ = MatrixFormat::kColwise;
+  result.num_row_ = kDimension;
+  result.num_col_ = kDimension;
+  result.start_.assign(kDimension + 1, 0);
+  result.index_.resize(input.size());
+  result.value_.resize(input.size());
+  for (const auto& entry : input) ++result.start_[entry.col + 1];
+  for (HighsInt col = 0; col < kDimension; ++col)
+    result.start_[col + 1] += result.start_[col];
+  for (size_t i = 0; i < input.size(); ++i) {
+    result.index_[i] = input[i].row;
+    result.value_[i] = input[i].value;
+  }
+  return result;
+}
 }  // namespace
 
 int main() {

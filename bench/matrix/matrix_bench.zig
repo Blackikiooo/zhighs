@@ -74,27 +74,13 @@ pub fn main() !void {
     var matrix = try builder.freezeSortedAssumeValid(allocator, 0.0);
     defer matrix.deinit(allocator);
 
-    const cursor_storage = try allocator.alloc(zhighs.HUInt, dimension + 48);
-    defer allocator.free(cursor_storage);
-    const cursor = cursor_storage[48..][0..dimension];
-    var csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, cursor);
+    var csr_buffers = try zhighs.matrix.CsrBuffers.init(allocator, dimension, nnz);
+    defer csr_buffers.deinit(allocator);
+    var transpose_buffers = try zhighs.matrix.TransposeBuffers.init(allocator, dimension, nnz);
+    defer transpose_buffers.deinit(allocator);
+    var csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, csr_buffers.cursor);
     defer csr_cache.deinit(allocator);
     const csr = csr_cache.viewAssumeCurrent();
-    const csr_starts_storage = try allocator.alloc(zhighs.HUInt, dimension + 1 + 16);
-    defer allocator.free(csr_starts_storage);
-    const reusable_csr_starts = csr_starts_storage[16..][0 .. dimension + 1];
-    const transpose_starts_storage = try allocator.alloc(usize, dimension + 1 + 8);
-    defer allocator.free(transpose_starts_storage);
-    const reusable_transpose_starts = transpose_starts_storage[8..][0 .. dimension + 1];
-    const cols_storage = try allocator.alloc(zhighs.ColId, nnz + 32);
-    defer allocator.free(cols_storage);
-    const reusable_cols = cols_storage[32..][0..nnz];
-    const rows_storage = try allocator.alloc(zhighs.RowId, nnz + 16);
-    defer allocator.free(rows_storage);
-    const reusable_rows = rows_storage[16..][0..nnz];
-    const values_storage = try allocator.alloc(f64, nnz + 24);
-    defer allocator.free(values_storage);
-    const reusable_values = values_storage[24..][0..nnz];
 
     const dense_x_storage = try allocator.alloc(f64, dimension + 8);
     defer allocator.free(dense_x_storage);
@@ -105,9 +91,8 @@ pub fn main() !void {
     defer allocator.free(sparse_ids);
     const sparse_values = try allocator.alloc(f64, dimension / 20);
     defer allocator.free(sparse_values);
-    const y_storage = try allocator.alloc(f64, dimension + 40);
-    defer allocator.free(y_storage);
-    const y = y_storage[40..][0..dimension];
+    const y = try allocator.alloc(f64, dimension);
+    defer allocator.free(y);
     const hcd_storage = try allocator.alloc(zhighs.HCD, dimension + 12);
     defer allocator.free(hcd_storage);
     const hcd_scratch = hcd_storage[12..][0..dimension];
@@ -246,7 +231,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |revision| {
-        var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, revision, cursor);
+        var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, revision, csr_buffers.cursor);
         clobberPtr(cache.values.ptr);
         cache.deinit(allocator);
     }
@@ -254,10 +239,10 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.fillCsrFromCscAssumeValid(matrix, reusable_csr_starts, reusable_cols, reusable_values, cursor);
-        clobberPtr(reusable_values.ptr);
+        try zhighs.matrix.fillCsrFromCscAssumeValid(matrix, csr_buffers.row_starts, csr_buffers.col_indices, csr_buffers.values, csr_buffers.cursor);
+        clobberPtr(csr_buffers.values.ptr);
     }
-    report("csc_to_csr_into", transform_repeats, start, reusable_values[0]);
+    report("csc_to_csr_into", transform_repeats, start, csr_buffers.values[0]);
 
     start = nowNs();
     for (0..transform_repeats) |_| {
@@ -269,15 +254,18 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |_| {
-        try zhighs.matrix.transposeIntoAssumeValid(matrix, reusable_transpose_starts, reusable_rows, reusable_values, cursor);
-        clobberPtr(reusable_values.ptr);
+        try zhighs.matrix.transposeIntoAssumeValid(matrix, transpose_buffers.starts, transpose_buffers.rows, transpose_buffers.values, transpose_buffers.cursor);
+        clobberPtr(transpose_buffers.values.ptr);
     }
-    report("transpose_into", transform_repeats, start, reusable_values[0]);
+    report("transpose_into", transform_repeats, start, transpose_buffers.values[0]);
 
     builder.clearRetainingCapacity();
     try fillSorted(&builder, allocator);
     start = nowNs();
-    var sorted_matrix = try builder.freezeSortedAssumeValid(allocator, 0.0);
+    // Match the C++ reference's single-offset representation. Applications
+    // that prioritize repeated matrix products should use the default compact
+    // freeze path and accept its additional construction work.
+    var sorted_matrix = try builder.freezeSortedLeanAssumeValid(allocator, 0.0);
     const sorted_elapsed_checksum = sorted_matrix.values[sorted_matrix.values.len / 2];
     std.mem.doNotOptimizeAway(sorted_elapsed_checksum);
     report("builder_freeze_sorted", 1, start, sorted_elapsed_checksum);

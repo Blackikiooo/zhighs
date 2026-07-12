@@ -26,9 +26,15 @@ pub const SparseVector = sparse_vector.SparseVector;
 pub const SparseVectorBuilder = sparse_vector_builder.SparseVectorBuilder;
 pub const MatrixError = csc.MatrixError;
 pub const CscMatrix = csc.CscMatrix;
+pub const CscView = csc.CscView;
 pub const MatrixBuilder = builder.MatrixBuilder;
+pub const CscBuildBuffers = builder.CscBuildBuffers;
+pub const freezeFromSortedArraysAssumeValid = builder.freezeFromSortedArraysAssumeValid;
+pub const freezeFromCanonicalArraysAssumeValid = builder.freezeFromCanonicalArraysAssumeValid;
+pub const freezeCanonicalIntoAssumeValid = builder.freezeCanonicalIntoAssumeValid;
 pub const CsrView = csr_view.CsrView;
 pub const CsrCache = csr_view.CsrCache;
+pub const CsrBuffers = csr_view.CsrBuffers;
 pub const fillCsrFromCsc = csr_view.fillFromCsc;
 pub const fillCsrFromCscAssumeValid = csr_view.fillFromCscAssumeValid;
 pub const maxAbs = ops.maxAbs;
@@ -61,8 +67,10 @@ pub const transposeMultiplyHighPrecisionFastAssumeValid = ops.transposeMultiplyH
 pub const transposeMultiplyCompensatedAssumeValid = ops.transposeMultiplyCompensatedAssumeValid;
 pub const transpose = transpose_module.transpose;
 pub const transposeAssumeValid = transpose_module.transposeAssumeValid;
+pub const transposeLeanAssumeValid = transpose_module.transposeLeanAssumeValid;
 pub const transposeInto = transpose_module.transposeInto;
 pub const transposeIntoAssumeValid = transpose_module.transposeIntoAssumeValid;
+pub const TransposeBuffers = transpose_module.TransposeBuffers;
 pub const extractColumns = slice_module.extractColumns;
 pub const extractColumnsAssumeValid = slice_module.extractColumnsAssumeValid;
 pub const extractRows = slice_module.extractRows;
@@ -91,6 +99,8 @@ pub const MatrixStoreError = store.MatrixStoreError;
 pub const MatrixStore = store.MatrixStore;
 pub const SparseAccumulator = sparse_sum.SparseAccumulator;
 pub const clearF64 = memory.clearF64;
+pub const computeLayout = memory.computeLayout;
+pub const computePageColoredLayout = memory.computePageColoredLayout;
 
 test {
     std.testing.refAllDecls(@This());

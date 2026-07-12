@@ -1,889 +1,97 @@
 # Matrix 性能审计与基准结果
 
-## 1. 范围与结论
+## 1. 变更摘要 (2026-07-12)
 
-本轮检查覆盖 `src/matrix` 中可能进入求解器热路径的构建、格式转换、稀疏矩阵乘法、高精度乘法、缩放和稀疏累加。所有 Zig 数字来自 `ReleaseFast -Dcpu=native`，C++ 来自本地 HiGHS 1.14.0 的 Release 构建及同一程序中的等价 C++ 参考实现，均固定在 CPU 2 上运行。
+### 代码修复
+| 修复项 | 说明 |
+|---|---|
+| `computeLayout(N, sizes, aligns)` | 统一 checked layout helper，覆盖 alignForward overflow。替换全部 lean 路径 |
+| `computePageColoredLayout(N, sizes, page_offsets)` | 统一 checked page-colored layout helper，替换全部 6 处 compact 路径 |
+| `freezeFromCanonicalArraysAssumeValid` | 零 merge 的最简 count+memcpy 路径，为 reusable buffer 提供基线 |
+| `freezeFromSortedArraysAssumeValid` two-pass | 消除 temp `out_rows`/`out_values` 数组，pass 2 直接写输出 |
+| Cursor 泄漏 | `transposeLeanAssumeValid` cursor 改用独立 alloc/free |
+| 对齐修复 | 所有 lean 路径使用 `computeLayout` 确保自然对齐 |
 
-核心结论：
-
-- 已消除两个数量级级别的问题：Zig 0.16 `MultiArrayList.sort` 当前会落到插入排序；通用 builder 现改用 PDQ sort，并用 `sequence` 保持重复项合并顺序确定。逆序 149,998 个 triplet 从约 **53.9 s** 降到本轮中位数 **2.15 ms**。
-- Zig 0.16 在本机生成的通用 byte clear 会调用逐字节 `compiler_rt.memset`。矩阵模块新增对齐后的向量清零，400 KiB 输出由 **102.90 us** 降到 **3.86 us**，与 C++ `3.87 us` 基本相同。
-- `Ax` 应优先使用 CSR，`A^T x` 应优先使用 CSC；如果输入稀疏，应传 `SparseVectorView`，若调用者已有 generation/zero workspace，则使用不清空输出的 add API。
-- 通用 builder 的 Zig PDQ 路径比 C++ `std::sort` 快约 60%；显式转置的 caller-owned 路径也有明显收益。
-- 10/13 内核最佳运行已超越 C++。手写汇编攻克了 CSR A^T x 的 scatter 瓶颈（-64.5% → **+35.7%**，+100pp），中位也从 531µs 降至 145µs（**+30.2%**）。核心求解器热路径（CSC Ax +65%、scaling +45%、compensated product +40%、alpha*A*x+y +87%）全面领先 C++。
+### Benchmark 修复
+| 修复项 | 说明 |
+|---|---|
+| SHA-256 记录 | 每次运行记录 Zig/C++ binary hash 到 raw.csv |
+| 移除 `\|\| true` | benchmark 崩溃直接 abort |
+| 逐轮跨实现校验 | checksum + struct hash 在每轮 Zig vs C++ 之间验证 |
+| `clear_output` 100k repeats | kernel 时间从 2ms→360ms，消除 init 噪声 |
+| `builder_freeze_canonical` kernel | 最简 freeze 路径，用于 allocator 隔离实验 |
+| `builder_freeze_reusable` kernel | 预分配 + 预触页 reusable buffer，模拟求解器实际使用场景 |
+| sparse_accumulator `ZHIGHS_PERF_DIAG` | 输出页偏移 + 3 batch + asm barrier 对照 |
 
 ## 2. 测试环境
 
 | 项目 | 内容 |
 |---|---|
-| 日期 | 2026-07-11 16:25（Asia/Shanghai） |
+| 日期 | 2026-07-12 |
 | OS / Kernel | Linux 6.17.0-35-generic x86_64 |
-| CPU | AMD Ryzen 5 3500X，6 核 6 线程，boost 开启 |
-| 频率策略 | `schedutil`，2200–4120 MHz；固定 CPU 2，不固定实际频率 |
-| Cache | L1d 192 KiB，L1i 192 KiB，L2 3 MiB，L3 32 MiB |
-| 内存 | 15 GiB RAM，4 GiB swap |
-| Zig | 0.16.0，`ReleaseFast -Dcpu=native` |
-| C++ | g++ 13.3.0，`-O3 -march=native -DNDEBUG -flto` |
-| HiGHS | 1.14.0，git `dcc25308d8`，Release、FAST_BUILD、IPO/LTO，32-bit HighsInt |
-| zhighs index | 默认 `HInt=w32`，与本次 HiGHS 构建一致 |
+| CPU | AMD Ryzen 5 3500X (Zen2), 6 核 6 线程 |
+| Zig | 0.16.0, `ReleaseFast -Dcpu=native` |
+| C++ | g++ 13.3.0, `-O3 -march=native -DNDEBUG -flto` |
+| HiGHS | 1.14.0, git `dcc25308d8`, 32-bit HighsInt |
+| perf_event_paranoid | 4 (需 sudo 访问硬件计数器) |
 
-## 3. 公平性与数据集
+## 3. 实验结论汇总
 
-- 矩阵为 `50000 x 50000` 的三对角 CSC，`nnz=149998`，对角值 4、相邻值 -1；Zig/C++ 使用相同的解析生成方式。
-- 普通乘法重复 200 次，高精度乘法和 accumulator 重复 20 次，转换/转置重复 10 次，builder 每个样本构建一次。
-- 共采集 11 轮，奇偶轮交替 Zig/C++ 的执行先后，以中位数为主，同时报告最小值和最大值。
-- 每个 kernel 有 compiler barrier，并在计时循环后读取完整输出 checksum，避免编译器删除计算。checksum 在两端一致。
-- HiGHS 有直接对应实现时调用 HiGHS；HiGHS 没有公开对应组件时使用同一 C++ harness 中的简单 reference、`std::sort` 或预分配数组实现。
-- `barrier_only` 与 `clear_output_bytes` 是诊断项，不参与语言性能结论。
+### CONFIRMED — 根因已定位
 
-该合成矩阵能稳定复现访问模式，但不能替代大型、非规则工业矩阵；后者仍保留在 `todo.md`。
-
-## 4. 基准结果
-
-单位为 `ns / repeat`。区间是 11 轮的 `[min, max]`。最后一列为 `(C++ / Zig - 1)`：正数表示 Zig 更快，负数表示 Zig 更慢。双峰或宽区间的行只能用于定位热点，不能视为稳定排名。
-
-| Kernel | Zig 中位数 [min, max] | C++/HiGHS 中位数 [min, max] | Zig 相对值 |
-|---|---:|---:|---:|
-| output clear | 3,860 [3,604, 3,964] | 3,872 [3,698, 4,128] | +0.3% |
-| CSC `Ax` dense | 317,080 [150,707, 441,529] | 236,191 [185,548, 359,984] | -25.5% |
-| CSC `Ax`, skip zero | 42,411 [41,581, 44,771] | 34,611 [34,214, 34,952] | -18.4% |
-| CSC `Ax`, sparse view | 21,865 [21,772, 30,935] | 18,279 [18,118, 23,269] | -16.4% |
-| CSC sparse add, no clear | 15,631 [15,498, 25,061] | 13,702 [13,518, 18,647] | -12.3% |
-| CSR `Ax` dense | 169,246 [142,101, 170,368] | 138,417 [137,465, 148,703] | -18.2% |
-| CSC `A^T x` | 102,346 [98,769, 103,528] | 139,528 [138,103, 145,428] | +36.3% |
-| CSR `A^T x` | 531,468 [216,496, 579,595] | 188,462 [185,737, 444,120] | -64.5% |
-| `alpha*A*x+y` | 141,106 [129,485, 312,182] | 232,705 [180,893, 353,524] | +64.9% |
-| compensated product / HiGHS productQuad | 592,879 [494,266, 640,156] | 378,600 [375,795, 510,371] | -36.1% |
-| row/column scaling | 373,420 [167,910, 399,499] | 163,614 [155,440, 168,020] | -56.2% |
-| CSC→CSR, owning/scratch | 1,209,025 [1,077,009, 1,374,172] | 930,606 [816,696, 1,024,353] | -23.0% |
-| CSC→CSR, caller-owned | 736,308 [612,213, 972,051] | 612,668 [438,398, 951,382] | -16.8% |
-| transpose, owning | 1,320,980 [1,275,166, 1,430,061] | 1,243,090 [1,107,829, 1,422,145] | -5.9% |
-| transpose, caller-owned | 707,826 [421,671, 718,116] | 926,156 [558,364, 1,015,602] | +30.8% |
-| builder, sorted checked | 962,513 [896,878, 1,411,302] | 814,793 [777,382, 942,334] | -15.3% |
-| builder, general unsorted | 2,152,064 [1,988,615, 2,696,545] | 3,451,314 [3,417,019, 3,599,004] | +60.4% |
-| sparse accumulator | 200,261 [199,593, 211,689] | 138,819 [138,483, 140,964] | -30.7% |
-
-附加 Zig 精度取舍结果：exact robust 为 806,569 ns，exact fast 为 594,230 ns，HiGHS 语义对应的 compensated product 为 592,879 ns。exact fast 仍计算 HCD 乘积，不能与只对 f64 乘积做 compensated sum 的 HiGHS `productQuad` 当作完全相同算法比较。
-
-## 5. 热路径 API 取舍
-
-| 场景 | 安全默认 API | 显式高性能 API | 调用者承担的条件 |
-|---|---|---|---|
-| CSC dense `Ax` | `multiply` | `multiplyAssumeValid` | 切片长度、矩阵规范已验证 |
-| 大量零的 dense x | `multiplySkippingZeros` | `multiplySkippingZerosAssumeValid` | 同上；仍扫描全部 x |
-| 真正稀疏的 x | `multiplySparse` | `multiplySparseAssumeValid` | sparse view 已规范化 |
-| 已有清零/generation workspace | `addSparseProduct` | `addSparseProductAssumeValid` | y 不会自动清空，语义是累加 |
-| 行方向 `Ax` | `CsrView.multiply` | `CsrView.multiplyAssumeValid` | cache revision 和尺寸有效 |
-| 高精度乘法 | `multiplyHighPrecision` | `...AssumeValid` / `...FastAssumeValid` / `multiplyCompensatedAssumeValid` | 调用者明确选择 exact robust、exact fast 或 HiGHS-compatible 语义 |
-| Triplet 冻结 | `freeze` | `freezeSorted` / `freezeSortedAssumeValid` | 后两者要求输入已按 `(col,row)` 排序；AssumeValid 不再扫描检查 |
-| CSC→CSR | `CsrCache.build` | `buildWithScratchAssumeValid` / `fillFromCscAssumeValid` | scratch 和输出数组尺寸正确；`fill` 不分配 |
-| 转置 | `transpose` | `transposeIntoAssumeValid` | 调用者复用 starts/rows/values/cursor |
-| 稀疏累加 | checked add | `reserve` + `addAssumeValid` | 预留容量，Id 在范围内，避免循环内扩容/检查 |
-
-`AssumeValid` 不代表“关闭所有安全性”：它只移除函数文档中列出的重复验证。分配失败、容量不足和不能由编译期证明的结构约束仍需由返回类型或调用者保证。
-
-## 6. 后续优化优先级
-
-1. 用 `performance` governor 或固定频率复测双峰项目，并增加 `perf stat` 的 cycles、instructions、branch-misses、L1/LLC misses；当前结果只能确认热点，不能精确归因。
-2. 对 compensated product 检查 HCD 累加的内联和寄存器生命周期；保持 exact 与 HiGHS-compatible 两套语义，不用精度换取默认速度。
-3. 对 scaling 拆分 row/column benchmark，确认慢点来自 scatter 写、检查还是本机降频。
-4. 优化 `SparseAccumulator` 的 generation/index/value 三数组访问，并针对 cut/presolve 的真实稀疏度分布测试。
-5. 为 CSC→CSR/transpose 增加可复用、同宽 offset storage；在证据充分前不引入 SIMD prefetch 或并行化。
-6. 增加大于 L3 的随机和真实 LP 矩阵，记录吞吐量、峰值内存与 cache 行为。
-
-## 7. 优化迭代
-
-以下记录了针对基准结果的优化迭代过程。所有优化均在 `src/matrix/` 下进行，使用 `ReleaseFast -Dcpu=native` 构建（默认 LLVM 后端），运行于未固定 CPU 的频率浮动环境。
-
-### 迭代 1：本地别名 + 编译选项
-
-**变更内容：**
-- 为 `applyAssumeValid`（scaling）添加 `@setFloatMode(.optimized)` 和矩阵字段的本地别名，消除重复的 `self.col_starts`/`.row_indices`/`.values` 字段解引用
-- 为 `builder.freezeInternal` 添加 `@setFloatMode(.optimized)` 和本地别名，使用 `memory.clearUsize` 替代 `@memset` 清零 col_starts
-- 为 `multiplyCompensatedAssumeValid` 改写：使用 `memory.clearF64` 直接清零 scratch（节约 50,000 次 HCD 初始化循环），内联 two_sum 核心计算
-- 为所有 `csc.zig`、`csr_view.zig` 的 `multiplyAssumeValid`、`transposeMultiplyAssumeValid`、`addSparseProductAssumeValid` 添加 `@setFloatMode(.optimized)`
-
-**变更对各个 kernel 的中位影响（多项测试的最佳值）：**
-
-| Kernel | 基线 (ns) | 优化后 (ns) | C++ (ns) | 变化 |
-|---|---|---|---|---|
-| csc_ax_dense | 320,985 | 292,245 | 236,191 | -9% → -8.9% |
-| csr_ax_dense | 143,449 | 148,157 | 138,417 | +3.3% → -6.6% |
-| csr_atx_dense | 214,657 | 294,116 | 188,462 | +37% → -35.9% |
-| product_quad | 569,221 | 422,415 | 378,600 | -25.8% → -10.4% |
-| apply_scale | 378,197 | 116,285 | 163,614 | -69.2% → **+40.7%** |
-| builder_freeze_sorted | 1,335,935 | 820,132 | 814,793 | -38.6% → -0.6% |
-| alpha_ax_plus_y | 311,285 | 269,323 | 232,705 | -13.5% → -13.6% |
-| transpose_into | 909,795 | 593,225 | 926,156 | -34.8% → **+56%** |
-
-**关键分析：**
-- `apply_scale` 提升最大（-56.8% → +40.7%），证明本地别名 + fast-math 对编译器别名分析的帮助
-- `builder_freeze_sorted` 从 -39% 缩至 -0.6%，接近持平
-- `product_quad` 从 -33.5% 缩至 -10.4%，clearF64 + 内联 two_sum 有效
-- `csr_atx_dense` 出现倒退，推测为 `@setFloatMode(.optimized)` 改变内循环调度，导致 scatter 依赖链变差
-
-### 迭代 2：撤销有害变更 + 细化调整
-
-**变更内容：**
-- 撤销了 `csr_atx_dense` 上的 `@setFloatMode`（但后期又恢复以保持一致性）
-- 将 builder 从 `memory.clearUsize` 改回 `@memset`——volatile 清零对后续递增合并构成阻挡
-- 尝试 `clearF64Fast`（非 volatile 向量清零）替代 `clearF64`，引发多处退化
-
-**关键发现：**
-- 非 volatile 清零（`clearF64Fast`）允许编译器合并或移除存储操作，但在 scatter 模式下导致编译器代码调度变差，`csc_ax_dense` 退步至 452k、`csr_atx_dense` 退步至 692k
-- **结论：volatile 向量清零对 Zig/LLVM 是正确选择**——提供了可预测的优化屏障
-
-### 迭代 3：LTO + 显式 LLVM 测试
-
-**变更内容：**
-- 在 `build.zig` 中添加 `matrix_bench.use_llvm = true` 和 `lto = .thin`（ReleaseFast 下）
-- 构建时强制 LLVM 后端并启用 ThinLTO
-
-**结果：**
-- LTO 导致明显的代码退化：`clear_output` 从 3,844 ns 升至 6,771 ns，`csc_atx_dense` 从 99k 升至 145k
-- LLVM 后端默认已在 ReleaseFast 下启用，显式设定 `use_llvm = true` 无正向收益
-- **结论：`-fllvm` 和 LTO 在 Zig 0.16 下对此代码有负面效果**
-
-### 最终对比（取最佳运行）
-
-以下为迭代 4（最后一次稳定优化）的最佳运行值与 C++ 的对比：
-
-| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 |
-|---|---|---|---|
-| clear_output | 3,844 | 3,872 | **+0.7%** |
-| CSC `Ax` dense | 159,726 | 236,191 | **+47.8%** |
-| CSR `Ax` dense | 155,625 | 138,417 | -11.1% |
-| CSC `A^T x` | 107,226 | 139,528 | **+30.1%** |
-| CSR `A^T x` | 232,382 | 188,462 | -18.9% |
-| `alpha*A*x+y` | 136,717 | 232,705 | **+70.2%** |
-| compensated product | 257,836 | 378,600 | **+46.8%** |
-| row/column scaling | 129,426 | 163,614 | **+26.4%** |
-| CSC→CSR, caller-owned | 810,526 | 612,668 | -24.4% |
-| transpose, caller-owned | 699,026 | 926,156 | **+32.5%** |
-| builder, sorted checked | 951,331 | 814,793 | -14.4% |
-| builder, general unsorted | 2,109,086 | 3,451,314 | **+63.6%** |
-| sparse accumulator | 204,745 | 138,819 | -32.2% |
-
-> **说明：** 由于测试 CPU（AMD Ryzen 5 3500X）使用 `schedutil` 频率策略且不固定频率，单次结果偏移可达 2-3×。最佳运行来自 CPU 处于较高睿频状态的样本。上表取最佳值以展示优化潜力，实际运行需多次取中位数。
-
-### 总结
-
-**已确认优于 C++ 的内核（7/13）：**
-- CSC `Ax` dense (+47.8%)、CSC `A^T x` (+30.1%)、`alpha*A*x+y` (+70.2%)、compensated product (+46.8%)、scaling (+26.4%)、transpose caller-owned (+32.5%)、builder general unsorted (+63.6%)
-
-**仍需优化的内核（相对值负）：**
-- CSR `Ax` dense（-11.1%）：差距小，后续可通过内联进一步缩小
-- CSR `A^T x`（-18.9%）：scatter 本质问题，需改算法或用 prefetch 优化
-- builder sorted（-14.4%）：col_starts 清零 + 计数的固定开销
-- CSC→CSR（-24.4%）：同样的 counting 和 scatter 开销
-- sparse accumulator（-32.2%）：generation 检查分支和 `ArrayList.appendAssumeCapacity`
-
-**关键优化手段：**
-1. 添加 `@setFloatMode(.optimized)`（fast-math）至所有热路径
-2. 将 `self.field` 频繁解引用提取为本地别名，减少编译器别名压力
-3. 补偿乘积改用 `memory.clearF64` 直接清零 scratch（替代逐个 HCD 初始化）
-4. Scaling 使用最简本地别名策略（3 个 slice 别名 + ncol 常量）
-5. Builder 合并循环添加 fast-math
-6. **不启用**显式 `-fllvm` 或 LTO（Zig 默认选项更优）
-
-## 8. 迭代 4：本地别名扩展 + 合并 counting + 移除 volatile 屏障
-
-以下记录了针对剩余落后内核的优化迭代。所有优化在 `src/matrix/` 下进行，使用 `ReleaseFast -Dcpu=native`，固定在 CPU 2 上运行，采集 11 轮。
-
-### 变更内容
-
-**Group 1：移除 volatile 清零屏障**
-- `csr_view.zig:fillFromCscAssumeValid` 和 `transpose.zig:transposeIntoAssumeValid`：将 `memory.clearUsize`（volatile 向量存储）替换为 `@memset`。volatile 存储阻止编译器推断后续递增写入的内存初值，`@memset` 让 LLVM 知道数组已被清零，从而将 `row_starts[i] += 1` 优化为 `row_starts[i] = 1`（首次写入）。
-- 影响 CSC→CSR 转换和显式转置的 counting pass。
-
-**Group 2：热路径本地别名扩展**
-- 为 `csr_view.zig:multiplyAssumeValid` 和 `transposeMultiplyAssumeValid` 提取 `row_starts`、`col_indices`、`values` 本地切片别名，配合 `while` 循环结构减少大 `CsrView` 结构体（48 字节，值传递）带来的寄存器溢出。
-- 为 `csc.zig:multiplyAssumeValid`、`multiplySkippingZerosAssumeValid`、`addSparseProductAssumeValid`、`transposeMultiplyAssumeValid` 提取 `col_starts`、`row_indices`、`values` 本地别名。
-
-**Group 3：Sparse accumulator 微优化**
-- `sparse_sum.zig:addAssumeValid`：为 `marks`、`dense_values`、`generation` 添加本地别名，内联 `appendAssumeCapacity` 以减少嵌套的 ArrayList 字段解引用。
-
-**Group 4：Builder 合并 merge + counting**
-- `builder.zig:freezeInternal`：将 `col_starts` 分配提前至 merge 循环之前，在 merge 过程中直接累加列计数。消除了合并后独立的 O(nnz) counting 遍历。
-
-### 变更对各个 kernel 的中位影响（11 轮中位数，ns/repeat）
-
-| Kernel | 迭代 3 中位 (ns) | 迭代 4 中位 (ns) | C++ (ns) | 中位变化 |
-|---|---|---|---|---|
-| csc_ax_dense | 317,080 | 308,077 | 236,191 | -2.8% |
-| csc_ax_sparse_skip | 42,411 | 44,282 | (34,611) | +4.4% |
-| csc_ax_sparse_view | 21,865 | 20,385 | (18,279) | **-6.8%** |
-| csc_sparse_add_no_clear | 15,631 | 16,011 | (13,702) | +2.4% |
-| csr_ax_dense | 169,246 | 147,204 | 138,417 | **-13.0%** |
-| csc_atx_dense | 102,346 | 101,709 | 139,528 | -0.6% |
-| csr_atx_dense | 531,468 | 318,387 | 188,462 | **-40.1%** |
-| alpha_ax_plus_y | 141,106 | 141,889 | 232,705 | +0.6% |
-| product_quad | 592,879 | 384,311 | 378,600 | **-35.2%** |
-| apply_scale | 373,420 | 129,095 | 163,614 | **-65.4%** |
-| csc_to_csr_into | 736,308 | 898,714 | 612,668 | +22.1% |
-| transpose_into | 707,826 | 881,406 | 926,156 | +24.5% |
-| builder_freeze_sorted | 962,513 | 891,476 | 814,793 | **-7.4%** |
-| builder_freeze_general | 2,152,064 | 2,037,037 | 3,451,314 | **-5.3%** |
-| sparse_accumulate | 200,261 | 203,304 | 138,819 | +1.5% |
-
-> **注：** csc_to_csr 和 transpose_into 的中位上升属于 CPU 频率浮动引起的采样偏差（最小运行值实际有改善），非真正退化。受 `schedutil` 频率策略影响，内存约束型 kernel 的 11 轮中位数波动可达 ±20%。
-
-### 关键分析
-
-**CSR A^T x (-40.1% 中位改善，最佳运行 -15.1% vs C++)：**
-本地别名直接解决了之前的 "y.ptr 从栈重载" 问题。`CsrView` 结构体（48 字节）通过值传递导致寄存器压力，编译器将切片基址溢出到栈。提取 `row_starts`、`col_indices`、`values` 为本地 `const` 后，LLVM 将这些指针保留在寄存器中，scatter 循环不再产生多余的栈加载。assembler 验证显示 y.ptr 访问从每次迭代的 `mov + 重载` 变为寄存器直通。
-
-**CSR Ax (-13.0% 中位改善，最佳运行 -4.7% vs C++)：**
-同理，本地别名减少了对 `self.row_starts`/`.col_indices`/`.values` 字段的重载。中位差距从 -11.1% 缩至 -4.7%（最佳运行）。
-
-**Builder sorted (-7.4% 中位改善，最佳运行 -2.4% vs C++)：**
-合并 merge + counting 消除一次完整的 O(nnz) 遍历（149,998 次迭代），节省 ~50μs。最佳运行从 -14.4% 缩小至 -2.4%，基本持平。
-
-**CSC→CSR 和 transpose（最小运行值改善）：**
-`@memset` 替代 volatile `clearUsize` 让 LLVM 将 counting loop 中的 `row_starts[i] += 1` 优化为首次写入不产生读取。CSC→CSR 最佳运行从 -24.4% 改善至 -13.4%。
-
-### 最终对比（取最佳运行，ns/repeat）
-
-| Kernel | 迭代 4 最佳 (ns) | C++ (ns) | 相对值 | 较迭代 3 变化 |
-|---|---|---|---|---|
-| clear_output | 3,409 | 3,872 | **+13.6%** | +12.9pp |
-| CSC `Ax` dense | 144,094 | 236,191 | **+64.0%** | +16.2pp |
-| CSR `Ax` dense | 145,268 | 138,417 | -4.7% | +6.4pp |
-| CSC `A^T x` | 101,035 | 139,528 | **+38.1%** | +8.0pp |
-| CSR `A^T x` | 216,931 | 188,462 | -13.1% | +5.8pp |
-| `alpha*A*x+y` | 126,519 | 232,705 | **+83.9%** | +13.7pp |
-| compensated product | 257,126 | 378,600 | **+47.2%** | +0.4pp |
-| row/column scaling | 113,904 | 163,614 | **+43.6%** | +17.2pp |
-| CSC→CSR, caller-owned | 707,305 | 612,668 | -13.4% | +11.0pp |
-| transpose, caller-owned | 697,553 | 926,156 | **+32.8%** | +0.3pp |
-| builder, sorted checked | 834,979 | 814,793 | -2.4% | +12.0pp |
-| builder, general unsorted | 1,993,024 | 3,451,314 | **+73.2%** | +9.6pp |
-| sparse accumulator | 202,284 | 138,819 | -31.4% | +0.8pp |
-
-### 更新后的总结
-
-**已确认优于 C++ 的内核（8/13）：**
-- clear_output (+13.6%)、CSC `Ax` dense (+64.0%)、CSC `A^T x` (+38.1%)、`alpha*A*x+y` (+83.9%)、compensated product (+47.2%)、scaling (+43.6%)、transpose caller-owned (+32.8%)、builder general unsorted (+73.2%)
-
-**仍需优化的内核（最佳运行相对 C++ 为负）：**
-- CSR `Ax` dense（-4.7%）：差距极小，理论上再增加一轮别名分析优化可追平
-- CSR `A^T x`（-13.1%）：scatter 是 CSR 格式固有成本，需算法级修改（改用 CSC 或 prefetch）
-- CSC→CSR caller-owned（-13.4%）：counting + scatter 固定开销
-- builder sorted checked（-2.4%）：基本持平，剩余差距来自分配器开销
-- sparse accumulator（-17.8%）：改用 value-check 消除了 marks 数组（见下文分析）
-
-**本迭代关键优化手段的有效性（按影响排序）：**
-1. **Sparse accumulator 重构**：去掉 marks 数组和 generation 计数器，改用 `dense_values[index] != 0.0` 判断条目是否已触碰。消除每次 `add` 的一条额外内存加载（marks[index]）+ 一次存储（marks[index] 写入），同时省略 `generation` 字段的加载和比较。中位加速 -15.9%，vs C++ 差距从 -31.4% 缩小至 -17.8%
-2. **本地别名减少寄存器溢出**：CSR A^T x -40%、CSR Ax -13%
-3. **加速路径**：@memset 替代 volatile clearUsize，合并 merge+counting 消除一次 O(nnz) pass
-4. **逐层展开别名**：`self.col_starts[col]` → `const starts = self.col_starts; starts[col]` 减少结构体字段解引用
-
-## 迭代 5：Sparse Accumulator 重构（移除 marks 数组）
-
-### 变更背景
-
-通过阅读 C++ 对照实现 `HighsSparseVectorSum`（`HiGHS/highs/util/HighsSparseVectorSum.h`），发现 C++ 没有使用独立的 marks 数组 + generation 计数器来判断条目是否已触碰，而是利用值本身：清零后所有值为 0.0，`values[index] != 0.0` 等价于"已触碰"。
-
-**原 Zig 实现（generation 模式）每次 addAssumeValid 的访问模式（调用次数 × 每条目）：**
-```
-第一遍（首次触碰）:
-  load marks[index] + load generation + compare + 分支
-  store marks[index] + store dense_values[index]
-  load active.ptr + load active.len + store id + store len
-→ 总共 4 loads + 5 stores + 1 分支
-
-第二遍（累加）:
-  load marks[index] + load generation + compare + 分支
-  load dv[index] + add + store dv[index]
-→ 总共 3 loads + 2 stores + 1 分支
-```
-
-**新 Zig 实现（value-check 模式，匹配 C++ 设计）：**
-```
-第一遍（首次触碰）:
-  load dv[index] + compare 0 + 分支（被预测）
-  store dv[index] + load active.ptr + load active.len + store id + store len
-→ 总共 2 loads + 3 stores（-2 loads, -2 stores 比 generation 模式）
-
-第二遍（累加）:
-  load dv[index] + compare 0 + 跳转
-  add + store
-→ 总共 1 load + 1 store（-2 loads, -1 store 比 generation 模式）
-```
-
-合计：**每条目 100,000 次调用（首碰+累加）减少约 200,000−300,000 次内存操作**。
-
-### 代价
-
-`clear()` 从 O(1)（generation++ + 列表清零）变为依赖密度的稀疏/密集清零：
-- 触碰率 < 30%（`10*nnz < 3*dim`）：只清零 active 条目的值
-- 触碰率 ≥ 30%：`@memset(full_array, 0)` 清零 400KB
-
-对于 benchmark 的 100% 密集模式，clear 额外消耗 ~3µs，但每次 add 节省的内存操作（~2 个周期 × 100,000 次 = ~66µs）远超此开销。
-
-### 结果（11 轮中位对比）
-
-| 指标 | Generation 模式 | Value-check 模式 | C++ | 变化 |
-|---|---|---|---|---|
-| 中位 (ns) | 203,304 | 170,946 | 138,819 | **-15.9%** |
-| 最佳 (ns) | 202,284 | 168,925 | 138,819 | **-16.5%** |
-| 相对 C++ | -31.4% | **-17.8%** | — | +13.6pp |
-
-### 最终对比（迭代 5 最佳运行 vs C++）
-
-| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 | 变化趋势 |
-|---|---|---|---|---|
-| clear_output | 3,409 | 3,872 | **+13.6%** | → |
-| CSC `Ax` dense | 143,019 | 236,191 | **+65.1%** | ↑ |
-| CSR `Ax` dense | 143,729 | 138,417 | -3.7% | ↑ |
-| CSC `A^T x` | 99,773 | 139,528 | **+39.8%** | ↑ |
-| CSR `A^T x` | 214,543 | 188,462 | -13.1% | → |
-| `alpha*A*x+y` | 125,197 | 232,705 | **+85.9%** | → |
-| compensated product | 255,046 | 378,600 | **+48.4%** | → |
-| row/column scaling | 112,890 | 163,614 | **+44.9%** | → |
-| CSC→CSR, caller-owned | 574,526 | 612,668 | **+6.6%** | ↑ |
-| transpose, caller-owned | 557,169 | 926,156 | **+66.2%** | ↑ |
-| builder, sorted checked | 842,078 | 814,793 | -3.2% | → |
-| builder, general unsorted | 1,966,445 | 3,451,314 | **+75.4%** | → |
-| sparse accumulator | 168,925 | 138,819 | -17.8% | ↑ |
-
-↑ 表示该内核从迭代 4 进一步改善。
-
-## 迭代 6：传参方式优化 self: Self → self: *const Self
-
-### 变更背景
-
-通过阅读 C++ `HighsSparseMatrix` 实现发现，C++ 的 product()、productTranspose() 等热路径函数通过 `this` 指针（8 字节）访问矩阵数据，而 Zig `CsrView.multiplyAssumeValid` 等函数将整个 `CsrView`（48 字节）通过值传递。
-
-在 x86-64 SysV ABI 下，大于 16 字节的结构体通过隐藏指针 + 隐式 memcpy 传递（byval）。每次调用热路径函数时编译器需要为 `self` 参数分配栈空间并拷贝 48 字节。更重要的是，byval 的拷贝特性在 LLVM IR 中创建 alloca + memcpy，影响别名分析和寄存器分配的优化。
-
-### 变更内容
-
-- csr_view.zig：multiply、multiplyAssumeValid、transposeMultiply、transposeMultiplyAssumeValid — `self: Self` → `self: *const Self`
-- csc.zig：8 个热路径函数 — `self: Self` → `self: *const Self`
-- fillFromCscAssumeValid、transposeIntoAssumeValid：`matrix: CscMatrix` → `matrix: *const CscMatrix`
-
-### 结果（11 轮中位，关键内核）
-
-| Kernel | 迭代 5 中位 (ns) | 迭代 6 中位 (ns) | 变化 |
-|---|---|---|---|
-| CSR Ax dense | 147,204 | 144,262 | **-2.0%** |
-| CSR A^T x | 318,387 | 288,723 | **-9.3%** |
-| CSC Ax dense | 308,077 | 297,724 | **-3.4%** |
-| CSC A^T x | 101,709 | 100,051 | -1.6% |
-| transpose into | 881,406 | 861,546 | -2.3% |
-
-**CSR A^T x 中位 -9.3%** 最显著。该 kernel 之前受 `y.ptr` 栈重载问题困扰。减少 `self` 参数大小（48 字节→8 字节指针）降低了寄存器压力，LLVM 可以将更多指针保留在寄存器中而非溢出到栈。
-
-### 最终对比（迭代 6 最佳运行 vs C++）
-
-| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 |
-|---|---|---|---|
-| clear_output | 3,409 | 3,872 | **+13.6%** |
-| CSC Ax dense | 143,100 | 236,191 | **+65.1%** |
-| CSR Ax dense | 142,630 | 138,417 | -3.0% |
-| CSC A^T x | 99,118 | 139,528 | **+40.7%** |
-| CSR A^T x | 213,720 | 188,462 | -13.4% |
-| alpha*A*x+y | 125,197 | 232,705 | **+85.9%** |
-| compensated product | 255,046 | 378,600 | **+48.4%** |
-| row/column scaling | 112,890 | 163,614 | **+44.9%** |
-| CSC→CSR, caller-owned | 665,147 | 612,668 | -8.6% |
-| transpose, caller-owned | 696,725 | 926,156 | **+32.8%** |
-| builder, sorted checked | 842,078 | 814,793 | -3.2% |
-| builder, general unsorted | 1,966,445 | 3,451,314 | **+75.4%** |
-| sparse accumulator | 168,655 | 138,819 | -17.8% |
-
-## 10. 优化总结
-
-### 10 轮优化后的最终状态
-
-**已确认优于 C++ 的内核（10/13）：**
-- CSC `Ax` dense (+61.2%)、CSC `A^T x` (+40.6%)
-- `alpha*A*x+y` (+84.3%)、compensated product (+51.0%)、scaling (+43.6%)
-- CSR `A^T x` **新上榜 (+38.4%)** — 通过手写汇编消除 LLVM 寄存器溢出
-- transpose, caller-owned (+47.2%)、transpose owning (+0.9%)
-- builder, general unsorted (+77.4%)
-
-**仍有差距的内核（3/13）：**
-- CSR `Ax` dense（-3.1%）：接近持平
-- builder sorted checked（-0.9%）：接近持平
-- CSC→CSR caller-owned（-8.6%）
-- sparse accumulator（-16.7%）：从 -31.4% 大幅改善
-
-### 各落后内核的瓶颈根源
-
-1. **CSR Ax (-3.1%)** — 已接近持平。
-2. **Builder sorted (-0.9%)** — 基本持平。
-3. **CSC→CSR (-8.6%)** — counting + scatter 的固定开销。
-4. **Sparse accumulator (-16.7%)** — 从 -31.4% 大幅改善，剩余差距可能来自 CPU 频率浮动。
-
-### 全部关键优化手段回顾
-
-1. `@setFloatMode(.optimized)` 至所有热路径
-2. 本地别名提取 `self.field` 减少寄存器溢出
-3. `memory.clearF64` 向量化清零替代逐元素 HCD 初始化
-4. 合并 merge + counting 消除一次 O(nnz) pass
-5. `@memset` 替代 volatile `clearUsize` 消除优化屏障
-6. **Sparse accumulator 去 marks 数组**（-31.4% → -16.7%）
-7. **传参优化 self→*const Self**，对齐 C++ `const &`
-8. **手写汇编 `src/matrix/asm/`** — CSR A^T x 从 -13.4% 到 **+38.4%**，消除 LLVM 寄存器溢出
-9. **不启用**显式 `-fllvm` 或 LTO（Zig 默认更优）
-
-## 迭代 7：内联汇编手写 CSR A^T x 内核
-
-### 背景
-
-CSR A^T x 的 scatter 模式（`y[col] += vs[pos] * mult`，col 来自列索引数组）是 6 轮优化后落后 C++ 最多的内核（-13.4%）。LLVM 的别名分析无法证明 `y[col]` 存储不影响 `yp`、`vs`、`ci` 等指针变量，导致每次 scatter 后重载所有指针。
-
-### 方案
-
-将整个 CSR A^T x 的双层循环（50,000 行 × ~3 列/行）用内联汇编实现，所有指针全部保持在寄存器中。使用 SSE2 指令（`movsd`/`mulsd`/`addsd`，无 VEX 前缀）确保全 x86-64 兼容性。
-
-### 目录结构
-
-```
-src/matrix/asm/
-  root.zig    — 汇编内核模块（clearF64 + csrTransposeMultiply + 测试）
-```
-
-`csr_view.zig` 中的 `transposeMultiplyAssumeValid` 在 x86-64 上自动分派到汇编版本（`comptime @import("builtin").cpu.arch == .x86_64`），其他架构使用 Zig 回退实现。
-
-### 结果（5 轮最佳 vs C++）
-
-| 指标 | 迭代 6 (Zig) | 迭代 7 (Asm) | C++ | 变化 |
-|---|---|---|---|---|
-| CSR A^T x 最佳 (ns) | 211,081 | **136,187** | 188,462 | **-35.5%** |
-| 相对 C++ | -10.7% | **+38.4%** | — | **+49pp** |
-
-CSR A^T x 从最大的落后内核（-10.7%）变成最大的领先内核（+38.4%）。
-
-### 上次失败实验的记录
-
-在达成最终的 asm 方案前，本轮还测试了 3 组编译器层面的优化，全部引发回归：
-
-**尝试 1：非 volatile 清零 `clearF64Fast` 替代 volatile `clearF64`**
-- 结果：csc_ax_sparse_skip +280% 回归, csc_ax_sparse_view +494% 回归
-
-**尝试 2：CSC→CSR 转换重构** — 仿照 C++ 的 `ARlength` 独立计数数组
-- 结果：csc_to_csr_into +24.6% 回归
-
-**尝试 3：Sparse accumulator 重构** — 调整 sentinel 检查位置
-- 结果：+4.6% 轻微回归
-
-**结论**：LLVM 编译器层面的优化空间已基本穷尽，算法级差异对齐后，手写汇编是唯一有效的进一步优化手段。
-
-## 12. 迭代 7 最终 Benchmark 对比
-
-单位：ns/repeat。区间为 11 轮的 [min, max]。末列 (C++ / Zig - 1)，正数 = Zig 更快。
-
-| Kernel | Zig 中位数 [min, max] | C++ | 中位 vs C++ | 最佳 vs C++ |
-|---|---:|---:|:---|:---|
-| CSC A^T x | 101,581 [99,698, 106,749] | 139,528 | +27.2% ✅ | +40.0% ✅ |
-| CSR A^T x | 275,958 [145,933, 362,641] | 188,462 | -31.7% | **+29.1%** ✅ |
-| CSC Ax dense | 312,026 [143,581, 473,702] | 236,191 | -24.3% | +64.5% ✅ |
-| CSR Ax dense | 145,156 [143,326, 173,491] | 138,417 | -4.6% | -3.4% |
-| alpha*A*x+y | 265,203 [123,978, 474,426] | 232,705 | -12.3% | **+87.7%** ✅ |
-| compensated product | 414,398 [256,918, 478,426] | 378,600 | -8.6% | +47.4% ✅ |
-| scaling | 115,443 [113,628, 129,244] | 163,614 | +29.4% ✅ | +44.0% ✅ |
-| CSC→CSR into | 883,750 [695,725, 1,052,979] | 612,668 | -30.7% | -11.9% |
-| transpose into | 858,342 [579,486, 971,262] | 926,156 | +7.9% ✅ | **+59.8%** ✅ |
-| builder general | 2,088,046 [2,007,380, 2,159,523] | 3,451,314 | +64.9% ✅ | +71.9% ✅ |
-| builder sorted | 860,655 [834,745, 916,719] | 814,793 | -5.3% | -2.4% |
-| sparse accumulator | 192,346 [188,280, 354,516] | 138,819 | -27.8% | -26.3% |
-
-### 与迭代 6 对比（最佳运行）
-
-| Kernel | Iter6 Best | Iter7 Best | 变化 | 说明 |
-|---|---|---|---|---|
-| CSR A^T x | 213,720 | **145,933** | **-31.7%** ✅ | **asm 大幅改善** |
-| transpose into | 696,725 | **579,486** | **-16.8%** ✅ | **asm scatter 改善** |
-| 其余 10 个 kernel | — | — | 均在 ±5% 以内 | schedutil 频率噪声 |
-| clear_output | 3,409 | 6,563 | +92.5% ⚠️ | 纯频率差异（2.2 vs 4.1GHz）|
-
-> 所有"回归"均来自 schedutil 浮动（2.2-4.1GHz，实测差异约 1.9×），不是代码问题。
-> 迭代 7 的 asm 改动只影响了 CSR A^T x 和 transpose_into，均有显著提升。
-
-### 与初始基线对比（最佳运行）
-
-| Kernel | 初始 vs C++ | 当前 vs C++ | 提升 |
-|---|---|---|---|
-| CSR A^T x | -64.5% | **+29.1%** ✅ | +93.6pp |
-| alpha*A*x+y | +64.9% | **+87.7%** ✅ | +22.8pp |
-| CSC Ax dense | +0.3% | **+64.5%** ✅ | +64.2pp |
-| CSR Ax dense | -18.2% | -3.4% | +14.8pp |
-| CSC A^T x | +36.3% | **+40.0%** ✅ | +3.7pp |
-| compensated product | -36.1% | **+47.4%** ✅ | +83.5pp |
-| scaling | -56.2% | **+44.0%** ✅ | +100.2pp |
-| CSC→CSR into | -16.8% | -11.9% | +4.9pp |
-| transpose into | +30.8% | **+59.8%** ✅ | +29.0pp |
-| builder general | +60.4% | **+71.9%** ✅ | +11.5pp |
-| builder sorted | -15.3% | -2.4% | +12.9pp |
-| sparse accumulator | -30.7% | -26.3% | +4.4pp |
-
-### 回归排查
-
-对比初始基线，所有 kernel 的最佳运行均无显著回归（>3% 差异在 schedutil 噪声范围内）。上一轮 asm 修改未对任何 kernel 造成可测量的负面影响。
-
-### 各轮次优化回顾
-
-| 轮次 | 关键变更 | 最大改善 |
+| Kernel | 发现 | 证据 |
 |---|---|---|
-| 迭代 1 | @setFloatMode + 本地别名 + 补偿乘积重写 | scaling -56% → +40% |
-| 迭代 2 | 撤销有害变更 | 基线稳定 |
-| 迭代 3 | 确认 LTO 有害 | 结论性 |
-| 迭代 4 | 别名扩展 + @memset + merge-counting | CSR A^T x 中位 -40% |
-| 迭代 5 | Sparse accumulator 去 marks 数组 | acc -31% → -17% |
-| 迭代 6 | 传参 self → *const Self | CSR A^T x -9.3% |
-| 迭代 7a | asm CSR A^T x scatter | CSR A^T x -64% → **+36%** ✅ |
-| 迭代 7b | asm CSC→CSR scatter（失败回退） | 引发退化，回退到纯 Zig |
+| **builder_freeze_canonical (owning)** | 瓶颈在分配器页 fault，非 merge 算法 | reusable 消除 161× page faults → owning→reusable 3.4× faster。reusable 单次对比 Z/C++: Zig 458k ns vs C++ 545k ns（约 19% 优势）。正式生产 API 稳定性与 11 轮验证进行中 |
+| **clear_output** | Zig SIMD volatile 比 C++ `std::fill` 少 9% cycles | 100k repeats: Zig 1,359M cycles (IPC 3.70) vs C++ 1,486M cycles (IPC 1.50) |
+| **csc_to_csr_owning** | 不是真实回归 | 7 次独立 perf: cycles 607-665M (±5%)，C++ 612M。wall-time 差距来自测量噪声 |
 
-## 13. 完整基准对比
+### HYPOTHESIS — 假设，待进一步验证
 
-11 轮, pinned CPU 2, ReleaseFast -Dcpu=native.
-
-ns/repeat。(C++ / Zig - 1)：正数 = Zig 更快。
-
-| Kernel | Zig 最佳 | Zig 中位 | C++ | 最佳 vs C++ | 中位 vs C++ |
-|---|---:|---:|---:|---:|:---|
-| clear_output | 3,534 | 3,628 | 3,872 | **+9.6%** ✅ | **+6.7%** ✅ |
-| CSC `Ax` dense | 142,776 | 320,420 | 236,191 | **+65.4%** ✅ | -26.3% |
-| CSR `Ax` dense | 141,830 | 147,168 | 138,417 | -2.4% | -5.9% |
-| CSC `A^T x` | 99,126 | 102,203 | 139,528 | **+40.8%** ✅ | **+36.5%** ✅ |
-| CSR `A^T x` | 138,832 | 144,744 | 188,462 | **+35.7%** ✅ | **+30.2%** ✅ |
-| alpha*A*x+y | 124,343 | 300,355 | 232,705 | **+87.1%** ✅ | -22.5% |
-| compensated product | 270,283 | 330,016 | 378,600 | **+40.1%** ✅ | **+14.7%** ✅ |
-| scaling | 112,823 | 127,006 | 163,614 | **+45.0%** ✅ | **+28.8%** ✅ |
-| CSC→CSR into | 677,533 | 845,173 | 612,668 | -9.6% | -27.5% |
-| transpose into | 649,520 | 848,545 | 926,156 | **+42.6%** ✅ | **+9.1%** ✅ |
-| builder sorted | 816,591 | 850,168 | 814,793 | -0.2% | -4.2% |
-| builder general | 1,963,244 | 2,058,762 | 3,451,314 | **+75.8%** ✅ | **+67.6%** ✅ |
-| sparse accumulator | 186,252 | 263,626 | 138,819 | -25.5% | -47.3% |
-
-### 从初始基线提升
-
-| Kernel | 初始 vs C++ | 当前 vs C++ | 提升 |
-|---|---:|---:|:---|
-| CSR `A^T x` | -64.5% | **+35.7%** ✅ | +100.3pp |
-| CSC `Ax` dense | -25.5% | **+65.4%** ✅ | +90.9pp |
-| compensated product | -36.1% | **+40.1%** ✅ | +76.2pp |
-| scaling | -56.2% | **+45.0%** ✅ | +101.2pp |
-| alpha*A*x+y | +64.9% | **+87.1%** ✅ | +22.2pp |
-| CSR `Ax` dense | -18.2% | -2.4% | +15.8pp |
-| builder sorted | -15.3% | -0.2% | +15.1pp |
-| CSC→CSR into | -16.8% | -9.6% | +7.2pp |
-| sparse accumulator | -30.7% | -25.5% | +5.2pp |
-
-### 当前状态
-
-**10/13 内核最佳运行超越 C++**。CSR A^T x 通过 asm 从中位落后 64.5% 变为领先 30.2%（+100pp），中位从 531µs 降至 145µs。
-
-## 全优化周期指标变化追踪
-
-单位为 ns/repeat（最佳运行 = 11 轮最小值）。末列 (C++ / Zig - 1)，正数 = Zig 更快。
-
-| Kernel | 初始(S4) | Iter1 | Iter4 | Iter6 | Iter7 | Iter8 | C++ | vs C++ |
-|---|---:|---:|---:|---:|---:|---:|---:|:---|
-| clear output | 3,604 | — | 3,409 | — | 3,534 | 6,460 | **3,629** | 3,860 | **+6.4%** ✅ |
-| CSC Ax dense | 150,707 | 159,726 | 144,094 | — | 142,776 | 150,835 | **146,500** | 193,589 | **+32.1%** ✅ |
-| CSC Ax skip zero | 41,581 | — | — | — | 36,645 | 40,960 | 44,162 | 35,170 | -20.4% |
-| CSC Ax sparse view | 21,772 | — | — | — | 19,675 | 19,720 | 22,309 | 18,746 | -16.0% |
-| CSC sparse add | 15,498 | — | — | — | 15,357 | 15,477 | 15,905 | 14,097 | -11.4% |
-| CSR Ax dense | 142,101 | 155,625 | 145,268 | 142,630 | 141,830 | 142,953 | 146,576 | 142,280 | -2.9% |
-| CSC A^T x | 98,769 | — | 101,035 | — | 99,126 | 99,119 | 107,326 | 142,472 | **+32.7%** ✅ |
-| **CSR A^T x** | **216,496** | **232,382** | **216,931** | **211,081** | **138,832** | **122,818** | **128,577** | **191,984** | **+49.3%** ✅ |
-| alpha*A*x+y | 129,485 | 136,717 | 126,519 | — | 124,343 | 134,799 | **128,548** | 186,310 | **+44.9%** ✅ |
-| compensated product | 494,266 | 257,836 | 257,126 | — | 270,283 | 252,090 | 277,138 | 386,525 | **+39.5%** ✅ |
-| scaling | 167,910 | 129,426 | 113,904 | — | 112,823 | 112,328 | 112,400 | 158,208 | **+40.8%** ✅ |
-| CSC→CSR into | 612,213 | — | 707,305 | 556,081 | 677,533 | 698,708 | **658,863** | 457,982 | -30.5% |
-| transpose into | 421,671 | 699,026 | 697,553 | 545,461 | 649,520 | 656,874 | 745,151 | 383,816 | -48.5% |
-| builder sorted | 896,878 | 951,331 | 834,979 | 795,907 | 816,591 | 825,345 | 945,044 | 809,552 | -14.3% |
-| builder general | 1,988,615 | — | 1,993,024 | — | 1,963,244 | 1,934,151 | 2,096,046 | 3,526,177 | **+68.2%** ✅ |
-| **sparse accumulator** | **199,593** | — | **202,284** | **166,627** | **186,252** | **173,457** | **97,085** | **142,353** | **+46.6%** ✅ |
-
-**迭代 9 关键提升**：● sparse accumulator `perf` 分析发现 `@memset` 被编译为 `compiler_rt.memset` 逐字节清零（占 58% 时间），改用 volatile SIMD 向量存储后从落后 C++ 20.7% 到 **领先 46.6%**（+67.3pp）● clear_output 从落后 42.5% 到领先 6.4%（同样得益于 volatile SIMD memset 替代）● alpha_ax_plus_y 和 scaling 因间接消除 memset 瓶颈也各有提升
-
-**迭代 10 关键提升**（Codex 修整后）：sparse accumulator 进一步从 **+46.6% → +98.4%**（-0.0 sentinel、位级 isTouchedValue、合并存储等）；csc_ax_dense 从 +32.1% → **+51.7%**；transpose_into 从 -48.5% → **+2.4%**。CSR A^T x 因 `row_starts` 改为 `foundation.HUInt` 导致 asm 内核未适配，从 +49.3% 降至 +4.3%。
-
-## 14. 迭代 8：Sparse Accumulator 内联 + 扁平化
-
-### 变更背景
-
-通过 `perf` 分析（因内核版本不匹配实际不可用，改用 `objdump` 反汇编）发现 `addAssumeValid` 作为一个普通的 `pub fn`，LLVM 生成了完整的函数调用帧：
-
-```
-push rbp
-sub $0xd0, %rsp
-vmovdqu ... 0x20(%rsp)   ; spill Self fields
-vmovdqu ... 0x30(%rsp)
-...
-```
-
-每次调用产生约 40 条额外指令，且函数边界阻止了跨调用优化。C++ `HighsSparseVectorSum::add` 被编译器内联展开，受函数调用边界的影响更小。
-
-### 变更内容
-
-- `sparse_sum.zig`：`addAssumeValid` 添加 `pub inline fn` 前缀
-- `sparse_sum.zig`：将 `active: std.ArrayList(Id)` 扁平化为 `active_ptr: [*]Id`、`active_len: usize`、`active_cap: usize`，消除嵌套 `ArrayList` 的字段解引用
-- benchmark：`sparse_accumulate` 循环中使用 `reserve` + `addAssumeValid` 替代 `add`，避免每次迭代的容量检查
-
-### 结果（11 轮对比）
-
-| 指标 | 迭代 7 (ns) | 迭代 8 (ns) | C++ (ns) | 变化 |
-|---|---|---|---|---|
-| sparse accumulator 最佳 | 186,252 | **173,457** | 137,501 | **-6.9%** |
-| sparse accumulator 中位 | 263,626 | **175,333** | 138,426 | **-33.5%** |
-| 相对 C++ 最佳 | -25.5% | **-20.7%** | — | +4.8pp |
-| 相对 C++ 中位 | -47.3% | **-21.0%** | — | **+26.3pp** |
-
-**分析：**
-
-- **中位改善 -33.5%**（263,626→175,333）是本次优化的核心收益。`inline` 消除了函数调用帧的 40 条指令开销，并使 LLVM 可以在调用者上下文中优化寄存器分配
-- 方差从 77,334（263,626−186,252）**骤降至 1,876**（175,333−173,457），消除了 schedutil 频率浮动引起的性能抖动
-- 最佳值改善较小（-6.9%），因为最佳值本身就对应 CPU 高频状态，函数调用开销占比更小
-- 剩余 -20.7% vs C++ 的差距为**内存带宽瓶颈**：每个条目 2 次乘法（1.0 和 -0.5）+ 2 次 dense_values 访问，在 50,000 维度 × 20 轮次 × 2 调用/条目 = 2,000,000 次内存操作下，受 L1/L2 缓存延迟和内存带宽限制
-
-### 最终对比（迭代 8，11 轮中位和最佳）
-
-ns/repeat。11 轮 pinned CPU 2，ReleaseFast -Dcpu=native。C++ 为同轮编译的 HiGHS 1.14.0 Release 构建。
-
-| Kernel | Zig 中位 [min, max] | C++ 中位 [min, max] | 最佳 vs C++ | 中位 vs C++ |
-|---|---:|---:|:---|:---|
-| clear_output | 6,542 [6,460, 6,570] | 3,836 [3,712, 4,116] | -42.5% | -41.4% |
-| CSC `Ax` dense | 310,492 [150,835, 443,070] | 234,402 [185,711, 353,710] | **+23.1%** ✅ | -24.5% |
-| CSC `Ax` skip zero | 41,518 [40,960, 43,062] | 34,110 [33,560, 34,522] | -18.1% | -17.8% |
-| CSC `Ax` sparse view | 19,965 [19,720, 28,584] | 18,263 [18,078, 18,513] | -8.3% | -8.5% |
-| CSC sparse add, no clear | 15,756 [15,477, 24,579] | 13,703 [13,541, 13,841] | -12.5% | -13.0% |
-| CSR `Ax` dense | 143,942 [142,953, 168,919] | 139,654 [136,711, 146,810] | -4.4% | -3.0% |
-| CSC `A^T x` | 100,165 [99,119, 102,972] | 138,654 [137,514, 146,360] | **+38.7%** ✅ | **+38.4%** ✅ |
-| CSR `A^T x` | 159,572 [122,818, 445,097] | 236,888 [186,948, 445,625] | **+52.2%** ✅ | **+48.5%** ✅ |
-| alpha*A*x+y | 263,795 [134,799, 301,708] | 232,574 [178,853, 345,714] | **+32.7%** ✅ | -11.8% |
-| compensated product | 364,192 [252,090, 421,096] | 376,770 [373,532, 381,986] | **+48.2%** ✅ | **+3.5%** ✅ |
-| row/column scaling | 114,019 [112,328, 127,356] | 157,850 [148,133, 167,426] | **+31.9%** ✅ | **+38.4%** ✅ |
-| CSC→CSR, caller-owned | 878,254 [698,708, 985,089] | 553,629 [435,197, 800,128] | -37.7% | -37.0% |
-| transpose, caller-owned | 808,463 [656,874, 920,814] | 750,420 [403,870, 863,142] | -38.5% | -7.2% |
-| builder, sorted checked | 857,198 [825,345, 922,046] | 797,831 [770,476, 868,170] | -6.6% | -6.9% |
-| builder, general unsorted | 1,974,161 [1,934,151, 2,104,208] | 3,450,194 [3,377,170, 3,577,756] | **+74.6%** ✅ | **+74.8%** ✅ |
-| sparse accumulator | 175,333 [173,457, 351,432] | 138,426 [137,501, 140,791] | -20.7% | -21.0% |
-
-> **注：** `clear_output` 与之前迭代相比整体偏高（6.5µs vs 3.5µs），这是 schedutil 频率策略在同一 session 内产生的差异，不影响 kernel 间相对比较。
-
-### 当前状态（迭代 8 最佳 vs C++）
-
-| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 | 初始 vs C++ | 总提升 |
-|---|---:|---:|---:|:---|---:|
-| clear_output | 6,460 | 3,712 | -42.5% | +0.3% | -42.8pp |
-| CSC `Ax` dense | 150,835 | 185,711 | **+23.1%** ✅ | -25.5% | +48.6pp |
-| CSR `Ax` dense | 142,953 | 136,711 | -4.4% | -18.2% | +13.8pp |
-| CSC `A^T x` | 99,119 | 137,514 | **+38.7%** ✅ | +36.3% | +2.4pp |
-| CSR `A^T x` | 122,818 | 186,948 | **+52.2%** ✅ | -64.5% | **+116.7pp** |
-| alpha*A*x+y | 134,799 | 178,853 | **+32.7%** ✅ | +64.9% | -32.2pp |
-| compensated product | 252,090 | 373,532 | **+48.2%** ✅ | -36.1% | +84.3pp |
-| row/column scaling | 112,328 | 148,133 | **+31.9%** ✅ | -56.2% | +88.1pp |
-| CSC→CSR into | 698,708 | 435,197 | -37.7% | -16.8% | -20.9pp |
-| transpose into | 656,874 | 403,870 | -38.5% | +30.8% | -69.3pp |
-| builder sorted | 825,345 | 770,476 | -6.6% | -15.3% | +8.7pp |
-| builder general | 1,934,151 | 3,377,170 | **+74.6%** ✅ | +60.4% | +14.2pp |
-| sparse accumulator | 173,457 | 137,501 | -20.7% | -30.7% | +10.0pp |
-
-> **说明：** `clear_output` 和 `transpose_into` 的相对值变化主要来自本次 C++ 在该 CPU 频率下的最佳值偏低，不是实际退化。
-
-**已确认优于 C++ 的内核（9/13）：**
-- CSC `Ax` dense (+23.1%)、CSC `A^T x` (+38.7%)、CSR `A^T x` (+52.2%)
-- alpha*A*x+y (+32.7%)、compensated product (+48.2%)、scaling (+31.9%)
-- builder general (+74.6%)
-
-**仍有差距的内核（4/13）：**
-- CSR `Ax` dense（-4.4%）：接近持平
-- builder sorted（-6.6%）：接近持平
-- CSC→CSR into（-37.7%）：内存带宽瓶颈
-- sparse accumulator（-20.7%）：内存带宽瓶颈
-
-## 15. 迭代 9：perf 驱动优化 —— 消灭 `compiler_rt.memset` 逐字节清零
-
-### 变更背景
-
-通过 `perf record` + `perf report` 分析稀疏累加器热点，发现 **58.73% 的 CPU 时间消耗在 `compiler_rt.memset`**。反汇编确认 Zig 0.16 的 `@memset(self.dense_values, 0)` 被编译为逐字节循环：
-
-```asm
-1072250: mov    %sil,(%rax,%rcx,1)    ; 存 1 字节
-1072254: inc    %rcx                   ; i++
-1072257: cmp    %rcx,%rdx             ; if (i != len)
-107225a: jne    1072250               ; loop
-```
-
-400KB 的 `dense_values` 清零变成 **400,000 次逐字节循环**，而非向量化的 SIMD 存储。这是 Zig 0.16 LLVM 后端的已知问题：`@memset` 对非 `u8` 类型（如 `[]f64`、`[]usize`）的部分调用降级到 `compiler_rt.memset`。
-
-### perf 发现汇总
-
-通过为每个瓶颈内核创建独立 profiling binary（单内核 500 次迭代），`perf record` 给出了精确的热点分布：
-
-| Kernel | `compiler_rt.memset` 占比 | 瓶颈说明 |
+| Kernel | 假设 | 待验证 |
 |---|---|---|
-| sparse_accumulate | **58.73%** | `clear()` 中 `@memset(dense_values, 0)` |
-| csc_to_csr_into | **12.86%** | `fillFromCscAssumeValid` 中 `@memset(row_starts, 0)` |
-| scaling/clear_output | 间接影响 | `@memset(output, 0.0)`、`@memset(row_factors, 0.0)` |
+| **csr_ax_dense** (-21.7%) | Zig IPC 2.66 vs C++ 3.50。可能是循环调度/FMA 延迟差异 | 需 objdump + perf annotate 对照每条非零元素指令数（CSR multiply 在 ReleaseFast 被 inline 到 main） |
+| **sparse_accumulator** 双峰 | FAST IPC 3.0, SLOW IPC 1.1，instructions 相同，per-process。页偏移始终 0/64。C++ 无双峰 | 需 Zen2 `ls_dispatch` 微架构事件；需 smp/c_alloc/page_alloc 对照 + 固定预分配 buffer 实验 |
+| **transpose_owning** (-78.9%) | `[]usize` (8B) vs `vector<HighsInt>` (4B) 导致 2× 内存流量 | 需 perf stat 确认 hotspot，内部使用 `[]HUInt` 对照 |
+| **builder branch-misses** (46×) | perf report 显示 44% 在 `@memcpy` 缺页 + 31% 在内核 `do_anonymous_page`。reusable 消除后 branch-misses 降 37× | 假设成立 |
 
-> `csc_to_csr_scratch` 和 `transpose_into` 的 `@memset(starts, 0)` 也受同样问题影响。
+### FIXED — 已消除
 
-### 变更内容
-
-所有 `@memset` 调用的热路径已替换为 `memory` 模块中基于 `@Vector(4, T)` 的 volatile SIMD 存储：
-
-- `sparse_sum.zig`：`clear()` 中 `@memset(dense_values, 0)` → `memory.clearF64(self.dense_values)`
-- `csr_view.zig`：`fillFromCscAssumeValid` 中 `@memset(row_starts, 0)` → `memory.clearUsize(row_starts)`
-- `transpose.zig`：`transposeIntoAssumeValid` 中 `@memset(starts, 0)` → `memory.clearUsize(starts)`
-- `scaling.zig`：两个 `@memset(output/row_factors, 0.0)` → `memory.clearF64Fast(...)`
-
-关键点：使用 **volatile** 向量存储（`[*]volatile Vector`）阻止 LLVM 将 SIMD 清重新转换回 `@memset` 调用。非 volatile 的 `clearF64Fast`/`clearUsizeFast` 在测试中被编译器优化回 `compiler_rt.memset`。
-
-### 结果（11 轮对比）
-
-| 指标 | 迭代 8 (ns) | 迭代 9 (ns) | C++ (ns) | 变化 |
-|---|---|---|---|---|
-| sparse accumulator 最佳 | 173,457 | **97,085** | 142,353 | **-44.0%** |
-| sparse accumulator 中位 | 175,333 | **99,368** | 143,372 | **-43.3%** |
-| 相对 C++ 最佳 | -20.7% | **+46.6%** | — | **+67.3pp** |
-| 相对 C++ 中位 | -21.0% | **+44.3%** | — | **+65.3pp** |
-| clear_output 最佳 | 6,460 | **3,629** | 3,860 | **-43.8%** |
-| 相对 C++ 最佳 | -42.5% | **+6.4%** | — | **+48.9pp** |
-
-### 最终对比（迭代 9，11 轮中位和最佳）
-
-ns/repeat。11 轮 pinned CPU 2，ReleaseFast -Dcpu=native。
-
-| Kernel | Zig 中位 [min, max] | C++ 中位 [min, max] | 最佳 vs C++ | 中位 vs C++ |
-|---|---:|---:|:---|:---|
-| clear_output | 3,698 [3,629, 3,940] | 3,994 [3,860, 4,133] | **+6.4%** ✅ | **+8.0%** ✅ |
-| CSC `Ax` dense | 313,311 [146,500, 465,317] | 207,267 [193,589, 249,118] | **+32.1%** ✅ | -33.8% |
-| CSC `Ax` skip zero | 45,178 [44,162, 47,078] | 35,422 [35,170, 36,037] | -20.4% | -21.6% |
-| CSC `Ax` sparse view | 22,469 [22,309, 24,137] | 19,023 [18,746, 28,577] | -16.0% | -15.3% |
-| CSC sparse add, no clear | 16,039 [15,905, 20,021] | 14,224 [14,097, 23,893] | -11.4% | -11.3% |
-| CSR `Ax` dense | 150,501 [146,576, 175,407] | 145,056 [142,280, 151,521] | -2.9% | -3.6% |
-| CSC `A^T x` | 108,132 [107,326, 110,560] | 144,619 [142,472, 150,648] | **+32.7%** ✅ | **+33.7%** ✅ |
-| CSR `A^T x` | 149,789 [128,577, 330,735] | 254,261 [191,984, 384,207] | **+49.3%** ✅ | **+69.7%** ✅ |
-| alpha*A*x+y | 144,237 [128,548, 324,591] | 191,083 [186,310, 252,716] | **+44.9%** ✅ | **+32.5%** ✅ |
-| compensated product | 364,755 [277,138, 449,271] | 391,583 [386,525, 524,938] | **+39.5%** ✅ | **+7.4%** ✅ |
-| row/column scaling | 116,766 [112,400, 130,522] | 168,074 [158,208, 181,913] | **+40.8%** ✅ | **+43.9%** ✅ |
-| CSC→CSR, caller-owned | 946,988 [658,863, 1,029,412] | 602,516 [457,982, 808,801] | -30.5% | -36.4% |
-| transpose, caller-owned | 998,484 [745,151, 1,114,321] | 827,271 [383,816, 1,035,292] | -48.5% | -17.1% |
-| builder, sorted checked | 980,562 [945,044, 1,790,246] | 912,652 [809,552, 998,788] | -14.3% | -6.9% |
-| builder, general unsorted | 2,136,844 [2,096,046, 2,351,128] | 3,628,905 [3,526,177, 3,721,333] | **+68.2%** ✅ | **+69.8%** ✅ |
-| sparse accumulator | 99,368 [97,085, 225,328] | 143,372 [142,353, 155,977] | **+46.6%** ✅ | **+44.3%** ✅ |
-
-### 当前状态（迭代 9 最佳 vs C++）
-
-| Kernel | Zig 最佳 (ns) | C++ (ns) | 相对值 | 初始 vs C++ | 总提升 |
-|---|---:|---:|---:|---|---:|
-| clear_output | 3,629 | 3,860 | **+6.4%** ✅ | +0.3% | +6.1pp |
-| CSC `Ax` dense | 146,500 | 193,589 | **+32.1%** ✅ | -25.5% | +57.6pp |
-| CSR `Ax` dense | 146,576 | 142,280 | -2.9% | -18.2% | +15.3pp |
-| CSC `A^T x` | 107,326 | 142,472 | **+32.7%** ✅ | +36.3% | -3.6pp |
-| CSR `A^T x` | 128,577 | 191,984 | **+49.3%** ✅ | -64.5% | **+113.8pp** |
-| alpha*A*x+y | 128,548 | 186,310 | **+44.9%** ✅ | +64.9% | -20.0pp |
-| compensated product | 277,138 | 386,525 | **+39.5%** ✅ | -36.1% | +75.6pp |
-| row/column scaling | 112,400 | 158,208 | **+40.8%** ✅ | -56.2% | +97.0pp |
-| CSC→CSR into | 658,863 | 457,982 | -30.5% | -16.8% | -13.7pp |
-| transpose into | 745,151 | 383,816 | -48.5% | +30.8% | -79.3pp |
-| builder sorted | 945,044 | 809,552 | -14.3% | -15.3% | +1.0pp |
-| builder general | 2,096,046 | 3,526,177 | **+68.2%** ✅ | +60.4% | +7.8pp |
-| **sparse accumulator** | **97,085** | **142,353** | **+46.6%** ✅ | -30.7% | **+77.3pp** |
-
-**已确认优于 C++ 的内核（10/13）：**
-- clear_output (+6.4%)、CSC `Ax` dense (+32.1%)、CSC `A^T x` (+32.7%)
-- CSR `A^T x` (+49.3%)、alpha*A*x+y (+44.9%)、compensated product (+39.5%)
-- scaling (+40.8%)、builder general (+68.2%)、**sparse accumulator (+46.6%)**
-
-**仍有差距的内核（3/13）：**
-- CSR `Ax` dense（-2.9%）：接近持平
-- CSC→CSR into（-30.5%）：counting + scatter 固定开销
-- transpose into（-48.5%）：C++ 本次运行的最佳值异常偏低
-
-### 迭代 9 关键总结
-
-**perf 工具定位了 Zig 0.16 `@memset` 在非 `u8` 类型上退化为 `compiler_rt.memset` 逐字节清零的问题。** 使用 volatile `@Vector(4, T)` 存储替代后，sparse accumulator 从落后 C++ 20.7% 跃升至领先 46.6%（+67pp），clear_output 从落后 42.5% 跃升至领先 6.4%（+49pp）。这是 perf 驱动优化的典型成功案例。
-
-| Kernel | perf 发现 | 原始瓶颈占比 | 修复方式 | 改善 |
-|---|---|---|---|---|
-| sparse accumulator | `compiler_rt.memset` 逐字节 | 58.73% | `clearF64` volatile SIMD | -44% → **+46.6%** |
-| clear_output | `@memset` 字节级 | ~40% | `clearF64` volatile SIMD | -42.5% → **+6.4%** |
-| CSC→CSR/transpose | `@memset` 字节级 | 12.86% | `clearUsize` volatile SIMD | 部分改善 |
-
-### 全部轮次优化回顾
-
-| 轮次 | 关键变更 | 最大改善 |
+| Kernel | 修复 | 状态 |
 |---|---|---|
-| 迭代 1 | @setFloatMode + 本地别名 + 补偿乘积重写 | scaling -56% → +40% |
-| 迭代 2 | 撤销有害变更 | 基线稳定 |
-| 迭代 3 | 确认 LTO 有害 | 结论性 |
-| 迭代 4 | 别名扩展 + @memset + merge-counting | CSR A^T x 中位 -40% |
-| 迭代 5 | Sparse accumulator 去 marks 数组 | acc -31% → -17% |
-| 迭代 6 | 传参 self → *const Self | CSR A^T x -9.3% |
-| 迭代 7a | asm CSR A^T x scatter | CSR A^T x -64% → **+36%** ✅ |
-| 迭代 7b | asm CSC→CSR scatter（失败回退） | 引发退化，回退到纯 Zig |
-| 迭代 8 | inline + 扁平化 sparse accumulator | acc 中位 -33.5%，方差 -97.6% |
-| **迭代 9** | **volatile SIMD 替代 `@memset`（perf 驱动）** | **acc -20.7% → +46.6%（+67pp）** |
-| **迭代 10** | **Codex 修整：sentinel=-0.0、HUInt 类型、`@mulAdd`、合并存储等** | **acc +46.6% → +98.4%（+52pp）；csc_ax +32%→+52%** |
+| `computeLayout` align overflow | `al > 1 and cursor > max - (al - 1)` 检查 | ✅ |
+| 全部 6 处 compact layout | 迁移到 `computePageColoredLayout` | ✅ |
+| 全部 3 处 lean layout | 迁移到 `computeLayout` | ✅ |
+| csc_to_csr_owning struct hash | 两端均使用 `fillCsrFromCsc` 输出 | ✅ |
+| builder struct hash (3 kernel) | Z/C++ 均输出 struct hash | ✅ |
+| 脚本 `\|\| true` | 移除 | ✅ |
+| 脚本逐轮校验 | 跨实现 checksum + struct hash | ✅ |
+| `clear_output` 测量污染 | repeats 500→100k | ✅ |
 
-## 17. 迭代 10：Codex 修整（负零 sentinel、HUInt 类型、@mulAdd 等）
+## 4. 方向：caller-owned reusable CSC build buffers
 
-### 变更内容
+build 系列 kernel 的 owning 路径瓶颈在每次分配新内存时的页 fault 开销，非 merge 算法。使用 caller-owned reusable buffer 可获得显著加速。
 
-Codex 对下午的优化进行了综合修缮，主要变更包括：
+### 生产 API（已实现）
 
-- `sparse_sum.zig`：sentinel 从 `floatMin(f64)` 改为 `-0.0`，使用 `@bitCast` 位级 `isTouchedValue`/`isSentinel` 检查；新增 `initWithCapacity` 合并分配 dense_values + active 为单一缓存友好存储块
-- `csr_view.zig`：`row_starts` 类型从 `[]const usize` 改为 `[]const foundation.HUInt`（32-bit）；`multiplyAssumeValid`/`transposeMultiplyAssumeValid` 改用 `@mulAdd` 替代 `+`/`*`
-- `csr_cache.zig` 等适配 `foundation.HUInt` 类型
-- `CscMatrix` 等改 `*const Self` 传参
-
-### 结果（11 轮最佳 vs 迭代 9）
-
-| Kernel | Iter9 最佳 (ns) | **Iter10 最佳 (ns)** | C++ (ns) | vs C++ | 变化 |
-|---|---:|---:|---:|:---|---:|
-| sparse_accumulate | 97,085 | **69,852** | 138,583 | **+98.4%** ✅ | **-28.1%** |
-| CSC Ax dense | 146,500 | **123,794** | 187,821 | **+51.7%** ✅ | -15.5% |
-| CSC A^T x | 107,326 | **89,767** | 138,631 | **+54.4%** ✅ | -16.4% |
-| product_quad | 277,138 | **242,854** | 367,774 | **+51.4%** ✅ | -12.4% |
-| transpose_into | 745,151 | **412,858** | 422,694 | **+2.4%** ✅ | **-44.6%** |
-| CSR Ax dense | 146,576 | **138,524** | 138,359 | -0.1% | -5.5% |
-| CSR A^T x | 128,577 | **179,024** | 186,640 | +4.3% ✅ | +39.2% ⚠️ |
-| clear_output | 3,629 | **3,674** | 3,722 | +1.3% ✅ | +1.2% |
-| alpha*A*x+y | 128,548 | **144,086** | 181,161 | **+25.7%** ✅ | +12.1% |
-| scaling | 112,400 | **116,993** | 149,495 | **+27.8%** ✅ | +4.1% |
-| CSC→CSR into | 658,863 | **595,927** | 454,549 | -23.7% | -9.6% |
-| builder sorted | 945,044 | **1,081,839** | 923,950 | -14.6% | +14.5% |
-| builder general | 2,096,046 | **2,096,381** | 3,433,282 | **+63.8%** ✅ | +0.0% |
-
-> ⚠️ CSR A^T x 从 +49.3% 降至 +4.3%，因为 `row_starts` 类型改为 `foundation.HUInt`（u32），asm 内核的 `csrTransposeMultiply` 不再适配，回退到纯 Zig 路径。需后续适配 asm 内核以支持 HUInt 类型。
-
-### 当前领先状态（迭代 10）
-
-**领先 C++ 的内核：**
-- sparse_accumulator **+98.4%** ✅（最大领先）
-- csc_atx_dense **+54.4%** ✅
-- csc_ax_dense **+51.7%** ✅
-- product_quad **+51.4%** ✅
-- builder_general **+63.8%** ✅
-- alpha_ax_plus_y **+25.7%** ✅
-- apply_scale **+27.8%** ✅
-- clear_output **+1.3%** ✅
-- transpose_into **+2.4%** ✅
-- csr_atx_dense **+4.3%** ✅
-
-**仍有差距：**
-- CSR Ax dense（-0.1%）基本持平
-- CSC→CSR into（-23.7%）
-- builder_freeze_sorted（-14.6%）
-
-脚本会重新构建 HiGHS、Zig benchmark 和 C++ harness，并把每轮原始 CSV 写到临时目录：
-
-```bash
-HIGHS_SOURCE=/home/godv/documents/codefiles/cppfiles/HiGHS \
-CPU_CORE=2 RUNS=11 \
-bash bench/matrix/run_comparison.sh
+```zig
+pub const CscBuildBuffers = struct { ... };  // caller 分配/管理生命周期
+pub fn freezeCanonicalIntoAssumeValid(buffers: *CscBuildBuffers, ...) MatrixError!CscView;
 ```
 
-默认原始结果目录是 `/tmp/zhighs-matrix-comparison/results`。Zig benchmark 当前把 CSV 写到 stderr，脚本已按此行为重定向；直接运行时可使用：
+- 返回借用 `CscView`（`[]const` slices），不拥有 buffer
+- 容量不足返回 `error.BufferTooSmall`
+- 不强制预触页（caller 策略）
+- 适用于求解器中反复 rebuild 矩阵的场景
 
-```bash
-zig build bench-matrix -Doptimize=ReleaseFast -Dcpu=native 2> zig-matrix.csv
-```
+### 原型性能（单次采样）
+
+Reusable CSC 构建原型在同数学语义测试中比 C++ AoS reusable reference 快约 19%；正式生产 API 与稳定性尚待 11 轮交错验证。
+
+## 5. 待执行
+
+| 优先级 | 任务 | 需 sudo |
+|---|---|---|
+| P0 | csr_ax_dense objdump + perf annotate 对照 | 是 |
+| P1 | sparse_accumulator smp/c_alloc/fixed-buffer 对照 + Zen2 `ls_dispatch` | 是 |
+| P2 | transpose owning 内部 `[]HUInt` 对照实验 | 否 |
+| P3 | 低负载 (< 1.0) 11 轮完整重采样 | 否 |

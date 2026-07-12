@@ -14,3 +14,5 @@ zig-out/
 .agents
 bench/**/*_bench
 test/**/*_test
+perf.data
+perf.data.old
