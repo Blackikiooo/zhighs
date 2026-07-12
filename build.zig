@@ -77,12 +77,22 @@ pub fn build(b: *std.Build) void {
     const hcd_bench_step = b.step("bench-hcd", "Run the HCD microbenchmark");
     hcd_bench_step.dependOn(&run_hcd_bench.step);
 
-    const matrix_bench_module = b.createModule(.{
-        .root_source_file = b.path("src/matrix/bench_root.zig"),
+    const matrix_module = b.createModule(.{
+        .root_source_file = b.path("src/matrix/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "foundation", .module = foundation.module },
+        },
+    });
+
+    const matrix_bench_module = b.createModule(.{
+        .root_source_file = b.path("bench/matrix/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
         },
     });
 
@@ -125,11 +135,11 @@ pub fn build(b: *std.Build) void {
     // higher layers (model, API) are being edited independently.
 
     const matrix_test_root = b.createModule(.{
-        .root_source_file = b.path("src/matrix/test_root.zig"),
+        .root_source_file = b.path("test/matrix/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
         },
     });
 

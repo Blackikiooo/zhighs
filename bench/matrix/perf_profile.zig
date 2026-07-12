@@ -329,14 +329,14 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (std.mem.eql(u8, requested, "transpose_into")) {
         for (0..repeats) |_| {
-            try zhighs.matrix.transposeIntoAssumeValid(h.matrix, h.transpose_buffers.starts, h.transpose_buffers.rows, h.transpose_buffers.values, h.transpose_buffers.cursor);
+            try zhighs.matrix.transposeIntoAssumeValidCompact(h.matrix, h.transpose_buffers.compact_starts, h.transpose_buffers.starts, h.transpose_buffers.rows, h.transpose_buffers.values, h.transpose_buffers.cursor);
             clobberPtr(h.transpose_buffers.values.ptr);
         }
         result_checksum = checksum(h.transpose_buffers.values);
         result_struct_hash = structuralHash(h.transpose_buffers.starts, h.transpose_buffers.rows, h.transpose_buffers.values);
     } else if (std.mem.eql(u8, requested, "transpose_owning")) {
         for (0..repeats) |_| {
-            var t = try zhighs.matrix.transposeLeanAssumeValid(h.allocator, h.matrix);
+            var t = try zhighs.matrix.transposeLeanAssumeValidCompact(h.allocator, h.matrix);
             clobberPtr(t.values.ptr);
             t.deinit(h.allocator);
         }
