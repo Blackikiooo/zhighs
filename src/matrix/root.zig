@@ -2,6 +2,17 @@
 //!
 //! Construction uses mutable SoA builders; solver kernels consume canonical,
 //! owning sparse vectors and CSC matrices.
+//!
+//! API stability policy:
+//! - A declaration documented as `Stable API` is intended for production use.
+//! - Every other public declaration is currently an `Experimental API`. Its
+//!   signature, ownership model, validation contract, or implementation may be
+//!   corrected as the LP/presolve/simplex layers expose new requirements.
+//!
+//! This policy prevents today's matrix prototypes from accidentally becoming a
+//! permanent compatibility promise. Experimental APIs remain fully testable and
+//! usable inside this repository, but callers should isolate them behind their
+//! own adapter.
 
 const std = @import("std");
 const sparse_vector = @import("sparse_vector.zig");
@@ -26,11 +37,16 @@ pub const SparseVector = sparse_vector.SparseVector;
 pub const SparseVectorBuilder = sparse_vector_builder.SparseVectorBuilder;
 pub const MatrixError = csc.MatrixError;
 pub const CscMatrix = csc.CscMatrix;
+/// Stable API: read-only borrowed view over canonical CSC storage.
 pub const CscView = csc.CscView;
 pub const MatrixBuilder = builder.MatrixBuilder;
+/// Stable API: reusable caller-owned storage for canonical CSC construction.
 pub const CscBuildBuffers = builder.CscBuildBuffers;
+/// Experimental API: may change as sorted-input construction is integrated.
 pub const freezeFromSortedArraysAssumeValid = builder.freezeFromSortedArraysAssumeValid;
+/// Experimental API: may change or be replaced by the reusable-buffer path.
 pub const freezeFromCanonicalArraysAssumeValid = builder.freezeFromCanonicalArraysAssumeValid;
+/// Stable API: allocation-free canonical CSC construction into caller buffers.
 pub const freezeCanonicalIntoAssumeValid = builder.freezeCanonicalIntoAssumeValid;
 pub const CsrView = csr_view.CsrView;
 pub const CsrCache = csr_view.CsrCache;
@@ -67,10 +83,13 @@ pub const transposeMultiplyHighPrecisionFastAssumeValid = ops.transposeMultiplyH
 pub const transposeMultiplyCompensatedAssumeValid = ops.transposeMultiplyCompensatedAssumeValid;
 pub const transpose = transpose_module.transpose;
 pub const transposeAssumeValid = transpose_module.transposeAssumeValid;
+/// Experimental API: owning lean layout and allocation policy may change.
 pub const transposeLeanAssumeValid = transpose_module.transposeLeanAssumeValid;
+/// Experimental API: compact-offset representation may change after solver profiling.
 pub const transposeLeanAssumeValidCompact = transpose_module.transposeLeanAssumeValidCompact;
 pub const transposeInto = transpose_module.transposeInto;
 pub const transposeIntoAssumeValid = transpose_module.transposeIntoAssumeValid;
+/// Experimental API: compact scratch/output contract may change after integration.
 pub const transposeIntoAssumeValidCompact = transpose_module.transposeIntoAssumeValidCompact;
 pub const TransposeBuffers = transpose_module.TransposeBuffers;
 pub const extractColumns = slice_module.extractColumns;

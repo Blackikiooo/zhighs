@@ -433,7 +433,10 @@ test "lean sorted freeze preserves canonical data without compact offsets" {
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 5.0 }, matrix.values);
 }
 
-/// experimental: two-pass freeze from sorted arrays with duplicate merge.
+/// Experimental API: two-pass freeze from sorted arrays with duplicate merge.
+///
+/// This API may be corrected, renamed, or replaced after integration with the
+/// LP/presolve layers. Do not treat its signature or allocation layout as stable.
 ///
 /// Freeze directly from pre-sorted arrays, bypassing the builder's append
 /// mechanism.  Useful for callers that already have sorted (col, row) data
@@ -556,7 +559,10 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
     }
 }
 
-/// experimental: owning freeze for canonical (no-duplicate) arrays.
+/// Experimental API: owning freeze for canonical (no-duplicate) arrays.
+///
+/// This API may be corrected, renamed, or replaced by the reusable-buffer path.
+/// Do not treat its signature or allocation layout as stable.
 ///
 /// Fast-path freeze for canonical arrays.  Caller guarantees:
 /// - Sorted by (col, row)
@@ -640,7 +646,7 @@ test "freezeFromCanonical handles tridiagonal with no duplicates" {
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0, 3.0 }, matrix.values);
 }
 
-/// stable: caller-owned reusable buffers for CSC construction.
+/// Stable API: caller-owned reusable buffers for CSC construction.
 ///
 /// The caller allocates and manages the lifetime of all three slices.
 /// Write functions accept a `*CscBuildBuffers` to update `col_starts` in
@@ -669,7 +675,7 @@ pub const CscBuildBuffers = struct {
     }
 };
 
-/// stable: caller-owned reusable CSC freeze.
+/// Stable API: caller-owned reusable CSC freeze.
 ///
 /// Write canonical (sorted, unique, nonzero, finite) coordinate triples into
 /// caller-owned `CscBuildBuffers`.  Returns a borrowed `CscView` pointing into
@@ -776,7 +782,10 @@ test "freezeCanonicalIntoAssumeValid matches owning freeze" {
         // Check for duplicates in already-added entries
         var dup = false;
         for (0..n) |k| {
-            if (rows_buf[k].toUsize() == row and cols_buf[k].toUsize() == col) { dup = true; break; }
+            if (rows_buf[k].toUsize() == row and cols_buf[k].toUsize() == col) {
+                dup = true;
+                break;
+            }
         }
         if (dup) continue;
         if (n >= 200) break;
@@ -791,11 +800,17 @@ test "freezeCanonicalIntoAssumeValid matches owning freeze" {
         for (i + 1..n) |j| {
             if (cols_buf[i].toUsize() > cols_buf[j].toUsize() or
                 (cols_buf[i].toUsize() == cols_buf[j].toUsize() and
-                 rows_buf[i].toUsize() > rows_buf[j].toUsize()))
+                    rows_buf[i].toUsize() > rows_buf[j].toUsize()))
             {
-                const tmp_r = rows_buf[i]; rows_buf[i] = rows_buf[j]; rows_buf[j] = tmp_r;
-                const tmp_c = cols_buf[i]; cols_buf[i] = cols_buf[j]; cols_buf[j] = tmp_c;
-                const tmp_v = vals_buf[i]; vals_buf[i] = vals_buf[j]; vals_buf[j] = tmp_v;
+                const tmp_r = rows_buf[i];
+                rows_buf[i] = rows_buf[j];
+                rows_buf[j] = tmp_r;
+                const tmp_c = cols_buf[i];
+                cols_buf[i] = cols_buf[j];
+                cols_buf[j] = tmp_c;
+                const tmp_v = vals_buf[i];
+                vals_buf[i] = vals_buf[j];
+                vals_buf[j] = tmp_v;
             }
         }
     }

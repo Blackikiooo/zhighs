@@ -35,13 +35,50 @@
 | HiGHS | 1.14.0, git `dcc25308d8`, 32-bit HighsInt |
 | perf_event_paranoid | 4 (需 sudo 访问硬件计数器) |
 
+### 2026-07-12 ReleaseFast 复测快照
+
+运行条件：CPU 2，11 轮 Zig/C++ 交错执行；Zig 使用
+`ReleaseFast -Dcpu=native`，C++ 使用
+`-O3 -march=native -DNDEBUG -flto`。运行时 load average 为 2.74，CPU
+governor 为 `schedutil`，因此 MAD 超过 15% 的项目只记为
+`INCONCLUSIVE`，不能据此判断回归或领先。21 个 kernel 的 checksum 与
+struct hash 均匹配。
+
+| Kernel | Zig 中位数 (ns) | C++ 中位数 (ns) | Zig 相对性能 | 判定 |
+|---|---:|---:|---:|---|
+| clear_output | 3,524 | 3,628 | +2.9% | 可信 |
+| csc_ax_dense | 294,732 | 189,204 | -55.8% | 可信，但 Zig 存在宽幅分布 |
+| csc_ax_sparse_skip | 24,954 | 35,600 | +29.9% | 可信 |
+| csc_ax_sparse_view | 17,683 | 18,281 | +3.3% | 可信 |
+| csc_sparse_add_no_clear | 12,897 | 13,554 | +4.9% | 可信 |
+| csr_ax_dense | 171,395 | 140,355 | -22.1% | 可信 |
+| csc_atx_dense | 99,038 | 145,869 | +32.1% | 可信 |
+| csr_atx_dense | 197,581 | 263,577 | +25.0% | INCONCLUSIVE（C++ MAD 28.2%） |
+| alpha_ax_plus_y | 296,582 | 232,679 | -27.5% | INCONCLUSIVE（两端 MAD 超标） |
+| product_quad | 237,902 | 368,869 | +35.5% | 可信 |
+| apply_scale | 132,700 | 163,820 | +19.0% | 可信 |
+| csc_to_csr_into | 746,100 | 705,088 | -5.8% | 临界噪声区（MAD 约 12–14%） |
+| csc_to_csr_owning | 1,578,431 | 1,460,319 | -8.1% | 临界噪声区 |
+| transpose_into | 785,297 | 614,860 | -27.7% | INCONCLUSIVE（两端 MAD 超标） |
+| transpose_owning | 1,392,001 | 672,367 | -107.0% | INCONCLUSIVE（C++ MAD 18.5%） |
+| builder_freeze_sorted | 2,005,578 | 1,825,242 | -9.9% | 可信 |
+| builder_freeze_prepopulated | 1,357,088 | 819,607 | -65.6% | 可信 |
+| builder_freeze_canonical | 1,005,969 | 467,159 | -115.3% | 可信；owning 分配路径 |
+| builder_freeze_reusable | 316,665 | 548,791 | +42.3% | 可信；推荐生产热路径 |
+| builder_freeze_general | 3,232,957 | 4,416,613 | +26.8% | 可信 |
+| sparse_accumulate | 300,921 | 273,111 | -10.2% | 已知双峰，INCONCLUSIVE |
+
+原始数据位于 `/tmp/zhighs-matrix-retest/results/raw.csv`，汇总数据位于
+`/tmp/zhighs-matrix-retest/results/summary.csv`。`/tmp` 文件不是版本化产物；
+本节保留了可追溯的中位数和测量条件。
+
 ## 3. 实验结论汇总
 
 ### CONFIRMED — 根因已定位
 
 | Kernel | 发现 | 证据 |
 |---|---|---|
-| **builder_freeze_canonical (owning)** | 瓶颈在分配器页 fault，非 merge 算法 | reusable 消除 161× page faults → owning→reusable 3.4× faster。reusable 单次对比 Z/C++: Zig 458k ns vs C++ 545k ns（约 19% 优势）。正式生产 API 稳定性与 11 轮验证进行中 |
+| **builder_freeze_canonical (owning)** | 瓶颈在分配器页 fault，非 merge 算法 | reusable 消除 161× page faults；本轮 11 轮交错复测中 Zig reusable 为 316,665 ns，C++ 为 548,791 ns，领先约 42% |
 | **clear_output** | Zig SIMD volatile 比 C++ `std::fill` 少 9% cycles | 100k repeats: Zig 1,359M cycles (IPC 3.70) vs C++ 1,486M cycles (IPC 1.50) |
 | **csc_to_csr_owning** | 不是真实回归 | 7 次独立 perf: cycles 607-665M (±5%)，C++ 612M。wall-time 差距来自测量噪声 |
 
@@ -83,9 +120,11 @@ pub fn freezeCanonicalIntoAssumeValid(buffers: *CscBuildBuffers, ...) MatrixErro
 - 不强制预触页（caller 策略）
 - 适用于求解器中反复 rebuild 矩阵的场景
 
-### 原型性能（单次采样）
+### 生产路径性能（11 轮交错采样）
 
-Reusable CSC 构建原型在同数学语义测试中比 C++ AoS reusable reference 快约 19%；正式生产 API 与稳定性尚待 11 轮交错验证。
+Reusable CSC 构建在同数学语义测试中比 C++ AoS reusable reference 快约
+42%；两端 checksum 与 struct hash 均匹配。该结果的 Zig MAD 为 0.33%，
+C++ MAD 为 0.46%，是本轮可信度较高的结果。
 
 ## 5. 待执行
 
