@@ -17,8 +17,8 @@ pub const Pricing = struct {
 
     fn normalizedScore(self: Pricing, violation: f64, weight: f64) f64 {
         return switch (self.rule) {
-            .dantzig, .partial, .hyper_sparse => violation,
-            .devex, .steepest_edge => violation / @sqrt(@max(weight, 1.0)),
+            .dantzig, .partial => violation,
+            .devex, .steepest_edge, .hyper_sparse => violation / @sqrt(@max(weight, 1.0)),
         };
     }
 

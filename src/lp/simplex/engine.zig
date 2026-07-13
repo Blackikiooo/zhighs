@@ -11,7 +11,7 @@ const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
 
 pub const Algorithm = enum { primal_revised, dual_revised };
-pub const SolvePhase = enum { phase_one, phase_two };
+pub const SolvePhase = enum { phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
 /// the callback invocation.
@@ -70,6 +70,11 @@ pub const SimplexEngine = struct {
     solve_start_ns: ?i96 = null,
     solve_clock_io: ?std.Io = null,
     work_used: u64 = 0,
+    dual_edge_weights_valid: bool = false,
+    dual_row_index: ?u32 = null,
+    dual_candidate_count: usize = 0,
+    dual_candidate_cutoff: f64 = 0.0,
+    dual_hyper_sparse_active: bool = false,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -98,6 +103,7 @@ pub const SimplexEngine = struct {
         self.basis = basis_module.BasisState.init(self.allocator, problem.num_rows, problem.num_cols) catch return .numerical_failure;
         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
         self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+        self.dual_edge_weights_valid = true;
         self.observeFactorizationStability();
         self.iterations = 0;
 
@@ -113,11 +119,29 @@ pub const SimplexEngine = struct {
                     self.algorithm = .dual_revised;
                     return self.solveDual(problem, control);
                 }
+                const repair_status = self.repairWarmBasisWithDual(problem, control);
+                if (repair_status == .optimal) {
+                    if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    const repaired = self.classifyFeasibility(problem);
+                    if (repaired.primal) {
+                        self.algorithm = .primal_revised;
+                        return self.solvePrimal(problem, control);
+                    }
+                    if (repaired.dual) {
+                        self.algorithm = .dual_revised;
+                        return self.solveDual(problem, control);
+                    }
+                } else if (repair_status == .work_limit or repair_status == .time_limit or
+                    repair_status == .iteration_limit or repair_status == .interrupted)
+                {
+                    return repair_status;
+                }
             } else |_| {}
             // Invalid, singular, or neither-feasible warm starts fall back to
             // the deterministic logical crash basis.
             if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
             self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+            self.dual_edge_weights_valid = true;
             self.observeFactorizationStability();
         }
 
@@ -207,6 +231,18 @@ pub const SimplexEngine = struct {
         if (feasibility.dual) {
             self.algorithm = .dual_revised;
             return self.solveDual(problem, control);
+        }
+        const repair_status = self.repairWarmBasisWithDual(problem, control);
+        if (repair_status == .optimal) {
+            if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+            if (self.classifyFeasibility(problem).primal) {
+                self.algorithm = .primal_revised;
+                return self.solvePrimal(problem, control);
+            }
+        } else if (repair_status == .work_limit or repair_status == .time_limit or
+            repair_status == .iteration_limit or repair_status == .interrupted)
+        {
+            return repair_status;
         }
         var cold_control = control;
         cold_control.initial_basis = null;
@@ -433,7 +469,14 @@ pub const SimplexEngine = struct {
         if (entering_col >= basis.col_status.len or leaving_row >= problem.num_rows) return .numerical_failure;
         const leaving_col = basis.basic_index[leaving_row];
         const pivot = basis.pivot_direction[leaving_row];
-        self.updateEdgeWeights(entering_col, leaving_row, pivot);
+        if (self.pricing.rule == .steepest_edge and self.dual_row_index == leaving_row) {
+            if (self.updateDualSteepestEdgeWeights(leaving_row, pivot) != .optimal)
+                self.dual_edge_weights_valid = false;
+        } else {
+            self.dual_edge_weights_valid = false;
+            self.updateDevexWeights(entering_col, leaving_row, pivot);
+        }
+        self.dual_row_index = null;
         const update_succeeded = blk: {
             self.factorization.update(.{
                 .leaving_row = @intCast(leaving_row),
@@ -461,7 +504,7 @@ pub const SimplexEngine = struct {
     /// Lightweight Devex reference update. It deliberately uses the already
     /// hot FTRAN direction and does not allocate. Exact steepest-edge weights
     /// can replace this policy without changing basis storage or pivot code.
-    fn updateEdgeWeights(self: *SimplexEngine, entering_col: usize, leaving_row: usize, pivot: f64) void {
+    fn updateDevexWeights(self: *SimplexEngine, entering_col: usize, leaving_row: usize, pivot: f64) void {
         const basis = if (self.basis) |*value| value else return;
         if (entering_col >= basis.col_edge_weight.len or leaving_row >= basis.row_edge_weight.len) return;
         var norm_squared: f64 = 1.0;
@@ -521,13 +564,9 @@ pub const SimplexEngine = struct {
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
-            const leaving = self.pricing.chooseDualLeavingWeighted(
-                basis.basic_value,
-                basis.basic_lower,
-                basis.basic_upper,
-                basis.row_edge_weight,
-                self.numerical.primal_tolerance,
-            ) orelse return self.finishOptimal(problem);
+            if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+                return .numerical_failure;
+            const leaving = self.chooseDualLeavingRow() orelse return self.finishOptimal(problem);
 
             if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
@@ -572,6 +611,194 @@ pub const SimplexEngine = struct {
         return .iteration_limit;
     }
 
+    fn chooseDualLeavingRow(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
+        const basis = if (self.basis) |*value| value else return null;
+        if (self.pricing.rule != .hyper_sparse or !self.dual_hyper_sparse_active)
+            return self.pricing.chooseDualLeavingWeighted(
+                basis.basic_value,
+                basis.basic_lower,
+                basis.basic_upper,
+                basis.row_edge_weight,
+                self.numerical.primal_tolerance,
+            );
+
+        var best = self.bestDualCandidate();
+        if (best == null or self.dualCandidateScore(best.?.row) + self.numerical.primal_tolerance < self.dual_candidate_cutoff) {
+            self.rebuildDualCandidateList();
+            best = self.bestDualCandidate();
+        }
+        return best;
+    }
+
+    fn dualCandidate(self: *const SimplexEngine, row: usize) ?pricing_module.DualLeavingChoice {
+        const basis = if (self.basis) |*value| value else return null;
+        const value = basis.basic_value[row];
+        if (value < basis.basic_lower[row] - self.numerical.primal_tolerance)
+            return .{ .row = @intCast(row), .bound = .at_lower, .violation = basis.basic_lower[row] - value };
+        if (value > basis.basic_upper[row] + self.numerical.primal_tolerance)
+            return .{ .row = @intCast(row), .bound = .at_upper, .violation = value - basis.basic_upper[row] };
+        return null;
+    }
+
+    fn dualCandidateScore(self: *const SimplexEngine, row_u32: u32) f64 {
+        const row: usize = @intCast(row_u32);
+        const basis = if (self.basis) |*value| value else return 0.0;
+        const candidate = self.dualCandidate(row) orelse return 0.0;
+        return candidate.violation / @sqrt(@max(basis.row_edge_weight[row], 1.0));
+    }
+
+    fn bestDualCandidate(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
+        const basis = if (self.basis) |*value| value else return null;
+        var best: ?pricing_module.DualLeavingChoice = null;
+        var best_score = self.numerical.primal_tolerance;
+        for (basis.dual_candidate_rows[0..self.dual_candidate_count], basis.dual_candidate_score[0..self.dual_candidate_count]) |row, *stored_score| {
+            const score = self.dualCandidateScore(row);
+            stored_score.* = score;
+            if (score > best_score) {
+                best_score = score;
+                best = self.dualCandidate(@intCast(row));
+            }
+        }
+        return best;
+    }
+
+    fn rebuildDualCandidateList(self: *SimplexEngine) void {
+        const basis = if (self.basis) |*value| value else return;
+        const capacity = @min(basis.num_rows, 32);
+        self.dual_candidate_count = 0;
+        self.dual_candidate_cutoff = 0.0;
+        if (capacity == 0) return;
+        for (0..basis.num_rows) |row| {
+            const score = self.dualCandidateScore(@intCast(row));
+            if (score <= self.numerical.primal_tolerance) continue;
+            if (self.dual_candidate_count < capacity) {
+                const slot = self.dual_candidate_count;
+                basis.dual_candidate_rows[slot] = @intCast(row);
+                basis.dual_candidate_score[slot] = score;
+                self.dual_candidate_count += 1;
+                continue;
+            }
+            var weakest: usize = 0;
+            for (basis.dual_candidate_score[1..capacity], 1..) |candidate_score, slot| {
+                if (candidate_score < basis.dual_candidate_score[weakest]) weakest = slot;
+            }
+            if (score > basis.dual_candidate_score[weakest]) {
+                basis.dual_candidate_rows[weakest] = @intCast(row);
+                basis.dual_candidate_score[weakest] = score;
+            }
+        }
+        if (self.dual_candidate_count > 0) {
+            self.dual_candidate_cutoff = basis.dual_candidate_score[0];
+            for (basis.dual_candidate_score[1..self.dual_candidate_count]) |score|
+                self.dual_candidate_cutoff = @min(self.dual_candidate_cutoff, score);
+        }
+    }
+
+    /// Initialize exact dual steepest-edge weights after a crash, imported
+    /// basis, reinversion, or detected recurrence drift.
+    fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
+        if (self.dual_edge_weights_valid) return .optimal;
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        for (basis.row_edge_weight, 0..) |*weight, row| {
+            @memset(basis.dual_row, 0.0);
+            basis.dual_row[row] = 1.0;
+            self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
+            var norm_squared: f64 = 0.0;
+            for (basis.dual_row) |entry| norm_squared += entry * entry;
+            if (!std.math.isFinite(norm_squared)) return .numerical_failure;
+            weight.* = @max(norm_squared, self.numerical.zero_tolerance);
+        }
+        self.dual_edge_weights_valid = true;
+        self.dual_row_index = null;
+        return .optimal;
+    }
+
+    /// Forrest--Goldfarb DSE recurrence. `dual_row` is the freshly computed
+    /// BTRAN result B^-T e_p. One additional FTRAN forms
+    /// tau = B^-1 B^-T e_p before the factor update changes B.
+    fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, pivot: f64) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        if (!self.dual_edge_weights_valid or leaving_row >= basis.row_edge_weight.len or
+            @abs(pivot) <= self.numerical.pivot_tolerance)
+            return .numerical_failure;
+        var exact_pivot_weight: f64 = 0.0;
+        for (basis.dual_row) |entry| exact_pivot_weight += entry * entry;
+        if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
+            return .numerical_failure;
+        basis.row_edge_weight[leaving_row] = exact_pivot_weight;
+        @memcpy(basis.residual_work, basis.dual_row);
+        self.factorization.solve(basis.residual_work) catch return .numerical_failure;
+
+        for (basis.row_edge_weight, basis.pivot_direction, basis.residual_work, 0..) |*weight, alpha, tau, row| {
+            if (row == leaving_row) continue;
+            const ratio = alpha / pivot;
+            const updated = weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
+            if (!std.math.isFinite(updated)) return .numerical_failure;
+            weight.* = @max(updated, 1e-4);
+        }
+        basis.row_edge_weight[leaving_row] = @max(exact_pivot_weight / (pivot * pivot), 1e-4);
+        return .optimal;
+    }
+
+    /// Repair a warm basis that is neither primal nor dual feasible by using
+    /// the zero auxiliary objective. Every reduced cost is then exactly zero,
+    /// so dual pivots can restore primal feasibility without discarding the
+    /// imported basis or factorization. The original objective is restored by
+    /// the caller before entering Phase II.
+    fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        self.algorithm = .dual_revised;
+        @memset(basis.reduced_cost, 0.0);
+        while (self.iterations < control.max_iterations) : (self.iterations += 1) {
+            if (self.beginIteration(problem, control, .dual_feasibility_repair)) |status| return status;
+            const leaving = self.pricing.chooseDualLeavingWeighted(
+                basis.basic_value,
+                basis.basic_lower,
+                basis.basic_upper,
+                basis.row_edge_weight,
+                self.numerical.primal_tolerance,
+            ) orelse return .optimal;
+            if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
+            const original_cols = problem.num_cols + problem.num_rows;
+            const entering = self.ratio_test.chooseDualEntering(
+                basis.tableau[0..original_cols],
+                basis.reduced_cost[0..original_cols],
+                basis.col_status[0..original_cols],
+                basis.col_lower[0..original_cols],
+                basis.col_upper[0..original_cols],
+                basis.primal[0..original_cols],
+                leaving.bound,
+                leaving.violation,
+                basis.dual_ratio[0..original_cols],
+                basis.dual_direction[0..original_cols],
+                basis.flip_columns[0..original_cols],
+            );
+            if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
+            const entering_col = entering.column orelse return .infeasible;
+            const entering_index: usize = @intCast(entering_col);
+            if (self.computeDirection(problem, entering_index) != .optimal) return .numerical_failure;
+            if (entering.direction < 0.0) {
+                for (basis.pivot_direction) |*value| value.* = -value.*;
+            }
+            const leaving_row: usize = @intCast(leaving.row);
+            const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
+            const pivot = basis.pivot_direction[leaving_row];
+            if (@abs(pivot) <= self.numerical.pivot_tolerance) return .numerical_failure;
+            const step = (basis.basic_value[leaving_row] - target) / pivot;
+            if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
+            if (self.performPivot(
+                problem,
+                entering_index,
+                entering.direction,
+                leaving_row,
+                leaving.bound,
+                @max(step, 0.0),
+            ) != .optimal) return .numerical_failure;
+            @memset(basis.reduced_cost, 0.0);
+        }
+        return .iteration_limit;
+    }
+
     fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.ProblemView, leaving_row: u32) SolveStatus {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         const row: usize = @intCast(leaving_row);
@@ -579,6 +806,22 @@ pub const SimplexEngine = struct {
         @memset(basis.dual_row, 0.0);
         basis.dual_row[row] = 1.0;
         self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
+        if (self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid) {
+            var exact_weight: f64 = 0.0;
+            for (basis.dual_row) |entry| exact_weight += entry * entry;
+            if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
+                return .numerical_failure;
+            const updated_weight = basis.row_edge_weight[row];
+            const relative_error = @abs(updated_weight - exact_weight) / @max(exact_weight, self.numerical.zero_tolerance);
+            if (relative_error > self.numerical.dual_edge_weight_error_tolerance) {
+                basis.row_edge_weight[row] = exact_weight;
+                self.numerical.dual_edge_weight_corrections += 1;
+                // Huangfu's safeguard rejects a seriously underestimated
+                // pivotal weight; force a full exact reset after this pivot.
+                if (updated_weight < 0.5 * exact_weight) self.dual_edge_weights_valid = false;
+            }
+        }
+        self.dual_row_index = leaving_row;
         @memset(basis.tableau, 0.0);
         for (0..problem.num_cols) |column| {
             const begin = problem.matrix.col_starts[column];
@@ -593,6 +836,13 @@ pub const SimplexEngine = struct {
         for (0..problem.num_rows) |logical_row| {
             basis.tableau[problem.num_cols + logical_row] = basis.dual_row[logical_row];
         }
+        var nonzero_count: usize = 0;
+        for (basis.tableau[0 .. problem.num_cols + problem.num_rows]) |value| {
+            if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+        }
+        const tableau_count = problem.num_cols + problem.num_rows;
+        self.dual_hyper_sparse_active = tableau_count > 0 and nonzero_count * 10 < tableau_count;
+        if (!self.dual_hyper_sparse_active) self.dual_candidate_count = 0;
         return .optimal;
     }
 
@@ -839,6 +1089,10 @@ pub const SimplexEngine = struct {
         self.factorization.refactorizeInPlace() catch return .numerical_failure;
         self.numerical.markRefactorized();
         self.observeFactorizationStability();
+        self.dual_edge_weights_valid = false;
+        self.dual_row_index = null;
+        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+            return .numerical_failure;
         return .optimal;
     }
 
@@ -1415,4 +1669,102 @@ test "imported dual-feasible basis reoptimizes a changed RHS" {
     try std.testing.expectEqual(SolveStatus.optimal, second_engine.solveProblem(modified, .{ .initial_basis = snapshot.view() }));
     try std.testing.expectEqual(Algorithm.dual_revised, second_engine.algorithm);
     try std.testing.expectApproxEqAbs(@as(f64, 0), second_engine.basis.?.primal[0], 1e-12);
+}
+
+test "neither-feasible imported basis is repaired without a crash restart" {
+    const Context = struct {
+        saw_repair: bool = false,
+        fn callback(event: ProgressEventView, context_ptr: ?*anyopaque) CallbackAction {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr.?));
+            self.saw_repair = self.saw_repair or event.phase == .dual_feasibility_repair;
+            return .continue_solve;
+        }
+    };
+    const rows = [_]foundation.RowId{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) };
+    const problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &[_]f64{ 0, -1 },
+        .col_lower = &[_]f64{ 0, 0 },
+        .col_upper = &[_]f64{ 1, std.math.inf(f64) },
+        .row_lower = &[_]f64{2},
+        .row_upper = &[_]f64{2},
+        .matrix = .{ .num_rows = 1, .num_cols = 2, .col_starts = &[_]usize{ 0, 1, 2 }, .row_indices = &rows, .values = &[_]f64{ 1, 1 } },
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    const initial_basis = basis_snapshot_module.BasisView{
+        .structural_status = &[_]basis_module.BasisStatus{ .basic, .at_lower },
+        .logical_status = &[_]basis_module.BasisStatus{.fixed},
+        .basic_index = &[_]u32{0},
+    };
+    var context = Context{};
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{
+        .initial_basis = initial_basis,
+        .iteration_callback = Context.callback,
+        .callback_user_data = &context,
+    }));
+    try std.testing.expect(context.saw_repair);
+    try std.testing.expectEqual(Algorithm.primal_revised, engine.algorithm);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), engine.basis.?.primal[0], 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), engine.basis.?.primal[1], 1e-10);
+}
+
+test "exact dual steepest-edge weights use BTRAN row norms" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    engine.basis.?.basic_value[0] = -1.0;
+    engine.basis.?.basic_value[1] = -2.0;
+    @memset(engine.basis.?.basic_lower, 0.0);
+    @memset(engine.basis.?.basic_upper, std.math.inf(f64));
+    try engine.factorization.factorize(2, &[_]f64{ 2, 0, 0, 0.5 });
+    try std.testing.expectEqual(SolveStatus.optimal, engine.ensureExactDualEdgeWeights());
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), engine.basis.?.row_edge_weight[1], 1e-12);
+
+    engine.pricing.rule = .steepest_edge;
+    const choice = engine.pricing.chooseDualLeavingWeighted(
+        engine.basis.?.basic_value,
+        engine.basis.?.basic_lower,
+        engine.basis.?.basic_upper,
+        engine.basis.?.row_edge_weight,
+        engine.numerical.primal_tolerance,
+    ).?;
+    try std.testing.expectEqual(@as(u32, 0), choice.row);
+}
+
+test "incremental dual steepest-edge recurrence matches the new inverse rows" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.factorization.factorizeIdentity(2);
+    engine.pricing.rule = .steepest_edge;
+    engine.dual_edge_weights_valid = true;
+    engine.dual_row_index = 0;
+    engine.basis.?.dual_row[0] = 1.0;
+    engine.basis.?.dual_row[1] = 0.0;
+    engine.basis.?.pivot_direction[0] = 2.0;
+    engine.basis.?.pivot_direction[1] = 1.0;
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
+    try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
+}
+
+test "hyper-sparse dual candidate list retains the most attractive rows" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 64, 0);
+    @memset(engine.basis.?.basic_lower, 0.0);
+    @memset(engine.basis.?.basic_upper, std.math.inf(f64));
+    @memset(engine.basis.?.basic_value, 0.0);
+    for (24..64) |row| engine.basis.?.basic_value[row] = -@as(f64, @floatFromInt(row - 23));
+    engine.pricing.rule = .hyper_sparse;
+    engine.dual_hyper_sparse_active = true;
+    const choice = engine.chooseDualLeavingRow().?;
+    try std.testing.expectEqual(@as(u32, 63), choice.row);
+    try std.testing.expectEqual(@as(usize, 32), engine.dual_candidate_count);
+    try std.testing.expect(engine.dual_candidate_cutoff > 0.0);
 }

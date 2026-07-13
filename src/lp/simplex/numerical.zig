@@ -22,6 +22,8 @@ pub const NumericalState = struct {
     refinement_count: usize = 0,
     /// A cheap pivot-spread warning indicator, not a formal condition number.
     pivot_condition_estimate: f64 = 1.0,
+    dual_edge_weight_error_tolerance: f64 = 0.25,
+    dual_edge_weight_corrections: usize = 0,
 
     pub fn observePivot(self: *NumericalState, pivot: f64) void {
         self.update_count += 1;

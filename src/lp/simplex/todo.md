@@ -39,8 +39,18 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 
 ## Priority 2: advanced dual and MIP reoptimization
 
-- Dual Phase I for imported bases that are neither primal nor dual feasible.
-- Exact dual steepest-edge weight updates and hyper-sparse dual pricing.
+- Piecewise-linear dual Phase I maximizing the dual-infeasibility sum. Imported
+  bases that are neither primal nor dual feasible already retain their basis
+  and factorization through a zero-auxiliary-objective dual feasibility repair,
+  followed by primal or dual Phase II.
+- Incremental Forrest--Goldfarb dual steepest-edge updates are implemented with one
+  allocation-free FTRAN-DSE per pivot, exact BTRAN initialization after
+  reinversion, selected-row accuracy correction, and full reset after severe
+  weight underestimation. `SimplexPricing=2` enables the strategy.
+- Hyper-sparse dual leaving-row pricing uses a fixed-capacity top-attractiveness
+  candidate list, cutoff-based stale-list rebuild, and automatic activation
+  only after tableau density falls below 10%. Candidate rows and scores are
+  engine-owned SoA arrays with no iteration-time allocation.
 - MIP-node warm starts.
 
 ## Priority 3: sparse factorization

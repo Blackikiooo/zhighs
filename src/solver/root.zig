@@ -15,6 +15,7 @@ pub const LpBasisView = lp.BasisView;
 pub const LpBasisSnapshot = lp.BasisSnapshot;
 pub const LpProgressEventView = lp.simplex.engine.ProgressEventView;
 pub const LpCallbackAction = lp.simplex.engine.CallbackAction;
+pub const LpPricingRule = lp.simplex.pricing.PricingRule;
 
 pub const LpRevisionStamp = struct {
     structure: u64,

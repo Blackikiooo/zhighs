@@ -45,6 +45,8 @@ pub const BasisState = struct {
     dual_ratio: []f64 = &.{},
     dual_direction: []f64 = &.{},
     flip_columns: []u32 = &.{},
+    dual_candidate_rows: []u32 = &.{},
+    dual_candidate_score: []f64 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, rows: usize, cols: usize) !BasisState {
         const total_cols = cols + 2 * rows;
@@ -77,6 +79,8 @@ pub const BasisState = struct {
         self.dual_ratio = try allocator.alloc(f64, total_cols);
         self.dual_direction = try allocator.alloc(f64, total_cols);
         self.flip_columns = try allocator.alloc(u32, total_cols);
+        self.dual_candidate_rows = try allocator.alloc(u32, rows);
+        self.dual_candidate_score = try allocator.alloc(f64, rows);
         @memset(self.row_status, .basic);
         @memset(self.col_status, .at_lower);
         @memset(self.basic_index, 0);
@@ -104,6 +108,8 @@ pub const BasisState = struct {
         @memset(self.dual_ratio, std.math.inf(f64));
         @memset(self.dual_direction, 0.0);
         @memset(self.flip_columns, 0);
+        @memset(self.dual_candidate_rows, 0);
+        @memset(self.dual_candidate_score, 0.0);
         return self;
     }
 
@@ -166,6 +172,8 @@ pub const BasisState = struct {
         self.allocator.free(self.dual_ratio);
         self.allocator.free(self.dual_direction);
         self.allocator.free(self.flip_columns);
+        self.allocator.free(self.dual_candidate_rows);
+        self.allocator.free(self.dual_candidate_score);
     }
 };
 

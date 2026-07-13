@@ -178,6 +178,14 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
     const output_enabled = (self.env.getIntParam("OutputFlag") catch 1) != 0;
     const log_interval_value = self.env.getIntParam("SimplexLogInterval") catch 100;
     const log_interval: u64 = if (log_interval_value <= 0) 1 else @intCast(log_interval_value);
+    const pricing_value = self.env.getIntParam("SimplexPricing") catch -1;
+    self.lp_session.engine.pricing.rule = switch (pricing_value) {
+        0 => .dantzig,
+        2 => .steepest_edge,
+        3 => .partial,
+        4 => .hyper_sparse,
+        else => .devex,
+    };
     var callback_bridge = SimplexCallbackBridge{ .model = self };
     const warm_basis: ?solver.LpBasisView = if (self.basis_available and
         self.vbasis.len == problem.num_cols and self.cbasis.len == problem.num_rows and self.basis_head.len == problem.num_rows)
