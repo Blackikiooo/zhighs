@@ -4,6 +4,7 @@ const std = @import("std");
 const Model = @import("../model.zig").Model;
 const Var = @import("../var/index.zig").Var;
 const ModelError = @import("../types.zig").ModelError;
+const VarId = @import("../entity_handle.zig").VarId;
 
 /// A linear expression `c + Σ aᵢ xᵢ` where `c` is a constant term and each
 /// pair `(xᵢ, aᵢ)` is a variable-coefficient term.
@@ -17,7 +18,7 @@ const ModelError = @import("../types.zig").ModelError;
 /// ```
 pub const LinExpr = struct {
     allocator: std.mem.Allocator,
-    terms: std.ArrayListUnmanaged(struct { var_idx: usize, coeff: f64 }) = .empty,
+    terms: std.ArrayListUnmanaged(struct { var_idx: usize, var_id: ?VarId = null, coeff: f64 }) = .empty,
     constant: f64 = 0.0,
 
     const Self = @This();
@@ -34,12 +35,12 @@ pub const LinExpr = struct {
 
     /// Add a term `coeff * var` to the expression.
     pub fn addTerm(self: *Self, variable: Var, coeff: f64) ModelError!void {
-        self.terms.append(self.allocator, .{ .var_idx = variable.index, .coeff = coeff }) catch return error.OutOfMemory;
+        self.terms.append(self.allocator, .{ .var_idx = variable.index, .var_id = variable.id, .coeff = coeff }) catch return error.OutOfMemory;
     }
 
     /// Add a term by raw variable index.
     pub fn addTermByIndex(self: *Self, var_idx: usize, coeff: f64) ModelError!void {
-        self.terms.append(self.allocator, .{ .var_idx = var_idx, .coeff = coeff }) catch return error.OutOfMemory;
+        self.terms.append(self.allocator, .{ .var_idx = var_idx, .var_id = null, .coeff = coeff }) catch return error.OutOfMemory;
     }
 
     /// Add a constant term to the expression.
@@ -50,7 +51,7 @@ pub const LinExpr = struct {
     /// Add another linear expression to this one.
     pub fn addExpr(self: *Self, other: LinExpr) ModelError!void {
         for (other.terms.items) |t| {
-            try self.addTermByIndex(t.var_idx, t.coeff);
+            self.terms.append(self.allocator, t) catch return error.OutOfMemory;
         }
         self.constant += other.constant;
     }
@@ -59,7 +60,8 @@ pub const LinExpr = struct {
     pub fn getValue(self: Self, model: *Model) ModelError!f64 {
         var val = self.constant;
         for (self.terms.items) |t| {
-            const x = try model.getDblAttrElement(.x, t.var_idx);
+            const index = if (t.var_id) |id| try model.resolveVarId(id) else t.var_idx;
+            const x = try model.getDblAttrElement(.x, index);
             val += t.coeff * x;
         }
         return val;

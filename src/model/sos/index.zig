@@ -6,28 +6,42 @@ const types = @import("../types.zig");
 
 const SosType = types.SosType;
 const ModelError = types.ModelError;
+const SosId = @import("../entity_handle.zig").SosId;
 
 /// A Special Ordered Set constraint, identified by index within a model.
 pub const SOS = struct {
     model: *Model,
     index: usize,
+    id: ?SosId = null,
 
     const Self = @This();
 
+    pub fn at(model: *Model, index: usize) ModelError!Self {
+        return .{ .model = model, .index = index, .id = try model.sosIdAt(index) };
+    }
+
+    fn denseIndex(self: Self) ModelError!usize {
+        if (self.id) |id| return self.model.resolveSosId(id);
+        return self.index;
+    }
+
     pub fn getType(self: Self) ModelError!SosType {
-        if (self.index >= self.model.sos_count) return error.IndexOutOfRange;
-        return self.model.sos_types[self.index];
+        const index = try self.denseIndex();
+        if (index >= self.model.sos_count) return error.IndexOutOfRange;
+        return self.model.sos_types[index];
     }
 
     pub fn getSOSName(self: Self) ModelError![]const u8 {
-        if (self.index >= self.model.sos_count) return error.IndexOutOfRange;
-        return self.model.sos_names[self.index] orelse "";
+        const index = try self.denseIndex();
+        if (index >= self.model.sos_count) return error.IndexOutOfRange;
+        return self.model.sos_names[index] orelse "";
     }
 
     pub fn numMembers(self: Self) ModelError!usize {
-        if (self.index >= self.model.sos_count) return error.IndexOutOfRange;
-        const beg = self.model.sos_begin[self.index];
-        const end = self.model.sos_begin[self.index + 1];
+        const index = try self.denseIndex();
+        if (index >= self.model.sos_count) return error.IndexOutOfRange;
+        const beg = self.model.sos_begin[index];
+        const end = self.model.sos_begin[index + 1];
         return end - beg;
     }
 

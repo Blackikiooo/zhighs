@@ -1,12 +1,10 @@
 //! Variable entity module.
 //!
-//! Provides the [`VarData`] type, the managed SoA container [`VarArray`],
-//! and the typed index wrapper [`Var`].
+//! Exposes the typed [`Var`] handle. Variable data remains owned by `Model`;
+//! this module deliberately does not define a second storage container.
 
 const std = @import("std");
 
-pub const VarData = @import("data.zig").VarData;
-pub const VarArray = @import("array.zig").VarArray;
 pub const Var = @import("index.zig").Var;
 
 test {

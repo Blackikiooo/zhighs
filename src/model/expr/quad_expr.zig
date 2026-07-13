@@ -4,6 +4,8 @@ const std = @import("std");
 const Var = @import("../var/index.zig").Var;
 const ModelError = @import("../types.zig").ModelError;
 const LinExpr = @import("lin_expr.zig").LinExpr;
+const VarId = @import("../entity_handle.zig").VarId;
+const Model = @import("../model.zig").Model;
 
 /// A quadratic expression:
 ///   `LinExpr + Σ Q[j,k] · x[j] · x[k]`
@@ -11,9 +13,10 @@ const LinExpr = @import("lin_expr.zig").LinExpr;
 /// where the quadratic terms are stored as lower-triangle triples
 /// `(row, col, coeff)`.
 pub const QuadExpr = struct {
+    pub const ResolvedQTerm = struct { row: usize, col: usize, coeff: f64 };
     allocator: std.mem.Allocator,
     linear: LinExpr,
-    q_terms: std.ArrayListUnmanaged(struct { row: usize, col: usize, coeff: f64 }) = .empty,
+    q_terms: std.ArrayListUnmanaged(struct { row: usize, col: usize, row_id: ?VarId = null, col_id: ?VarId = null, coeff: f64 }) = .empty,
 
     const Self = @This();
 
@@ -38,7 +41,13 @@ pub const QuadExpr = struct {
 
     /// Add a term `coeff * x[row] * x[col]` to the quadratic part.
     pub fn addQTerm(self: *Self, row: Var, col: Var, coeff: f64) ModelError!void {
-        self.q_terms.append(self.allocator, .{ .row = row.index, .col = col.index, .coeff = coeff }) catch return error.OutOfMemory;
+        self.q_terms.append(self.allocator, .{
+            .row = row.index,
+            .col = col.index,
+            .row_id = row.id,
+            .col_id = col.id,
+            .coeff = coeff,
+        }) catch return error.OutOfMemory;
     }
 
     /// Add a constant to the linear part.
@@ -49,5 +58,19 @@ pub const QuadExpr = struct {
     /// Return the number of quadratic terms.
     pub fn numQTerms(self: Self) usize {
         return self.q_terms.items.len;
+    }
+
+    /// Resolve stable variable handles for the current dense model layout.
+    pub fn resolveQTerms(self: Self, allocator: std.mem.Allocator, model: Model) ModelError![]ResolvedQTerm {
+        const resolved = allocator.alloc(ResolvedQTerm, self.q_terms.items.len) catch return error.OutOfMemory;
+        errdefer allocator.free(resolved);
+        for (self.q_terms.items, 0..) |term, i| {
+            resolved[i] = .{
+                .row = if (term.row_id) |id| try model.resolveVarId(id) else term.row,
+                .col = if (term.col_id) |id| try model.resolveVarId(id) else term.col,
+                .coeff = term.coeff,
+            };
+        }
+        return resolved;
     }
 };

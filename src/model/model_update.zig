@@ -13,12 +13,14 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Model = @import("model.zig").Model;
+const genconstr = @import("model_genconstr.zig");
 const foundation = @import("foundation");
 const matrix = @import("matrix");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
 const Sense = types.Sense;
+const GenConstrType = types.GenConstrType;
 const RowId = foundation.RowId;
 const CscMatrix = matrix.CscMatrix;
 const MatrixStore = matrix.MatrixStore;
@@ -47,8 +49,8 @@ pub fn applyPending(self: *Model) ModelError!void {
     }
 
     // Allocate space for the expanded arrays.
-    const total_vars = self.num_vars + new_vars;
-    const total_constrs = self.num_constrs + new_constrs;
+    var total_vars = self.num_vars + new_vars;
+    var total_constrs = self.num_constrs + new_constrs;
 
     // Commit variable additions.
     if (new_vars > 0) {
@@ -279,6 +281,378 @@ pub fn applyPending(self: *Model) ModelError!void {
         }
     }
 
+    // Deletion compacts the linear core and remaps every packed store that
+    // references variables (quadratic objective/constraints, PWL and SOS).
+    // General constraints still require a dedicated remapping pass; refusing
+    // that mixed case is safer than leaving stale indices.
+    var delete_var_count: usize = 0;
+    var delete_constr_count: usize = 0;
+    for (self.pending.items) |chg| switch (chg) {
+        .del_vars => |d| delete_var_count += d.indices.len,
+        .del_constrs => |d| delete_constr_count += d.indices.len,
+        else => {},
+    };
+    if (delete_var_count > 0 or delete_constr_count > 0) {
+        var deleted_vars = try alloc.alloc(bool, total_vars);
+        defer alloc.free(deleted_vars);
+        var deleted_constrs = try alloc.alloc(bool, total_constrs);
+        defer alloc.free(deleted_constrs);
+        @memset(deleted_vars, false);
+        @memset(deleted_constrs, false);
+
+        for (self.pending.items) |chg| switch (chg) {
+            .del_vars => |d| for (d.indices) |idx| {
+                if (idx >= total_vars) return error.InvalidArgument;
+                deleted_vars[idx] = true;
+            },
+            .del_constrs => |d| for (d.indices) |idx| {
+                if (idx >= total_constrs) return error.InvalidArgument;
+                deleted_constrs[idx] = true;
+            },
+            else => {},
+        };
+
+        while (self.var_handles.liveLen() < total_vars) {
+            const id = self.var_handles.allocate(alloc) catch return error.OutOfMemory;
+            self.var_handles.bindDenseWithAllocator(alloc, id, @intCast(self.var_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        const var_remap = self.var_handles.compact(alloc, deleted_vars) catch |err| return switch (err) {
+            error.DenseIndexOutOfRange, error.InvalidHandle => error.InvalidArgument,
+            error.HandleExhausted => error.OutOfMemory,
+        };
+        defer alloc.free(var_remap);
+        while (self.genconstr_handles.liveLen() < self.genconstr_count) {
+            const id = self.genconstr_handles.allocate(alloc) catch return error.OutOfMemory;
+            self.genconstr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.genconstr_handles.liveLen())) catch return error.OutOfMemory;
+        }
+
+        // General constraints use a packed representation with a small
+        // type-specific set of variable slots.  Constraints whose result or
+        // any operand is deleted are removed; surviving constraints are
+        // copied with their variable slots remapped in place.
+        if (self.genconstr_count > 0 and delete_var_count > 0) {
+            var new_types: std.ArrayListUnmanaged(GenConstrType) = .empty;
+            var new_resvars: std.ArrayListUnmanaged(usize) = .empty;
+            var new_nvars: std.ArrayListUnmanaged(usize) = .empty;
+            var new_indices: std.ArrayListUnmanaged(usize) = .empty;
+            var new_begin: std.ArrayListUnmanaged(usize) = .empty;
+            var new_names: std.ArrayListUnmanaged(?[]const u8) = .empty;
+            new_begin.append(alloc, 0) catch return error.OutOfMemory;
+            var gen_deleted = try alloc.alloc(bool, self.genconstr_count);
+            defer alloc.free(gen_deleted);
+            @memset(gen_deleted, false);
+
+            for (0..self.genconstr_count) |i| {
+                const t = self.genconstr_types[i];
+                const nvars = self.genconstr_nvars[i];
+                const off = genconstr.genConstrOffset(self.*, i);
+                const len = genconstr.genConstrDataLen(self.*, i);
+                const data = self.genconstr_indices[off .. off + len];
+                var drop = deleted_vars[self.genconstr_resvar[i]];
+                var kept_nvars = nvars;
+                switch (t) {
+                    .max, .min, .abs, .and_, .or_, .norm, .nl, .exp, .log, .sin, .cos, .tan, .logistic => {
+                        kept_nvars = 0;
+                        for (data) |v| {
+                            if (!deleted_vars[v]) kept_nvars += 1;
+                        }
+                        if (kept_nvars == 0) drop = true;
+                    },
+                    .indicator => {
+                        kept_nvars = 0;
+                        for (0..nvars) |j| {
+                            if (!deleted_vars[data[4 + 2 * j]]) kept_nvars += 1;
+                        }
+                    },
+                    .pwl, .expa, .loga, .pow, .poly => {
+                        if (deleted_vars[data[0]]) drop = true;
+                    },
+                }
+                if (drop) {
+                    gen_deleted[i] = true;
+                    if (self.genconstr_names[i]) |name| alloc.free(name);
+                    continue;
+                }
+
+                new_types.append(alloc, t) catch return error.OutOfMemory;
+                new_resvars.append(alloc, var_remap[self.genconstr_resvar[i]]) catch return error.OutOfMemory;
+                new_nvars.append(alloc, kept_nvars) catch return error.OutOfMemory;
+                new_names.append(alloc, self.genconstr_names[i]) catch return error.OutOfMemory;
+                switch (t) {
+                    .max, .min, .abs, .and_, .or_, .norm, .nl, .exp, .log, .sin, .cos, .tan, .logistic => {
+                        for (data) |value| {
+                            if (!deleted_vars[value]) {
+                                new_indices.append(alloc, var_remap[value]) catch return error.OutOfMemory;
+                            }
+                        }
+                    },
+                    .indicator => {
+                        new_indices.appendSlice(alloc, data[0..4]) catch return error.OutOfMemory;
+                        new_indices.items[new_indices.items.len - 3] = @as(usize, @bitCast(@as(i64, @intCast(kept_nvars))));
+                        for (0..nvars) |j| {
+                            if (!deleted_vars[data[4 + 2 * j]]) {
+                                new_indices.append(alloc, var_remap[data[4 + 2 * j]]) catch return error.OutOfMemory;
+                                new_indices.append(alloc, data[5 + 2 * j]) catch return error.OutOfMemory;
+                            }
+                        }
+                    },
+                    .pwl, .expa, .loga, .pow, .poly => {
+                        for (data, 0..) |value, j| {
+                            const is_var = j == 0;
+                            new_indices.append(alloc, if (is_var) var_remap[value] else value) catch return error.OutOfMemory;
+                        }
+                    },
+                }
+                new_begin.append(alloc, new_indices.items.len) catch return error.OutOfMemory;
+            }
+            alloc.free(self.genconstr_types);
+            alloc.free(self.genconstr_resvar);
+            alloc.free(self.genconstr_nvars);
+            alloc.free(self.genconstr_indices);
+            alloc.free(self.genconstr_begin);
+            alloc.free(self.genconstr_names);
+            self.genconstr_types = try new_types.toOwnedSlice(alloc);
+            self.genconstr_resvar = try new_resvars.toOwnedSlice(alloc);
+            self.genconstr_nvars = try new_nvars.toOwnedSlice(alloc);
+            self.genconstr_indices = try new_indices.toOwnedSlice(alloc);
+            self.genconstr_begin = try new_begin.toOwnedSlice(alloc);
+            self.genconstr_names = try new_names.toOwnedSlice(alloc);
+            self.genconstr_count = self.genconstr_types.len;
+            const gen_remap = self.genconstr_handles.compact(alloc, gen_deleted) catch return error.OutOfMemory;
+            alloc.free(gen_remap);
+        }
+
+        // Count unique deletions, not command entries: callers may submit the
+        // same index more than once in one batch.
+        delete_var_count = 0;
+        for (deleted_vars) |marked| {
+            if (marked) delete_var_count += 1;
+        }
+        delete_constr_count = 0;
+        for (deleted_constrs) |marked| {
+            if (marked) delete_constr_count += 1;
+        }
+
+        // Ensure handle tables contain every pre-compaction dense entry.
+        while (self.constr_handles.liveLen() < total_constrs) {
+            const id = self.constr_handles.allocate(alloc) catch return error.OutOfMemory;
+            self.constr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.constr_handles.liveLen())) catch return error.OutOfMemory;
+        }
+
+        const constr_remap = self.constr_handles.compact(alloc, deleted_constrs) catch |err| return switch (err) {
+            error.DenseIndexOutOfRange, error.InvalidHandle => error.InvalidArgument,
+            error.HandleExhausted => error.OutOfMemory,
+        };
+        defer alloc.free(constr_remap);
+
+        // Quadratic objective terms use dense variable indices. Drop terms
+        // touching deleted variables and remap surviving endpoints in one
+        // linear pass over the packed triples.
+        if (self.q_nz > 0 and delete_var_count > 0) {
+            var kept_q: usize = 0;
+            for (0..self.q_nz) |i| {
+                if (self.q_row[i] < 0 or self.q_col[i] < 0) return error.InvalidArgument;
+                const row = @as(usize, @intCast(self.q_row[i]));
+                const col = @as(usize, @intCast(self.q_col[i]));
+                if (row < deleted_vars.len and col < deleted_vars.len and !deleted_vars[row] and !deleted_vars[col]) {
+                    self.q_row[kept_q] = @intCast(var_remap[row]);
+                    self.q_col[kept_q] = @intCast(var_remap[col]);
+                    self.q_val[kept_q] = self.q_val[i];
+                    kept_q += 1;
+                }
+            }
+            self.q_row = try alloc.realloc(self.q_row, kept_q);
+            self.q_col = try alloc.realloc(self.q_col, kept_q);
+            self.q_val = try alloc.realloc(self.q_val, kept_q);
+            self.q_nz = kept_q;
+        }
+
+        if (self.qconstr_count > 0 and delete_var_count > 0) {
+            if (self.qconstr_qbegin.len != self.qconstr_count + 1 or self.qconstr_lbegin.len != self.qconstr_count + 1)
+                return error.InvalidArgument;
+            var new_qbegin: std.ArrayListUnmanaged(usize) = .empty;
+            var new_qrow: std.ArrayListUnmanaged(i32) = .empty;
+            var new_qcol: std.ArrayListUnmanaged(i32) = .empty;
+            var new_qval: std.ArrayListUnmanaged(f64) = .empty;
+            var new_lbegin: std.ArrayListUnmanaged(usize) = .empty;
+            var new_lind: std.ArrayListUnmanaged(usize) = .empty;
+            var new_lval: std.ArrayListUnmanaged(f64) = .empty;
+            new_qbegin.append(alloc, 0) catch return error.OutOfMemory;
+            new_lbegin.append(alloc, 0) catch return error.OutOfMemory;
+            for (0..self.qconstr_count) |constraint_index| {
+                const qb = self.qconstr_qbegin[constraint_index];
+                const qe = self.qconstr_qbegin[constraint_index + 1];
+                for (self.qconstr_qrow[qb..qe], self.qconstr_qcol[qb..qe], self.qconstr_qval[qb..qe]) |row, col, value| {
+                    if (row < 0 or col < 0) return error.InvalidArgument;
+                    const old_row: usize = @intCast(row);
+                    const old_col: usize = @intCast(col);
+                    if (old_row < deleted_vars.len and old_col < deleted_vars.len and !deleted_vars[old_row] and !deleted_vars[old_col]) {
+                        new_qrow.append(alloc, @intCast(var_remap[old_row])) catch return error.OutOfMemory;
+                        new_qcol.append(alloc, @intCast(var_remap[old_col])) catch return error.OutOfMemory;
+                        new_qval.append(alloc, value) catch return error.OutOfMemory;
+                    }
+                }
+                new_qbegin.append(alloc, new_qrow.items.len) catch return error.OutOfMemory;
+
+                const lb = self.qconstr_lbegin[constraint_index];
+                const le = self.qconstr_lbegin[constraint_index + 1];
+                for (self.qconstr_lind[lb..le], self.qconstr_lval[lb..le]) |old_var, value| {
+                    if (old_var >= deleted_vars.len) return error.InvalidArgument;
+                    if (!deleted_vars[old_var]) {
+                        new_lind.append(alloc, var_remap[old_var]) catch return error.OutOfMemory;
+                        new_lval.append(alloc, value) catch return error.OutOfMemory;
+                    }
+                }
+                new_lbegin.append(alloc, new_lind.items.len) catch return error.OutOfMemory;
+            }
+            alloc.free(self.qconstr_qrow);
+            alloc.free(self.qconstr_qcol);
+            alloc.free(self.qconstr_qval);
+            alloc.free(self.qconstr_qbegin);
+            alloc.free(self.qconstr_lind);
+            alloc.free(self.qconstr_lval);
+            alloc.free(self.qconstr_lbegin);
+            self.qconstr_qrow = try new_qrow.toOwnedSlice(alloc);
+            self.qconstr_qcol = try new_qcol.toOwnedSlice(alloc);
+            self.qconstr_qval = try new_qval.toOwnedSlice(alloc);
+            self.qconstr_qbegin = try new_qbegin.toOwnedSlice(alloc);
+            self.qconstr_lind = try new_lind.toOwnedSlice(alloc);
+            self.qconstr_lval = try new_lval.toOwnedSlice(alloc);
+            self.qconstr_lbegin = try new_lbegin.toOwnedSlice(alloc);
+        }
+
+        if (self.pwlobj_count > 0 and delete_var_count > 0) {
+            var new_pwl_var: std.ArrayListUnmanaged(usize) = .empty;
+            var new_pwl_npts: std.ArrayListUnmanaged(usize) = .empty;
+            var new_pwl_x: std.ArrayListUnmanaged(f64) = .empty;
+            var new_pwl_y: std.ArrayListUnmanaged(f64) = .empty;
+            var offset: usize = 0;
+            for (0..self.pwlobj_count) |i| {
+                const old_var = self.pwlobj_var[i];
+                const npts = self.pwlobj_npts[i];
+                if (old_var >= deleted_vars.len) return error.InvalidArgument;
+                if (!deleted_vars[old_var]) {
+                    new_pwl_var.append(alloc, var_remap[old_var]) catch return error.OutOfMemory;
+                    new_pwl_npts.append(alloc, npts) catch return error.OutOfMemory;
+                    new_pwl_x.appendSlice(alloc, self.pwlobj_xdata[offset .. offset + npts]) catch return error.OutOfMemory;
+                    new_pwl_y.appendSlice(alloc, self.pwlobj_ydata[offset .. offset + npts]) catch return error.OutOfMemory;
+                }
+                offset += npts;
+            }
+            self.allocator.free(self.pwlobj_var);
+            self.allocator.free(self.pwlobj_npts);
+            self.allocator.free(self.pwlobj_xdata);
+            self.allocator.free(self.pwlobj_ydata);
+            self.pwlobj_var = try new_pwl_var.toOwnedSlice(alloc);
+            self.pwlobj_npts = try new_pwl_npts.toOwnedSlice(alloc);
+            self.pwlobj_xdata = try new_pwl_x.toOwnedSlice(alloc);
+            self.pwlobj_ydata = try new_pwl_y.toOwnedSlice(alloc);
+            self.pwlobj_count = self.pwlobj_var.len;
+        }
+
+        if (self.sos_count > 0 and delete_var_count > 0) {
+            var new_begin: std.ArrayListUnmanaged(usize) = .empty;
+            var new_indices: std.ArrayListUnmanaged(usize) = .empty;
+            var new_weights: std.ArrayListUnmanaged(f64) = .empty;
+            new_begin.append(alloc, 0) catch return error.OutOfMemory;
+            for (0..self.sos_count) |sos_index| {
+                const begin = self.sos_begin[sos_index];
+                const end = self.sos_begin[sos_index + 1];
+                for (self.sos_indices[begin..end], self.sos_weights[begin..end]) |old_var, weight| {
+                    if (old_var >= deleted_vars.len) return error.InvalidArgument;
+                    if (!deleted_vars[old_var]) {
+                        new_indices.append(alloc, var_remap[old_var]) catch return error.OutOfMemory;
+                        new_weights.append(alloc, weight) catch return error.OutOfMemory;
+                    }
+                }
+                new_begin.append(alloc, new_indices.items.len) catch return error.OutOfMemory;
+            }
+            self.allocator.free(self.sos_begin);
+            self.allocator.free(self.sos_indices);
+            self.allocator.free(self.sos_weights);
+            self.sos_begin = try new_begin.toOwnedSlice(alloc);
+            self.sos_indices = try new_indices.toOwnedSlice(alloc);
+            self.sos_weights = try new_weights.toOwnedSlice(alloc);
+        }
+
+        const kept_vars = total_vars - delete_var_count;
+        const kept_constrs = total_constrs - delete_constr_count;
+
+        var new_lb = try alloc.alloc(f64, kept_vars);
+        var new_ub = try alloc.alloc(f64, kept_vars);
+        var new_obj = try alloc.alloc(f64, kept_vars);
+        var new_type = try alloc.alloc(VarType, kept_vars);
+        var new_names = try alloc.alloc(?[]const u8, kept_vars);
+        var vp: usize = 0;
+        for (0..total_vars) |old| if (!deleted_vars[old]) {
+            new_lb[vp] = self.var_lb[old];
+            new_ub[vp] = self.var_ub[old];
+            new_obj[vp] = self.var_obj[old];
+            new_type[vp] = self.var_type[old];
+            new_names[vp] = self.var_names[old];
+            vp += 1;
+        } else if (self.var_names[old]) |name| alloc.free(name);
+        alloc.free(self.var_lb);
+        alloc.free(self.var_ub);
+        alloc.free(self.var_obj);
+        alloc.free(self.var_type);
+        alloc.free(self.var_names);
+        self.var_lb = new_lb;
+        self.var_ub = new_ub;
+        self.var_obj = new_obj;
+        self.var_type = new_type;
+        self.var_names = new_names;
+
+        var new_sense = try alloc.alloc(Sense, kept_constrs);
+        var new_rhs = try alloc.alloc(f64, kept_constrs);
+        var new_cnames = try alloc.alloc(?[]const u8, kept_constrs);
+        var cp: usize = 0;
+        for (0..total_constrs) |old| if (!deleted_constrs[old]) {
+            new_sense[cp] = self.constr_sense[old];
+            new_rhs[cp] = self.constr_rhs[old];
+            new_cnames[cp] = self.constr_names[old];
+            cp += 1;
+        } else if (self.constr_names[old]) |name| alloc.free(name);
+        alloc.free(self.constr_sense);
+        alloc.free(self.constr_rhs);
+        alloc.free(self.constr_names);
+        self.constr_sense = new_sense;
+        self.constr_rhs = new_rhs;
+        self.constr_names = new_cnames;
+
+        const old_matrix = self.matrix.csc();
+        var col_starts = try alloc.alloc(usize, kept_vars + 1);
+        var row_list: std.ArrayListUnmanaged(RowId) = .empty;
+        var val_list: std.ArrayListUnmanaged(f64) = .empty;
+        col_starts[0] = 0;
+        var new_col: usize = 0;
+        for (0..total_vars) |old_col| if (!deleted_vars[old_col]) {
+            const begin = old_matrix.col_starts[old_col];
+            const end = old_matrix.col_starts[old_col + 1];
+            for (old_matrix.row_indices[begin..end], old_matrix.values[begin..end]) |row, value| {
+                const old_row = row.toUsize();
+                if (!deleted_constrs[old_row]) {
+                    row_list.append(alloc, RowId.fromUsizeAssumeValid(constr_remap[old_row])) catch return error.OutOfMemory;
+                    val_list.append(alloc, value) catch return error.OutOfMemory;
+                }
+            }
+            new_col += 1;
+            col_starts[new_col] = row_list.items.len;
+        };
+        const new_csc = CscMatrix{
+            .num_rows = kept_constrs,
+            .num_cols = kept_vars,
+            .col_starts = col_starts,
+            .row_indices = try alloc.dupe(RowId, row_list.items),
+            .values = try alloc.dupe(f64, val_list.items),
+        };
+        row_list.deinit(alloc);
+        val_list.deinit(alloc);
+        self.matrix.replaceMatrixAssumeValid(alloc, new_csc) catch return error.RevisionOverflow;
+        total_vars = kept_vars;
+        total_constrs = kept_constrs;
+    }
+
     // Free the pending change records (owned slices were moved or freed).
     for (self.pending.items) |*chg| {
         switch (chg.*) {
@@ -300,5 +674,29 @@ pub fn applyPending(self: *Model) ModelError!void {
 
     self.num_vars = total_vars;
     self.num_constrs = total_constrs;
+
+    // Materialize stable IDs for every committed dense entity.  This keeps
+    // handle resolution O(1) after updateModel and gives later compaction a
+    // complete dense-to-slot map to update.
+    while (self.var_handles.liveLen() < self.num_vars) {
+        const id = self.var_handles.allocate(alloc) catch return error.OutOfMemory;
+        self.var_handles.bindDenseWithAllocator(alloc, id, @intCast(self.var_handles.liveLen())) catch return error.OutOfMemory;
+    }
+    while (self.constr_handles.liveLen() < self.num_constrs) {
+        const id = self.constr_handles.allocate(alloc) catch return error.OutOfMemory;
+        self.constr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.constr_handles.liveLen())) catch return error.OutOfMemory;
+    }
+    while (self.qconstr_handles.liveLen() < self.qconstr_count) {
+        const id = self.qconstr_handles.allocate(alloc) catch return error.OutOfMemory;
+        self.qconstr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.qconstr_handles.liveLen())) catch return error.OutOfMemory;
+    }
+    while (self.sos_handles.liveLen() < self.sos_count) {
+        const id = self.sos_handles.allocate(alloc) catch return error.OutOfMemory;
+        self.sos_handles.bindDenseWithAllocator(alloc, id, @intCast(self.sos_handles.liveLen())) catch return error.OutOfMemory;
+    }
+    while (self.genconstr_handles.liveLen() < self.genconstr_count) {
+        const id = self.genconstr_handles.allocate(alloc) catch return error.OutOfMemory;
+        self.genconstr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.genconstr_handles.liveLen())) catch return error.OutOfMemory;
+    }
     self.revision += 1;
 }

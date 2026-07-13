@@ -55,12 +55,14 @@ pub fn delGenConstrs(self: *Model) void {
     alloc.free(self.genconstr_resvar);
     alloc.free(self.genconstr_nvars);
     alloc.free(self.genconstr_indices);
+    alloc.free(self.genconstr_begin);
     for (self.genconstr_names) |n| if (n) |s| alloc.free(s);
     alloc.free(self.genconstr_names);
     self.genconstr_types = &.{};
     self.genconstr_resvar = &.{};
     self.genconstr_nvars = &.{};
     self.genconstr_indices = &.{};
+    self.genconstr_begin = &.{};
     self.genconstr_names = &.{};
     self.genconstr_count = 0;
     self.revision += 1;
@@ -77,6 +79,10 @@ fn addGenConstr(self: *Model, gctype: GenConstrType, resvar: usize, num_vars: us
 
     const old = self.genconstr_count;
     const new = old + 1;
+    if (old == 0) {
+        self.genconstr_begin = try alloc.realloc(self.genconstr_begin, 1);
+        self.genconstr_begin[0] = 0;
+    }
     self.genconstr_types = try alloc.realloc(self.genconstr_types, new);
     self.genconstr_types[old] = gctype;
     self.genconstr_resvar = try alloc.realloc(self.genconstr_resvar, new);
@@ -89,6 +95,8 @@ fn addGenConstr(self: *Model, gctype: GenConstrType, resvar: usize, num_vars: us
     @memcpy(self.genconstr_indices[old_inds_len..new_inds_len], vars[0..num_vars]);
     self.genconstr_names = try alloc.realloc(self.genconstr_names, new);
     self.genconstr_names[old] = if (name) |n| try alloc.dupe(u8, n) else null;
+    self.genconstr_begin = try alloc.realloc(self.genconstr_begin, new + 1);
+    self.genconstr_begin[new] = new_inds_len;
     self.genconstr_count = new;
     self.revision += 1;
 }
@@ -100,6 +108,10 @@ fn addGenConstrWithExtra(self: *Model, gctype: GenConstrType, resvar: usize, ope
     const alloc = self.allocator;
     const old = self.genconstr_count;
     const new = old + 1;
+    if (old == 0) {
+        self.genconstr_begin = try alloc.realloc(self.genconstr_begin, 1);
+        self.genconstr_begin[0] = 0;
+    }
     self.genconstr_types = try alloc.realloc(self.genconstr_types, new);
     self.genconstr_types[old] = gctype;
     self.genconstr_resvar = try alloc.realloc(self.genconstr_resvar, new);
@@ -125,12 +137,14 @@ fn addGenConstrWithExtra(self: *Model, gctype: GenConstrType, resvar: usize, ope
     }
     self.genconstr_names = try alloc.realloc(self.genconstr_names, new);
     self.genconstr_names[old] = if (name) |n| try alloc.dupe(u8, n) else null;
+    self.genconstr_begin = try alloc.realloc(self.genconstr_begin, new + 1);
+    self.genconstr_begin[new] = new_inds_len;
     self.genconstr_count = new;
     self.revision += 1;
 }
 
 /// Compute the number of usize entries stored in genconstr_indices for constraint at `idx`.
-fn genConstrDataLen(self: Model, idx: usize) usize {
+pub fn genConstrDataLen(self: Model, idx: usize) usize {
     const t = self.genconstr_types[idx];
     const nv = self.genconstr_nvars[idx];
     return switch (t) {
@@ -143,10 +157,8 @@ fn genConstrDataLen(self: Model, idx: usize) usize {
 }
 
 /// Return the offset into genconstr_indices where constraint `idx`'s data starts.
-fn genConstrOffset(self: Model, idx: usize) usize {
-    var off: usize = 0;
-    for (0..idx) |i| off += genConstrDataLen(self, i);
-    return off;
+pub fn genConstrOffset(self: Model, idx: usize) usize {
+    return self.genconstr_begin[idx];
 }
 
 // ══════════════════════════════════════════════════════════════════════════

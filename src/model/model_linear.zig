@@ -15,6 +15,7 @@ const ModelError = types.ModelError;
 const VarType = types.VarType;
 const Sense = types.Sense;
 const INFINITY = types.INFINITY;
+const Column = @import("expr/column.zig").Column;
 
 // ══════════════════════════════════════════════════════════════════════════
 //  Variable addition
@@ -47,6 +48,23 @@ pub fn addVar(
             .name = if (name) |n| try self.allocator.dupe(u8, n) else null,
         },
     });
+}
+
+/// Add a variable from a sparse column. Stable constraint handles are
+/// resolved once at the API boundary; the pending/model layers keep dense
+/// indices for cache-friendly matrix storage.
+pub fn addVarColumn(
+    self: *Model,
+    column: Column,
+    obj: f64,
+    lb: f64,
+    ub: f64,
+    vtype: VarType,
+    name: ?[]const u8,
+) ModelError!void {
+    const indices = try column.resolveIndices(self.allocator, self.*);
+    defer self.allocator.free(indices);
+    return self.addVar(indices.len, indices, column.values.items, obj, lb, ub, vtype, name);
 }
 
 /// Add a batch of variables (batch; CSC column format).

@@ -15,6 +15,12 @@ pub const types = @import("types.zig");
 pub const Env = @import("env.zig").Env;
 pub const Model = @import("model.zig").Model;
 pub const attrs = @import("attrs.zig");
+pub const entity_handle = @import("entity_handle.zig");
+pub const VarId = entity_handle.VarId;
+pub const ConstrId = entity_handle.ConstrId;
+pub const QConstrId = entity_handle.QConstrId;
+pub const SosId = entity_handle.SosId;
+pub const GenConstrId = entity_handle.GenConstrId;
 pub const expr = @import("expr/root.zig");
 
 // Entity-type sub-modules.
@@ -41,9 +47,7 @@ pub const EPSILON = types.EPSILON;
 
 // Re-export object wrapper types (from entity sub-modules).
 pub const Var = var_.Var;
-pub const VarData = var_.VarData;
 pub const Constr = constraint.Constr;
-pub const ConstrData = constraint.ConstrData;
 pub const QConstr = qconstr.QConstr;
 pub const SOS = sos.SOS;
 pub const GenConstr = genconstr.GenConstr;

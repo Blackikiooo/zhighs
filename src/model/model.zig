@@ -9,8 +9,9 @@
 //! 2. **Attribute-based access** – problem and solution data are read/written
 //!    through uniform `get*Attr` / `set*Attr` methods keyed by string names
 //!    (e.g. `"LB"`, `"Obj"`, `"X"`, `"Status"`).
-//! 3. **Index-based references** – variables and constraints are identified by
-//!    contiguous `usize` indices.
+//! 3. **Stable handles over dense storage** – public variable/constraint
+//!    handles carry a generation-checked identity, while the numerical core
+//!    remains packed in contiguous SoA arrays for cache-friendly traversal.
 //! 4. **Incremental construction** – call `addVar`/`addConstr` one at a time
 //!    or use the batch `addVars`/`addConstrs` counterparts.
 //!
@@ -53,6 +54,16 @@ const CallbackWhere = types.CallbackWhere;
 const CallbackFunc = types.CallbackFunc;
 const ModelError = types.ModelError;
 const INFINITY = types.INFINITY;
+const VarId = @import("entity_handle.zig").VarId;
+const VarHandleTable = @import("entity_handle.zig").HandleTableFor(VarId);
+const ConstrId = @import("entity_handle.zig").ConstrId;
+const ConstrHandleTable = @import("entity_handle.zig").HandleTableFor(ConstrId);
+const QConstrId = @import("entity_handle.zig").QConstrId;
+const QConstrHandleTable = @import("entity_handle.zig").HandleTableFor(QConstrId);
+const SosId = @import("entity_handle.zig").SosId;
+const SosHandleTable = @import("entity_handle.zig").HandleTableFor(SosId);
+const GenConstrId = @import("entity_handle.zig").GenConstrId;
+const GenConstrHandleTable = @import("entity_handle.zig").HandleTableFor(GenConstrId);
 
 // ── Model ───────────────────────────────────────────────────────────────
 
@@ -63,19 +74,26 @@ pub const Model = struct {
     // ── Identity ───────────────────────────────────────────────────────
     name: []const u8,
 
-    // ── Variable data (committed) ──────────────────────────────────────
+    // ── Variable data (committed, dense SoA) ──────────────────────────
+    // These arrays are deliberately mutable and compacted after deletion;
+    // they are not append-only logs.  Stable VarId generations decouple API
+    // references from the moving dense slots used by numerical kernels.
     num_vars: usize = 0,
     var_lb: []f64 = &.{},
     var_ub: []f64 = &.{},
     var_obj: []f64 = &.{},
     var_type: []VarType = &.{},
     var_names: [](?[]const u8) = &.{},
+    // Stable API identities mapped to the dense variable arrays above.
+    var_handles: VarHandleTable = .{},
 
     // ── Constraint data (committed) ────────────────────────────────────
     num_constrs: usize = 0,
     constr_sense: []Sense = &.{},
     constr_rhs: []f64 = &.{},
     constr_names: [](?[]const u8) = &.{},
+    // Stable API identities mapped to the dense constraint arrays above.
+    constr_handles: ConstrHandleTable = .{},
 
     // Constraint matrix in canonical CSC storage.
     matrix: MatrixStore = undefined,
@@ -124,17 +142,21 @@ pub const Model = struct {
     sos_indices: []usize = &.{},
     sos_weights: []f64 = &.{},
     sos_names: [](?[]const u8) = &.{},
+    sos_handles: SosHandleTable = .{},
 
     // ── Quadratic constraints ──────────────────────────────────────────
     qconstr_count: usize = 0,
     qconstr_qrow: []i32 = &.{},
     qconstr_qcol: []i32 = &.{},
     qconstr_qval: []f64 = &.{},
+    qconstr_qbegin: []usize = &.{},
     qconstr_lind: []usize = &.{},
     qconstr_lval: []f64 = &.{},
+    qconstr_lbegin: []usize = &.{},
     qconstr_sense: []Sense = &.{},
     qconstr_rhs: []f64 = &.{},
     qconstr_names: [](?[]const u8) = &.{},
+    qconstr_handles: QConstrHandleTable = .{},
 
     // ── General constraints ────────────────────────────────────────────
     genconstr_count: usize = 0,
@@ -142,7 +164,9 @@ pub const Model = struct {
     genconstr_resvar: []usize = &.{},
     genconstr_nvars: []usize = &.{}, // number of vars per constraint
     genconstr_indices: []usize = &.{}, // packed variable indices
+    genconstr_begin: []usize = &.{}, // packed-data offsets, length count + 1
     genconstr_names: [](?[]const u8) = &.{},
+    genconstr_handles: GenConstrHandleTable = .{},
 
     // ── Piecewise-linear objective data ──────────────────────────────────
     pwlobj_count: usize = 0,
@@ -186,10 +210,12 @@ pub const Model = struct {
         alloc.free(self.var_type);
         for (self.var_names) |n| if (n) |s| alloc.free(s);
         alloc.free(self.var_names);
+        self.var_handles.deinit(alloc);
         alloc.free(self.constr_sense);
         alloc.free(self.constr_rhs);
         for (self.constr_names) |n| if (n) |s| alloc.free(s);
         alloc.free(self.constr_names);
+        self.constr_handles.deinit(alloc);
         alloc.free(self.q_row);
         alloc.free(self.q_col);
         alloc.free(self.q_val);
@@ -209,23 +235,29 @@ pub const Model = struct {
         alloc.free(self.sos_weights);
         for (self.sos_names) |n| if (n) |s| alloc.free(s);
         alloc.free(self.sos_names);
+        self.sos_handles.deinit(alloc);
         // Quadratic constraints
         alloc.free(self.qconstr_qrow);
         alloc.free(self.qconstr_qcol);
         alloc.free(self.qconstr_qval);
+        alloc.free(self.qconstr_qbegin);
         alloc.free(self.qconstr_lind);
         alloc.free(self.qconstr_lval);
+        alloc.free(self.qconstr_lbegin);
         alloc.free(self.qconstr_sense);
         alloc.free(self.qconstr_rhs);
         for (self.qconstr_names) |n| if (n) |s| alloc.free(s);
         alloc.free(self.qconstr_names);
+        self.qconstr_handles.deinit(alloc);
         // General constraints
         alloc.free(self.genconstr_types);
         alloc.free(self.genconstr_resvar);
         alloc.free(self.genconstr_nvars);
         alloc.free(self.genconstr_indices);
+        alloc.free(self.genconstr_begin);
         for (self.genconstr_names) |n| if (n) |s| alloc.free(s);
         alloc.free(self.genconstr_names);
+        self.genconstr_handles.deinit(alloc);
         // PWL objective
         alloc.free(self.pwlobj_var);
         alloc.free(self.pwlobj_npts);
@@ -247,6 +279,83 @@ pub const Model = struct {
 
     pub fn numNz(self: Self) usize {
         return self.matrix.csc().nnz();
+    }
+
+    /// Resolve a stable variable identity to its current dense position.
+    pub fn resolveVarId(self: Self, id: VarId) ModelError!usize {
+        const dense = self.var_handles.resolve(id) catch |err| return switch (err) {
+            error.InvalidHandle => error.NotInModel,
+            error.HandleExhausted => error.OutOfMemory,
+            error.DenseIndexOutOfRange => error.InvalidArgument,
+        };
+        return @intCast(dense);
+    }
+
+    /// Return the stable identity at a committed dense variable position.
+    pub fn varIdAt(self: *Self, index: usize) ModelError!VarId {
+        if (index >= self.num_vars) return error.IndexOutOfRange;
+        while (self.var_handles.liveLen() < self.num_vars) {
+            const id = self.var_handles.allocate(self.allocator) catch return error.OutOfMemory;
+            self.var_handles.bindDenseWithAllocator(self.allocator, id, @intCast(self.var_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        return self.var_handles.idAtDense(index) catch return error.NotInModel;
+    }
+
+    pub fn resolveConstrId(self: Self, id: ConstrId) ModelError!usize {
+        const dense = self.constr_handles.resolve(id) catch |err| return switch (err) {
+            error.InvalidHandle => error.NotInModel,
+            error.HandleExhausted => error.OutOfMemory,
+            error.DenseIndexOutOfRange => error.InvalidArgument,
+        };
+        return @intCast(dense);
+    }
+
+    pub fn constrIdAt(self: *Self, index: usize) ModelError!ConstrId {
+        if (index >= self.num_constrs) return error.IndexOutOfRange;
+        while (self.constr_handles.liveLen() < self.num_constrs) {
+            const id = self.constr_handles.allocate(self.allocator) catch return error.OutOfMemory;
+            self.constr_handles.bindDenseWithAllocator(self.allocator, id, @intCast(self.constr_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        return self.constr_handles.idAtDense(index) catch return error.NotInModel;
+    }
+
+    pub fn resolveQConstrId(self: Self, id: QConstrId) ModelError!usize {
+        return @intCast(self.qconstr_handles.resolve(id) catch return error.NotInModel);
+    }
+
+    pub fn qconstrIdAt(self: *Self, index: usize) ModelError!QConstrId {
+        if (index >= self.qconstr_count) return error.IndexOutOfRange;
+        while (self.qconstr_handles.liveLen() < self.qconstr_count) {
+            const id = self.qconstr_handles.allocate(self.allocator) catch return error.OutOfMemory;
+            self.qconstr_handles.bindDenseWithAllocator(self.allocator, id, @intCast(self.qconstr_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        return self.qconstr_handles.idAtDense(index) catch return error.NotInModel;
+    }
+
+    pub fn resolveSosId(self: Self, id: SosId) ModelError!usize {
+        return @intCast(self.sos_handles.resolve(id) catch return error.NotInModel);
+    }
+
+    pub fn sosIdAt(self: *Self, index: usize) ModelError!SosId {
+        if (index >= self.sos_count) return error.IndexOutOfRange;
+        while (self.sos_handles.liveLen() < self.sos_count) {
+            const id = self.sos_handles.allocate(self.allocator) catch return error.OutOfMemory;
+            self.sos_handles.bindDenseWithAllocator(self.allocator, id, @intCast(self.sos_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        return self.sos_handles.idAtDense(index) catch return error.NotInModel;
+    }
+
+    pub fn resolveGenConstrId(self: Self, id: GenConstrId) ModelError!usize {
+        return @intCast(self.genconstr_handles.resolve(id) catch return error.NotInModel);
+    }
+
+    pub fn genconstrIdAt(self: *Self, index: usize) ModelError!GenConstrId {
+        if (index >= self.genconstr_count) return error.IndexOutOfRange;
+        while (self.genconstr_handles.liveLen() < self.genconstr_count) {
+            const id = self.genconstr_handles.allocate(self.allocator) catch return error.OutOfMemory;
+            self.genconstr_handles.bindDenseWithAllocator(self.allocator, id, @intCast(self.genconstr_handles.liveLen())) catch return error.OutOfMemory;
+        }
+        return self.genconstr_handles.idAtDense(index) catch return error.NotInModel;
     }
 
     // ── Re-exported sub-module methods ─────────────────────────────────
@@ -297,6 +406,7 @@ pub const Model = struct {
     pub const getCharAttrList = @import("model_attr.zig").getCharAttrList;
 
     pub const addVar = @import("model_linear.zig").addVar;
+    pub const addVarColumn = @import("model_linear.zig").addVarColumn;
     pub const addVars = @import("model_linear.zig").addVars;
     pub const addConstr = @import("model_linear.zig").addConstr;
     pub const addConstrs = @import("model_linear.zig").addConstrs;
@@ -358,6 +468,7 @@ pub const Model = struct {
     pub const addRangeConstr = @import("model_linear.zig").addRangeConstr;
     pub const addRangeConstrs = @import("model_linear.zig").addRangeConstrs;
     pub const addQPterms = @import("model_constraints.zig").addQPterms;
+    pub const addQPtermsExpr = @import("model_constraints.zig").addQPtermsExpr;
     pub const delQ = @import("model_constraints.zig").delQ;
     pub const getQ = @import("model_constraints.zig").getQ;
     pub const delQConstrs = @import("model_constraints.zig").delQConstrs;
@@ -541,6 +652,26 @@ test "Model.getVarByName finds a named variable" {
     try std.testing.expectError(error.NotInModel, model.getVarByName("nonexistent"));
 }
 
+test "Var.at resolves through a stable id" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 2.0, 4.0, .continuous, "x");
+    try model.updateModel();
+
+    var variable = try @import("var/index.zig").Var.at(&model, 0);
+    try std.testing.expectEqual(@as(f64, 2.0), try variable.getLB());
+    try std.testing.expect(variable.id != null);
+
+    const stable_id = variable.id.?;
+    try model.addVar(0, &.{}, &.{}, 0.0, 3.0, 6.0, .continuous, "y");
+    try model.updateModel();
+    variable.id = stable_id;
+    try std.testing.expectEqual(@as(f64, 2.0), try variable.getLB());
+}
+
 test "Model.getConstrByName finds a named constraint" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();
@@ -553,6 +684,210 @@ test "Model.getConstrByName finds a named constraint" {
 
     const idx = try model.getConstrByName("c0");
     try std.testing.expectEqual(@as(usize, 0), idx);
+}
+
+test "Constr.at resolves through a stable id" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 5.0, "c0");
+    try model.updateModel();
+
+    var constr = try @import("constraint/index.zig").Constr.at(&model, 0);
+    try std.testing.expectEqual(@as(f64, 5.0), try constr.getRHS());
+    try std.testing.expect(constr.id != null);
+}
+
+test "linear deletion compacts dense data and preserves surviving Var handles" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 1.0, 2.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 3.0, 4.0, .continuous, "y");
+    try model.updateModel();
+    var survivor = try @import("var/index.zig").Var.at(&model, 1);
+
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.num_vars);
+    survivor.id = survivor.id.?;
+    try std.testing.expectEqual(@as(f64, 3.0), try survivor.getLB());
+    try std.testing.expectError(error.IndexOutOfRange, @import("var/index.zig").Var.at(&model, 1));
+}
+
+test "addVarColumn resolves stable constraint ids" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, "c0");
+    try model.updateModel();
+    const constr = try @import("constraint/index.zig").Constr.at(&model, 0);
+    var column = @import("expr/column.zig").Column.init();
+    defer column.deinit(std.testing.allocator);
+    try column.addTerm(std.testing.allocator, constr, 2.5);
+
+    try model.addVarColumn(column, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.num_vars);
+    try std.testing.expectEqual(@as(usize, 1), model.matrix.csc().nnz());
+    try std.testing.expectEqual(@as(usize, 0), model.matrix.csc().row_indices[0].toUsize());
+}
+
+test "addQPtermsExpr resolves stable variable ids" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.updateModel();
+    const x = try @import("var/index.zig").Var.at(&model, 0);
+    const y = try @import("var/index.zig").Var.at(&model, 1);
+    var expr = @import("expr/quad_expr.zig").QuadExpr.init(std.testing.allocator);
+    defer expr.deinit();
+    try expr.addQTerm(x, y, 3.0);
+
+    try model.addQPtermsExpr(expr);
+    try std.testing.expectEqual(@as(usize, 1), model.q_nz);
+    try std.testing.expectEqual(@as(f64, 3.0), model.q_val[0]);
+}
+
+test "linear variable deletion remaps quadratic objective terms" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.updateModel();
+    try model.addQPterms(&[_]i32{ 0, 1 }, &[_]i32{ 0, 1 }, &[_]f64{ 1.0, 2.0 });
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.q_nz);
+    try std.testing.expectEqual(@as(i32, 0), model.q_row[0]);
+    try std.testing.expectEqual(@as(i32, 0), model.q_col[0]);
+    try std.testing.expectEqual(@as(f64, 2.0), model.q_val[0]);
+}
+
+test "linear variable deletion remaps piecewise objective storage" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.updateModel();
+    try model.setPWLObj(0, 2, &[_]f64{ 0.0, 1.0 }, &[_]f64{ 0.0, 2.0 });
+    try model.setPWLObj(1, 2, &[_]f64{ 0.0, 1.0 }, &[_]f64{ 0.0, 3.0 });
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.pwlobj_count);
+    try std.testing.expectEqual(@as(usize, 0), model.pwlobj_var[0]);
+    try std.testing.expectEqual(@as(f64, 3.0), model.pwlobj_ydata[1]);
+}
+
+test "linear variable deletion remaps SOS members" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.updateModel();
+    try model.addSOS(.sos1, 2, &[_]usize{ 0, 1 }, &[_]f64{ 2.0, 4.0 }, "s");
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.sos_indices.len);
+    try std.testing.expectEqual(@as(usize, 0), model.sos_indices[0]);
+    try std.testing.expectEqual(@as(f64, 4.0), model.sos_weights[0]);
+    try std.testing.expectEqual(@as(usize, 0), model.sos_begin[0]);
+    try std.testing.expectEqual(@as(usize, 1), model.sos_begin[1]);
+}
+
+test "linear variable deletion remaps quadratic constraint terms" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.updateModel();
+    try model.addQConstr(2, &[_]i32{ 0, 1 }, &[_]i32{ 0, 1 }, &[_]f64{ 1.0, 2.0 }, 1, &[_]usize{1}, &[_]f64{3.0}, .less_equal, 4.0, "q");
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 1), model.qconstr_qrow.len);
+    try std.testing.expectEqual(@as(i32, 0), model.qconstr_qrow[0]);
+    try std.testing.expectEqual(@as(f64, 2.0), model.qconstr_qval[0]);
+    try std.testing.expectEqual(@as(usize, 1), model.qconstr_lind.len);
+    try std.testing.expectEqual(@as(usize, 0), model.qconstr_lind[0]);
+}
+
+test "linear variable deletion remaps and filters general constraints" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "x");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "y");
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, "z");
+    try model.updateModel();
+    try model.addGenConstrMax(2, 2, &[_]usize{ 0, 1 }, 0.0, "drop");
+    try model.addGenConstrExp(2, 1, "keep");
+    try model.delVars(&[_]usize{0});
+    try model.updateModel();
+    try std.testing.expectEqual(@as(usize, 2), model.genconstr_count);
+    try std.testing.expectEqual(@as(usize, 1), model.genconstr_resvar[0]);
+    try std.testing.expectEqual(@as(usize, 0), model.genconstr_indices[0]);
+    try std.testing.expectEqual(@as(usize, 1), model.genconstr_nvars[0]);
+    try std.testing.expectEqual(@as(usize, 0), model.genconstr_indices[1]);
+}
+
+test "delQConstrs compacts quadratic constraint storage" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+    try model.addQConstr(1, &[_]i32{0}, &[_]i32{0}, &[_]f64{1.0}, 0, &.{}, &.{}, .less_equal, 1.0, "q0");
+    try model.addQConstr(1, &[_]i32{0}, &[_]i32{0}, &[_]f64{2.0}, 0, &.{}, &.{}, .less_equal, 2.0, "q1");
+    var qnz: usize = 0;
+    var lnz: usize = 0;
+    var qrow: [1]i32 = undefined;
+    var qcol: [1]i32 = undefined;
+    var qval: [1]f64 = undefined;
+    try model.getQConstr(1, &qnz, &qrow, &qcol, &qval, &lnz, &.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 1), qnz);
+    try std.testing.expectEqual(@as(f64, 2.0), qval[0]);
+    try model.delQConstrs(&[_]usize{0});
+    try std.testing.expectEqual(@as(usize, 1), model.qconstr_count);
+    try std.testing.expectEqual(@as(f64, 2.0), model.qconstr_qval[0]);
+    try std.testing.expectEqualStrings("q1", model.qconstr_names[0].?);
+}
+
+test "delSOS compacts SOS storage" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+    try model.addSOS(.sos1, 1, &[_]usize{0}, &[_]f64{1.0}, "s0");
+    try model.addSOS(.sos2, 2, &[_]usize{ 0, 1 }, &[_]f64{ 2.0, 3.0 }, "s1");
+    try model.delSOS(&[_]usize{0});
+    try std.testing.expectEqual(@as(usize, 1), model.sos_count);
+    try std.testing.expectEqual(@as(usize, 2), model.sos_indices.len);
+    try std.testing.expectEqual(@as(usize, 0), model.sos_begin[0]);
+    try std.testing.expectEqual(@as(usize, 2), model.sos_begin[1]);
+    try std.testing.expectEqualStrings("s1", model.sos_names[0].?);
 }
 
 test "Model.getCoeff returns stored coefficient" {

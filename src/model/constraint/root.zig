@@ -1,9 +1,10 @@
-//! Constraint entity module.
+//! Linear constraint entity module.
+//!
+//! Exposes the typed [`Constr`] handle. Constraint data remains owned by
+//! `Model`; this module deliberately does not define a second storage container.
 
 const std = @import("std");
 
-pub const ConstrData = @import("data.zig").ConstrData;
-pub const ConstrArray = @import("array.zig").ConstrArray;
 pub const Constr = @import("index.zig").Constr;
 
 test {

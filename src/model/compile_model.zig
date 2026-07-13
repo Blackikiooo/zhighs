@@ -214,38 +214,36 @@ pub fn compileModel(allocator: std.mem.Allocator, model: *const Model) (CompileE
     // ── Build QuadraticConstraint list ─────────────────────────────────────
     var qconstraints: []QuadraticConstraint = &.{};
     if (has_qconstr) {
-        if (model.qconstr_count > 1) {
-            // Cannot separate packed triples → reject.
+        qconstraints = allocator.alloc(QuadraticConstraint, model.qconstr_count) catch |err| {
             if (obj_hessian) |*h| h.deinit();
             linear.deinit();
-            return error.FeatureNotAvailable;
+            return err;
+        };
+        var built: usize = 0;
+        errdefer {
+            for (qconstraints[0..built]) |*qc| qc.deinit();
+            allocator.free(qconstraints);
+            if (obj_hessian) |*h| h.deinit();
+            linear.deinit();
         }
-
-        // qconstr_count == 1.
-        var qc = buildQuadraticConstraint(
-            allocator,
-            num_vars,
-            model.qconstr_qrow,
-            model.qconstr_qcol,
-            model.qconstr_qval,
-            model.qconstr_lind,
-            model.qconstr_lval,
-            model.qconstr_sense[0],
-            model.qconstr_rhs[0],
-        ) catch |err| {
-            if (obj_hessian) |*h| h.deinit();
-            linear.deinit();
-            return err;
-        };
-        _ = &qc;
-
-        qconstraints = allocator.alloc(QuadraticConstraint, 1) catch |err| {
-            qc.deinit();
-            if (obj_hessian) |*h| h.deinit();
-            linear.deinit();
-            return err;
-        };
-        qconstraints[0] = qc;
+        for (0..model.qconstr_count) |i| {
+            const qb = model.qconstr_qbegin[i];
+            const qe = model.qconstr_qbegin[i + 1];
+            const lb = model.qconstr_lbegin[i];
+            const le = model.qconstr_lbegin[i + 1];
+            qconstraints[i] = buildQuadraticConstraint(
+                allocator,
+                num_vars,
+                model.qconstr_qrow[qb..qe],
+                model.qconstr_qcol[qb..qe],
+                model.qconstr_qval[qb..qe],
+                model.qconstr_lind[lb..le],
+                model.qconstr_lval[lb..le],
+                model.qconstr_sense[i],
+                model.qconstr_rhs[i],
+            ) catch |err| return err;
+            built += 1;
+        }
     }
 
     // ── Assemble the QuadraticModel ────────────────────────────────────────
