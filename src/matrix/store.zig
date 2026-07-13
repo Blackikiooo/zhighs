@@ -103,6 +103,26 @@ pub const MatrixStore = struct {
         self.matrix_storage = replacement;
         self.matrix_revision += 1;
     }
+
+    /// Updates existing matrix values without copying structural CSC streams.
+    /// The caller guarantees matching slice lengths, valid positions, finite
+    /// nonzero values, and unique positions. All fallible work happens before
+    /// cache invalidation, so revision overflow leaves the store unchanged.
+    pub fn updateValuesAtPositionsAssumeValid(self: *Self, allocator: std.mem.Allocator, positions: []const usize, values: []const f64) MatrixStoreError!void {
+        std.debug.assert(positions.len == values.len);
+        if (positions.len == 0) return;
+        if (self.matrix_revision == std.math.maxInt(u64)) return error.RevisionOverflow;
+        for (positions, values) |position, value| {
+            std.debug.assert(position < self.matrix_storage.values.len);
+            std.debug.assert(std.math.isFinite(value) and value != 0.0);
+        }
+
+        if (self.csr_cache) |*cache| cache.deinit(allocator);
+        self.csr_cache = null;
+        for (positions, values) |position, value|
+            self.matrix_storage.values[position] = value;
+        self.matrix_revision += 1;
+    }
 };
 
 test "matrix store builds CSR lazily and reuses the cache" {

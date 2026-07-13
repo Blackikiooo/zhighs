@@ -50,22 +50,38 @@ pub const CscMatrix = struct {
 
     const Self = @This();
 
-    /// Creates a structurally valid all-zero matrix.
-    pub fn initZero(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize) (std.mem.Allocator.Error || MatrixError)!Self {
+    /// Allocates one 64-byte-aligned packed block for CSC starts, row IDs and
+    /// values. Contents are intentionally uninitialized; callers must fill a
+    /// canonical matrix before publishing it or calling numerical kernels.
+    pub fn initPackedUninitialized(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize, nonzeros: usize) (std.mem.Allocator.Error || MatrixError)!Self {
         try validateDimensions(num_rows, num_cols);
-        const col_starts = try allocator.alloc(usize, num_cols + 1);
-        errdefer allocator.free(col_starts);
-        @memset(col_starts, 0);
-        const row_indices = try allocator.alloc(RowId, 0);
-        errdefer allocator.free(row_indices);
-        const values = try allocator.alloc(f64, 0);
+        const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
+        const rows_bytes = std.math.mul(usize, nonzeros, @sizeOf(RowId)) catch return error.DimensionTooLarge;
+        const values_bytes = std.math.mul(usize, nonzeros, @sizeOf(f64)) catch return error.DimensionTooLarge;
+        const layout = memory.computeLayout(
+            3,
+            .{ starts_bytes, rows_bytes, values_bytes },
+            .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) },
+        ) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr));
+        const rows_ptr: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
+        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
         return .{
             .num_rows = num_rows,
             .num_cols = num_cols,
-            .col_starts = col_starts,
-            .row_indices = row_indices,
-            .values = values,
+            .col_starts = starts_ptr[0 .. num_cols + 1],
+            .row_indices = rows_ptr[0..nonzeros],
+            .values = values_ptr[0..nonzeros],
+            .storage = storage,
         };
+    }
+
+    /// Creates a structurally valid all-zero matrix.
+    pub fn initZero(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize) (std.mem.Allocator.Error || MatrixError)!Self {
+        const result = try initPackedUninitialized(allocator, num_rows, num_cols, 0);
+        @memset(result.col_starts, 0);
+        return result;
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -398,6 +414,20 @@ test "CSC zero matrix is valid and multiplies to zero" {
     var y = [_]f64{ 9.0, 9.0, 9.0 };
     try matrix.multiply(&.{ 4.0, -2.0 }, &y);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, 0.0 }, &y);
+}
+
+test "packed uninitialized CSC uses one aligned owning allocation" {
+    var matrix = try CscMatrix.initPackedUninitialized(std.testing.allocator, 3, 2, 3);
+    defer matrix.deinit(std.testing.allocator);
+    try std.testing.expect(matrix.storage != null);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(matrix.storage.?.ptr) % 64);
+
+    @memcpy(matrix.col_starts, &[_]usize{ 0, 2, 3 });
+    matrix.row_indices[0] = try RowId.init(0);
+    matrix.row_indices[1] = try RowId.init(2);
+    matrix.row_indices[2] = try RowId.init(1);
+    @memcpy(matrix.values, &[_]f64{ 1.0, 2.0, 3.0 });
+    try matrix.validate();
 }
 
 test "CSC column views and both multiplication directions" {

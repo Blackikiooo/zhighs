@@ -978,6 +978,35 @@ test "linear deletion compacts dense data and preserves surviving Var handles" {
     try std.testing.expectError(error.IndexOutOfRange, @import("var/index.zig").Var.at(&model, 1));
 }
 
+test "linear deletion rebuilds canonical matrix in packed storage" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "packed_delete");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    try model.addVar(2, &[_]usize{ 0, 1 }, &[_]f64{ 1.0, 2.0 }, 0.0, 0.0, 1.0, .continuous, null);
+    try model.addVar(2, &[_]usize{ 0, 2 }, &[_]f64{ 3.0, 4.0 }, 0.0, 0.0, 1.0, .continuous, null);
+    try model.addVar(2, &[_]usize{ 1, 2 }, &[_]f64{ 5.0, 6.0 }, 0.0, 0.0, 1.0, .continuous, null);
+    try model.updateModel();
+
+    try model.delVars(&[_]usize{1});
+    try model.delConstrs(&[_]usize{1});
+    try model.updateModel();
+
+    const rebuilt = model.matrix.csc();
+    try rebuilt.validate();
+    try std.testing.expect(rebuilt.storage != null);
+    try std.testing.expectEqual(@as(usize, 2), rebuilt.num_rows);
+    try std.testing.expectEqual(@as(usize, 2), rebuilt.num_cols);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, rebuilt.col_starts);
+    try std.testing.expectEqual(@as(usize, 0), rebuilt.row_indices[0].toUsize());
+    try std.testing.expectEqual(@as(usize, 1), rebuilt.row_indices[1].toUsize());
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 6.0 }, rebuilt.values);
+}
+
 test "addVarColumn resolves stable constraint ids" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();
@@ -1300,6 +1329,50 @@ test "Model.chgCoeffs queues multiple coefficient changes" {
     try model.updateModel();
 
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), try model.getCoeff(0, 0), 1e-12);
+}
+
+test "Model batches coefficient replacement insertion and deletion into one revision" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "coefficient_batch");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 0.0, 0.0, 1.0, .continuous, null);
+    try model.addVar(1, &[_]usize{1}, &[_]f64{2.0}, 0.0, 0.0, 1.0, .continuous, null);
+    try model.updateModel();
+    _ = try model.matrix.csr(std.testing.allocator);
+    const old_revision = model.matrix.matrixRevision();
+    const old_starts_ptr = model.matrix.csc().col_starts.ptr;
+    const old_rows_ptr = model.matrix.csc().row_indices.ptr;
+    const old_values_ptr = model.matrix.csc().values.ptr;
+
+    // Existing-value-only batches mutate the values stream in place. The
+    // second write to (0,0) wins without replacing any CSC allocation.
+    try model.chgCoeff(0, 0, 3.0);
+    try model.chgCoeff(0, 0, 4.0);
+    try model.updateModel();
+    try std.testing.expectEqual(old_revision + 1, model.matrix.matrixRevision());
+    try std.testing.expectEqual(old_starts_ptr, model.matrix.csc().col_starts.ptr);
+    try std.testing.expectEqual(old_rows_ptr, model.matrix.csc().row_indices.ptr);
+    try std.testing.expectEqual(old_values_ptr, model.matrix.csc().values.ptr);
+    try std.testing.expect(model.matrix.csr_cache == null);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), try model.getCoeff(0, 0), 1e-12);
+
+    // A structural delta batch is still materialized and committed only once.
+    _ = try model.matrix.csr(std.testing.allocator);
+    const structural_revision = model.matrix.matrixRevision();
+    try model.chgCoeff(1, 0, 5.0);
+    try model.chgCoeff(1, 1, 0.0);
+    try model.updateModel();
+
+    try std.testing.expectEqual(structural_revision + 1, model.matrix.matrixRevision());
+    try std.testing.expect(model.matrix.csr_cache == null);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), try model.getCoeff(1, 0), 1e-12);
+    try std.testing.expectEqual(@as(f64, 0.0), try model.getCoeff(1, 1));
+    try std.testing.expectEqual(@as(usize, 2), model.matrix.csc().nnz());
+    try model.matrix.csc().validate();
 }
 
 test "Model.setDblAttrArray sets multiple LB values" {

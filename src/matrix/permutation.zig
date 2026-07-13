@@ -26,20 +26,18 @@ pub fn permuteAssumeValid(
     matrix: csc.CscMatrix,
     row_old_to_new: []const foundation.RowId,
     col_old_to_new: []const foundation.ColId,
-) std.mem.Allocator.Error!csc.CscMatrix {
-    const starts = try allocator.alloc(usize, matrix.num_cols + 1);
-    errdefer allocator.free(starts);
+) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, matrix.num_rows, matrix.num_cols, matrix.nnz());
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
+    const rows = result.row_indices;
+    const values = result.values;
     @memset(starts, 0);
     for (0..matrix.num_cols) |old_col| {
         const new_col = col_old_to_new[old_col].toUsize();
         starts[new_col + 1] = matrix.col_starts[old_col + 1] - matrix.col_starts[old_col];
     }
     for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
-
-    const rows = try allocator.alloc(foundation.RowId, matrix.nnz());
-    errdefer allocator.free(rows);
-    const values = try allocator.alloc(f64, matrix.nnz());
-    errdefer allocator.free(values);
 
     for (0..matrix.num_cols) |old_col| {
         const new_col = col_old_to_new[old_col].toUsize();
@@ -55,13 +53,7 @@ pub fn permuteAssumeValid(
     for (0..matrix.num_cols) |col|
         std.sort.pdqContext(starts[col], starts[col + 1], context);
 
-    return .{
-        .num_rows = matrix.num_rows,
-        .num_cols = matrix.num_cols,
-        .col_starts = starts,
-        .row_indices = rows,
-        .values = values,
-    };
+    return result;
 }
 
 fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_new: []const Id, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {

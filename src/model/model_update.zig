@@ -25,6 +25,19 @@ const RowId = foundation.RowId;
 const CscMatrix = matrix.CscMatrix;
 const MatrixStore = matrix.MatrixStore;
 
+const CoefficientDelta = struct {
+    row: usize,
+    col: usize,
+    value: f64,
+    sequence: usize,
+
+    fn lessThan(_: void, lhs: CoefficientDelta, rhs: CoefficientDelta) bool {
+        if (lhs.col != rhs.col) return lhs.col < rhs.col;
+        if (lhs.row != rhs.row) return lhs.row < rhs.row;
+        return lhs.sequence < rhs.sequence;
+    }
+};
+
 /// Apply all queued modifications.
 ///
 /// Until this is called, queries reflect the last committed state.
@@ -235,33 +248,15 @@ pub fn applyPending(self: *Model) ModelError!void {
         col_nz_counts.deinit(alloc);
     }
 
-    // Apply coefficient changes, deletions, etc.
+    // Apply every coefficient delta in one canonical merge. This avoids one
+    // complete CSC copy and one cache invalidation per queued change.
+    if (matrix_values_changed)
+        try applyCoefficientChanges(self, total_vars, total_constrs);
+
+    // Apply non-matrix changes. Deletions are handled as one remapping batch
+    // below after scalar attributes have been committed.
     for (self.pending.items) |chg| {
         switch (chg) {
-            .chg_coeff => |c| {
-                if (c.var_idx < total_vars and c.constr_idx < total_constrs) {
-                    const cur = self.matrix.csc();
-                    const cs = cur.col_starts[c.var_idx];
-                    const ce = cur.col_starts[c.var_idx + 1];
-                    if (ce > cs) {
-                        for (cur.row_indices[cs..ce], 0..) |rid, off| {
-                            if (rid.toUsize() == c.constr_idx) {
-                                var new_vals = try alloc.dupe(f64, cur.values);
-                                new_vals[cs + off] = c.new_val;
-                                const new_csc = CscMatrix{
-                                    .num_rows = cur.num_rows,
-                                    .num_cols = cur.num_cols,
-                                    .col_starts = try alloc.dupe(usize, cur.col_starts),
-                                    .row_indices = try alloc.dupe(RowId, cur.row_indices),
-                                    .values = new_vals,
-                                };
-                                self.matrix.replaceMatrixAssumeValid(alloc, new_csc) catch {};
-                                break;
-                            }
-                        }
-                    }
-                }
-            },
             .chg_bounds => |b| {
                 if (b.var_idx < self.var_lb.len) {
                     self.var_lb[b.var_idx] = b.lb;
@@ -632,34 +627,51 @@ pub fn applyPending(self: *Model) ModelError!void {
         self.constr_names = new_cnames;
 
         const old_matrix = self.matrix.csc();
-        var col_starts = try alloc.alloc(usize, kept_vars + 1);
-        var row_list: std.ArrayListUnmanaged(RowId) = .empty;
-        var val_list: std.ArrayListUnmanaged(f64) = .empty;
-        col_starts[0] = 0;
+
+        // Pass 1 determines the exact surviving nonzero count. The previous
+        // ArrayList path repeatedly grew two temporary streams and then copied
+        // both into separate owning arrays, temporarily retaining two copies
+        // of every surviving entry.
+        var kept_nnz: usize = 0;
+        for (0..total_vars) |old_col| if (!deleted_vars[old_col]) {
+            const begin = old_matrix.col_starts[old_col];
+            const end = old_matrix.col_starts[old_col + 1];
+            for (old_matrix.row_indices[begin..end]) |row| {
+                if (!deleted_constrs[row.toUsize()]) kept_nnz += 1;
+            }
+        };
+
+        var new_csc = CscMatrix.initPackedUninitialized(alloc, kept_constrs, kept_vars, kept_nnz) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return error.InvalidArgument;
+        };
+        var owns_new_csc = true;
+        errdefer if (owns_new_csc) new_csc.deinit(alloc);
+
+        // Pass 2 streams surviving columns directly into their final packed
+        // row/value spans. Filtering rows preserves the existing canonical
+        // order, while constr_remap is monotonic over surviving rows.
+        var output_pos: usize = 0;
         var new_col: usize = 0;
         for (0..total_vars) |old_col| if (!deleted_vars[old_col]) {
+            new_csc.col_starts[new_col] = output_pos;
             const begin = old_matrix.col_starts[old_col];
             const end = old_matrix.col_starts[old_col + 1];
             for (old_matrix.row_indices[begin..end], old_matrix.values[begin..end]) |row, value| {
                 const old_row = row.toUsize();
                 if (!deleted_constrs[old_row]) {
-                    row_list.append(alloc, RowId.fromUsizeAssumeValid(constr_remap[old_row])) catch return error.OutOfMemory;
-                    val_list.append(alloc, value) catch return error.OutOfMemory;
+                    new_csc.row_indices[output_pos] = RowId.fromUsizeAssumeValid(constr_remap[old_row]);
+                    new_csc.values[output_pos] = value;
+                    output_pos += 1;
                 }
             }
             new_col += 1;
-            col_starts[new_col] = row_list.items.len;
         };
-        const new_csc = CscMatrix{
-            .num_rows = kept_constrs,
-            .num_cols = kept_vars,
-            .col_starts = col_starts,
-            .row_indices = try alloc.dupe(RowId, row_list.items),
-            .values = try alloc.dupe(f64, val_list.items),
-        };
-        row_list.deinit(alloc);
-        val_list.deinit(alloc);
+        new_csc.col_starts[kept_vars] = output_pos;
+        std.debug.assert(output_pos == kept_nnz);
+        std.debug.assert(new_col == kept_vars);
         self.matrix.replaceMatrixAssumeValid(alloc, new_csc) catch return error.RevisionOverflow;
+        owns_new_csc = false;
         total_vars = kept_vars;
         total_constrs = kept_constrs;
     }
@@ -714,4 +726,180 @@ pub fn applyPending(self: *Model) ModelError!void {
     if (matrix_values_changed) try self.markRevision(.matrix_values);
     if (bounds_changed) try self.markRevision(.bounds);
     if (objective_changed) try self.markRevision(.objective);
+}
+
+/// Sorts and coalesces queued coefficient sets, then merges them with the
+/// canonical CSC matrix in two linear passes. Repeated coordinates use
+/// last-write-wins semantics. A zero delta removes an existing nonzero; a
+/// nonzero delta inserts a previously absent coordinate.
+fn applyCoefficientChanges(self: *Model, num_cols: usize, num_rows: usize) ModelError!void {
+    const allocator = self.allocator;
+    var delta_count: usize = 0;
+    for (self.pending.items) |change| switch (change) {
+        .chg_coeff => |delta| {
+            if (delta.var_idx < num_cols and delta.constr_idx < num_rows) delta_count += 1;
+        },
+        else => {},
+    };
+    if (delta_count == 0) return;
+
+    const deltas = try allocator.alloc(CoefficientDelta, delta_count);
+    defer allocator.free(deltas);
+    var write: usize = 0;
+    for (self.pending.items, 0..) |change, sequence| switch (change) {
+        .chg_coeff => |delta| {
+            if (delta.var_idx >= num_cols or delta.constr_idx >= num_rows) continue;
+            if (!std.math.isFinite(delta.new_val)) return error.InvalidArgument;
+            deltas[write] = .{
+                .row = delta.constr_idx,
+                .col = delta.var_idx,
+                .value = delta.new_val,
+                .sequence = sequence,
+            };
+            write += 1;
+        },
+        else => {},
+    };
+    std.debug.assert(write == delta_count);
+    std.sort.pdq(CoefficientDelta, deltas, {}, CoefficientDelta.lessThan);
+
+    // Compact equal coordinates in place. Sorting by sequence makes the final
+    // member of each group the last user-visible set operation.
+    var read: usize = 0;
+    write = 0;
+    while (read < deltas.len) {
+        var last = read;
+        read += 1;
+        while (read < deltas.len and deltas[read].col == deltas[last].col and deltas[read].row == deltas[last].row) : (read += 1)
+            last = read;
+        deltas[write] = deltas[last];
+        write += 1;
+    }
+    const unique = deltas[0..write];
+    const current = self.matrix.csc();
+
+    // The overwhelmingly common case changes values at coordinates that
+    // already exist. Validate every position first, then mutate only the value
+    // stream in place: no O(nnz) copy and no structural allocation.
+    if (try applyExistingCoefficientValuesFast(self, current.*, unique)) return;
+
+    var changed = false;
+    var delta_pos: usize = 0;
+    var output_nnz: usize = 0;
+
+    // Pass 1 determines exact output sizes and whether the batch has any
+    // observable effect, avoiding a replacement for no-op sets.
+    for (0..num_cols) |col| {
+        var old_pos = current.col_starts[col];
+        const old_end = current.col_starts[col + 1];
+        var count: usize = 0;
+        while (old_pos < old_end or (delta_pos < unique.len and unique[delta_pos].col == col)) {
+            const old_row = if (old_pos < old_end) current.row_indices[old_pos].toUsize() else std.math.maxInt(usize);
+            const delta_row = if (delta_pos < unique.len and unique[delta_pos].col == col) unique[delta_pos].row else std.math.maxInt(usize);
+            if (old_row < delta_row) {
+                count += 1;
+                old_pos += 1;
+            } else if (delta_row < old_row) {
+                if (unique[delta_pos].value != 0.0) {
+                    count += 1;
+                    changed = true;
+                }
+                delta_pos += 1;
+            } else {
+                if (unique[delta_pos].value != 0.0) {
+                    count += 1;
+                    if (unique[delta_pos].value != current.values[old_pos]) changed = true;
+                } else {
+                    changed = true;
+                }
+                old_pos += 1;
+                delta_pos += 1;
+            }
+        }
+        output_nnz = std.math.add(usize, output_nnz, count) catch return error.InvalidArgument;
+    }
+    if (!changed) return;
+
+    var replacement = CscMatrix.initPackedUninitialized(allocator, num_rows, num_cols, output_nnz) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return error.InvalidArgument;
+    };
+    errdefer replacement.deinit(allocator);
+
+    // Pass 2 writes canonical rows directly into their final column spans.
+    delta_pos = 0;
+    var output_pos: usize = 0;
+    for (0..num_cols) |col| {
+        replacement.col_starts[col] = output_pos;
+        var old_pos = current.col_starts[col];
+        const old_end = current.col_starts[col + 1];
+        while (old_pos < old_end or (delta_pos < unique.len and unique[delta_pos].col == col)) {
+            const old_row = if (old_pos < old_end) current.row_indices[old_pos].toUsize() else std.math.maxInt(usize);
+            const delta_row = if (delta_pos < unique.len and unique[delta_pos].col == col) unique[delta_pos].row else std.math.maxInt(usize);
+            if (old_row < delta_row) {
+                replacement.row_indices[output_pos] = current.row_indices[old_pos];
+                replacement.values[output_pos] = current.values[old_pos];
+                output_pos += 1;
+                old_pos += 1;
+            } else if (delta_row < old_row) {
+                const delta = unique[delta_pos];
+                if (delta.value != 0.0) {
+                    replacement.row_indices[output_pos] = RowId.fromUsizeAssumeValid(delta.row);
+                    replacement.values[output_pos] = delta.value;
+                    output_pos += 1;
+                }
+                delta_pos += 1;
+            } else {
+                const delta = unique[delta_pos];
+                if (delta.value != 0.0) {
+                    replacement.row_indices[output_pos] = current.row_indices[old_pos];
+                    replacement.values[output_pos] = delta.value;
+                    output_pos += 1;
+                }
+                old_pos += 1;
+                delta_pos += 1;
+            }
+        }
+    }
+    replacement.col_starts[num_cols] = output_pos;
+    std.debug.assert(output_pos == output_nnz);
+    std.debug.assert(delta_pos == unique.len);
+    self.matrix.replaceMatrixAssumeValid(allocator, replacement) catch return error.RevisionOverflow;
+}
+
+fn applyExistingCoefficientValuesFast(self: *Model, current: CscMatrix, deltas: []const CoefficientDelta) ModelError!bool {
+    const allocator = self.allocator;
+    const positions = try allocator.alloc(usize, deltas.len);
+    defer allocator.free(positions);
+    const values = try allocator.alloc(f64, deltas.len);
+    defer allocator.free(values);
+
+    var changed = false;
+    for (deltas, 0..) |delta, index| {
+        if (delta.value == 0.0) return false;
+        const position = findRowPosition(current, delta.col, delta.row) orelse return false;
+        positions[index] = position;
+        values[index] = delta.value;
+        if (current.values[position] != delta.value) changed = true;
+    }
+    if (!changed) return true;
+    self.matrix.updateValuesAtPositionsAssumeValid(allocator, positions, values) catch return error.RevisionOverflow;
+    return true;
+}
+
+fn findRowPosition(matrix_value: CscMatrix, col: usize, target_row: usize) ?usize {
+    var low = matrix_value.col_starts[col];
+    var high = matrix_value.col_starts[col + 1];
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        const row = matrix_value.row_indices[middle].toUsize();
+        if (row < target_row) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if (low < matrix_value.col_starts[col + 1] and matrix_value.row_indices[low].toUsize() == target_row)
+        return low;
+    return null;
 }

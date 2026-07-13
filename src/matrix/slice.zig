@@ -15,13 +15,13 @@ pub fn extractColumnRange(allocator: std.mem.Allocator, matrix: csc.CscMatrix, f
     const output_cols = to_col - from_col;
     const source_begin = matrix.col_starts[from_col];
     const source_end = matrix.col_starts[to_col];
-    const starts = try allocator.alloc(usize, output_cols + 1);
-    errdefer allocator.free(starts);
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, matrix.num_rows, output_cols, source_end - source_begin);
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
     for (0..output_cols + 1) |index| starts[index] = matrix.col_starts[from_col + index] - source_begin;
-    const rows = try allocator.dupe(foundation.RowId, matrix.row_indices[source_begin..source_end]);
-    errdefer allocator.free(rows);
-    const values = try allocator.dupe(f64, matrix.values[source_begin..source_end]);
-    return .{ .num_rows = matrix.num_rows, .num_cols = output_cols, .col_starts = starts, .row_indices = rows, .values = values };
+    @memcpy(result.row_indices, matrix.row_indices[source_begin..source_end]);
+    @memcpy(result.values, matrix.values[source_begin..source_end]);
+    return result;
 }
 
 pub fn extractColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
@@ -30,23 +30,21 @@ pub fn extractColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selec
     return extractColumnsAssumeValid(allocator, matrix, selected);
 }
 
-pub fn extractColumnsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.ColId) std.mem.Allocator.Error!csc.CscMatrix {
-    const starts = try allocator.alloc(usize, selected.len + 1);
-    errdefer allocator.free(starts);
-    starts[0] = 0;
+pub fn extractColumnsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     var output_nnz: usize = 0;
-    for (selected, 0..) |source_col, target_col| {
+    for (selected) |source_col| {
         const col = source_col.toUsize();
         output_nnz += matrix.col_starts[col + 1] - matrix.col_starts[col];
-        starts[target_col + 1] = output_nnz;
     }
 
-    const rows = try allocator.alloc(foundation.RowId, output_nnz);
-    errdefer allocator.free(rows);
-    const values = try allocator.alloc(f64, output_nnz);
-    errdefer allocator.free(values);
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, matrix.num_rows, selected.len, output_nnz);
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
+    const rows = result.row_indices;
+    const values = result.values;
+    starts[0] = 0;
     var destination: usize = 0;
-    for (selected) |source_col| {
+    for (selected, 0..) |source_col, target_col| {
         const col = source_col.toUsize();
         const begin = matrix.col_starts[col];
         const end = matrix.col_starts[col + 1];
@@ -54,8 +52,9 @@ pub fn extractColumnsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMa
         @memcpy(rows[destination..][0..count], matrix.row_indices[begin..end]);
         @memcpy(values[destination..][0..count], matrix.values[begin..end]);
         destination += count;
+        starts[target_col + 1] = destination;
     }
-    return .{ .num_rows = matrix.num_rows, .num_cols = selected.len, .col_starts = starts, .row_indices = rows, .values = values };
+    return result;
 }
 
 pub fn extractRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.RowId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
@@ -71,33 +70,28 @@ pub fn extractRowsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatri
     @memset(row_map, missing);
     for (selected, 0..) |source_row, target_row| row_map[source_row.toUsize()] = target_row;
 
-    const starts = try allocator.alloc(usize, matrix.num_cols + 1);
-    errdefer allocator.free(starts);
-    starts[0] = 0;
+    var output_nnz: usize = 0;
     for (0..matrix.num_cols) |col| {
-        var count: usize = 0;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            if (row_map[matrix.row_indices[position].toUsize()] != missing) count += 1;
+            if (row_map[matrix.row_indices[position].toUsize()] != missing) output_nnz += 1;
         }
-        starts[col + 1] = starts[col] + count;
     }
 
-    const output_nnz = starts[matrix.num_cols];
-    const rows = try allocator.alloc(foundation.RowId, output_nnz);
-    errdefer allocator.free(rows);
-    const values = try allocator.alloc(f64, output_nnz);
-    errdefer allocator.free(values);
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, selected.len, matrix.num_cols, output_nnz);
+    errdefer result.deinit(allocator);
     var destination: usize = 0;
     for (0..matrix.num_cols) |col| {
+        result.col_starts[col] = destination;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
             const target_row = row_map[matrix.row_indices[position].toUsize()];
             if (target_row == missing) continue;
-            rows[destination] = foundation.RowId.fromUsize(target_row) catch unreachable;
-            values[destination] = matrix.values[position];
+            result.row_indices[destination] = foundation.RowId.fromUsize(target_row) catch unreachable;
+            result.values[destination] = matrix.values[position];
             destination += 1;
         }
     }
-    return .{ .num_rows = selected.len, .num_cols = matrix.num_cols, .col_starts = starts, .row_indices = rows, .values = values };
+    result.col_starts[matrix.num_cols] = destination;
+    return result;
 }
 
 fn validateSelection(comptime Id: type, selected: []const Id, dimension: usize) csc.MatrixError!void {

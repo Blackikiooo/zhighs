@@ -10,11 +10,20 @@ const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
 const edit = @import("edit.zig");
 
+const Entry = struct {
+    col: foundation.ColId,
+    value: f64,
+};
+
+const EntryList = std.MultiArrayList(Entry);
+
 pub const DynamicRowMatrix = struct {
     num_cols: usize,
     row_starts: std.ArrayList(usize) = .empty,
-    col_indices: std.ArrayList(foundation.ColId) = .empty,
-    values: std.ArrayList(f64) = .empty,
+    // One allocation with independent contiguous field streams. Column IDs and
+    // values can no longer grow to inconsistent lengths, while numerical code
+    // still receives cache-friendly SoA slices.
+    entries: EntryList = .empty,
 
     const Self = @This();
 
@@ -33,8 +42,7 @@ pub const DynamicRowMatrix = struct {
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         self.row_starts.deinit(allocator);
-        self.col_indices.deinit(allocator);
-        self.values.deinit(allocator);
+        self.entries.deinit(allocator);
         self.* = undefined;
     }
 
@@ -43,27 +51,41 @@ pub const DynamicRowMatrix = struct {
     }
 
     pub inline fn nnz(self: Self) usize {
-        return self.values.items.len;
+        return self.entries.len;
     }
 
     pub inline fn checkpoint(self: Self) Checkpoint {
         return .{ .num_rows = self.numRows(), .nnz = self.nnz() };
     }
 
+    /// Reserves both backing allocations for a batch of row appends. Callers
+    /// that know the batch shape can hoist all growth out of the append loop.
+    pub fn reserve(self: *Self, allocator: std.mem.Allocator, additional_rows: usize, additional_nnz: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {
+        const new_num_rows = std.math.add(usize, self.numRows(), additional_rows) catch return error.DimensionTooLarge;
+        try csc.validateDimensions(new_num_rows, self.num_cols);
+        try self.entries.ensureUnusedCapacity(allocator, additional_nnz);
+        try self.row_starts.ensureUnusedCapacity(allocator, additional_rows);
+    }
+
     /// Appends one canonical row and returns its local RowId.
     pub fn appendRow(self: *Self, allocator: std.mem.Allocator, row_view: sparse_vector.SparseVectorView(foundation.ColId)) (std.mem.Allocator.Error || csc.MatrixError)!foundation.RowId {
         if (row_view.dimension != self.num_cols) return error.DimensionMismatch;
         try row_view.validate();
-        const row_id = foundation.RowId.fromUsize(self.numRows()) catch return error.DimensionTooLarge;
 
-        // Reserve all streams before mutation. Once reservation succeeds, the
-        // following appends cannot fail and parallel lengths stay coherent.
-        try self.col_indices.ensureUnusedCapacity(allocator, row_view.nnz());
-        try self.values.ensureUnusedCapacity(allocator, row_view.nnz());
-        try self.row_starts.ensureUnusedCapacity(allocator, 1);
+        try self.reserve(allocator, 1, row_view.nnz());
+        return self.appendRowPreReserved(row_view);
+    }
+
+    /// Trusted append for validated rows after a sufficient `reserve` call.
+    /// The row view must be canonical, dimension-compatible, and its storage
+    /// must not alias this matrix's entry allocation.
+    pub fn appendRowPreReserved(self: *Self, row_view: sparse_vector.SparseVectorView(foundation.ColId)) foundation.RowId {
+        std.debug.assert(row_view.dimension == self.num_cols);
+        std.debug.assert(self.entries.capacity - self.entries.len >= row_view.nnz());
+        std.debug.assert(self.row_starts.capacity - self.row_starts.items.len >= 1);
+        const row_id = foundation.RowId.fromUsize(self.numRows()) catch unreachable;
         for (row_view.indices, row_view.values) |col_id, value| {
-            self.col_indices.appendAssumeCapacity(col_id);
-            self.values.appendAssumeCapacity(value);
+            self.entries.appendAssumeCapacity(.{ .col = col_id, .value = value });
         }
         self.row_starts.appendAssumeCapacity(self.nnz());
         return row_id;
@@ -78,7 +100,8 @@ pub const DynamicRowMatrix = struct {
     pub inline fn rowAssumeValid(self: Self, index: usize) sparse_vector.SparseVectorView(foundation.ColId) {
         const begin = self.row_starts.items[index];
         const end = self.row_starts.items[index + 1];
-        return .{ .dimension = self.num_cols, .indices = self.col_indices.items[begin..end], .values = self.values.items[begin..end] };
+        const fields = self.entries.slice();
+        return .{ .dimension = self.num_cols, .indices = fields.items(.col)[begin..end], .values = fields.items(.value)[begin..end] };
     }
 
     /// Removes every row appended after checkpoint in O(1).
@@ -86,24 +109,27 @@ pub const DynamicRowMatrix = struct {
         if (target.num_rows > self.numRows() or target.nnz > self.nnz()) return error.InvalidCheckpoint;
         if (self.row_starts.items[target.num_rows] != target.nnz) return error.InvalidCheckpoint;
         self.row_starts.items.len = target.num_rows + 1;
-        self.col_indices.items.len = target.nnz;
-        self.values.items.len = target.nnz;
+        self.entries.shrinkRetainingCapacity(target.nnz);
     }
 
     pub fn clearRetainingCapacity(self: *Self) void {
         self.row_starts.items.len = 1;
         self.row_starts.items[0] = 0;
-        self.col_indices.clearRetainingCapacity();
-        self.values.clearRetainingCapacity();
+        self.entries.clearRetainingCapacity();
     }
 
     /// Batch-merges dynamic rows beneath a base CSC matrix.
     pub fn appendToCsc(self: Self, allocator: std.mem.Allocator, base: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         if (base.num_cols != self.num_cols) return error.DimensionMismatch;
-        const views = try allocator.alloc(sparse_vector.SparseVectorView(foundation.ColId), self.numRows());
-        defer allocator.free(views);
-        for (views, 0..) |*view, row_index| view.* = self.rowAssumeValid(row_index);
-        return edit.appendRows(allocator, base, views);
+        try base.validate();
+        const fields = self.entries.slice();
+        return edit.appendRowsFromCsrAssumeValid(
+            allocator,
+            base,
+            self.row_starts.items,
+            fields.items(.col),
+            fields.items(.value),
+        );
     }
 };
 
@@ -124,6 +150,31 @@ test "dynamic rows append access checkpoint and rollback" {
     try std.testing.expectEqual(@as(usize, 2), rows.nnz());
     const first = try rows.row(first_id);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, -1.0 }, first.values);
+}
+
+test "dynamic rows batch reserve keeps append pointers stable" {
+    var rows = try DynamicRowMatrix.init(std.testing.allocator, 3);
+    defer rows.deinit(std.testing.allocator);
+    try rows.reserve(std.testing.allocator, 2, 3);
+
+    const reserved_fields = rows.entries.slice();
+    const cols_ptr = reserved_fields.items(.col).ptr;
+    const values_ptr = reserved_fields.items(.value).ptr;
+    const starts_ptr = rows.row_starts.items.ptr;
+
+    const first_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(2) };
+    const first_values = [_]f64{ 1.0, 2.0 };
+    const second_cols = [_]foundation.ColId{try foundation.ColId.init(1)};
+    const second_values = [_]f64{3.0};
+    _ = rows.appendRowPreReserved(.{ .dimension = 3, .indices = &first_cols, .values = &first_values });
+    _ = rows.appendRowPreReserved(.{ .dimension = 3, .indices = &second_cols, .values = &second_values });
+
+    const appended_fields = rows.entries.slice();
+    try std.testing.expectEqual(cols_ptr, appended_fields.items(.col).ptr);
+    try std.testing.expectEqual(values_ptr, appended_fields.items(.value).ptr);
+    try std.testing.expectEqual(starts_ptr, rows.row_starts.items.ptr);
+    try std.testing.expectEqual(@as(usize, 2), rows.numRows());
+    try std.testing.expectEqual(@as(usize, 3), rows.nnz());
 }
 
 test "dynamic rows batch merge into base CSC" {

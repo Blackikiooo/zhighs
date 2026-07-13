@@ -151,12 +151,9 @@ pub const MatrixBuilder = struct {
         const cols = fields.items(.col);
         const values = fields.items(.value);
 
-        // Temporary column-start counts (freed after prefix-sum and output copy).
-        const col_starts = try allocator.alloc(usize, self.num_cols + 1);
-        defer allocator.free(col_starts);
-        @memset(col_starts, 0);
-
-        // Merge duplicates in-place while counting column occupancy.
+        // Merge duplicates in-place. Exact output storage is allocated only
+        // after compaction, and its final col_starts stream is used directly
+        // for column counting instead of a temporary allocation.
         var read: usize = 0;
         var write: usize = 0;
         while (read < length) {
@@ -170,31 +167,25 @@ pub const MatrixBuilder = struct {
             if (!std.math.isFinite(sum)) return error.NonFiniteValue;
             if (@abs(sum) <= zero_tolerance) continue;
 
-            col_starts[col.toUsize() + 1] += 1;
             fields.set(write, .{ .row = row, .col = col, .value = sum, .sequence = write });
             write += 1;
         }
         self.entries.shrinkRetainingCapacity(write);
         fields = self.entries.slice();
         const compact_rows = fields.items(.row);
+        const compact_cols = fields.items(.col);
         const compact_values = fields.items(.value);
 
-        // Prefix-sum raw counts into CSC offsets.
-        const ncol = self.num_cols;
-        var c: usize = 0;
-        while (c < ncol) : (c += 1) col_starts[c + 1] += col_starts[c];
-
         if (comptime include_compact_starts) {
-            return self.buildCompact(allocator, write, col_starts, rows, compact_rows, compact_values);
+            return self.buildCompact(allocator, write, compact_cols, compact_rows, compact_values);
         } else {
-            return self.buildLean(allocator, write, col_starts, compact_rows, compact_values);
+            return self.buildLean(allocator, write, compact_cols, compact_rows, compact_values);
         }
     }
 
     /// Build a canonical CSC matrix from merged triplets, allocating all output
     /// arrays in a single page-colored buffer with compact HUInt offsets.
-    fn buildCompact(self: *Self, allocator: std.mem.Allocator, write: usize, col_starts: []usize, fields_rows: []RowId, compact_rows: []RowId, compact_values: []f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
-        _ = fields_rows;
+    fn buildCompact(self: *Self, allocator: std.mem.Allocator, write: usize, compact_cols: []ColId, compact_rows: []RowId, compact_values: []f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         const starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
         const rows_bytes = std.math.mul(usize, write, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, write, @sizeOf(f64)) catch return error.DimensionTooLarge;
@@ -206,24 +197,24 @@ pub const MatrixBuilder = struct {
         const storage_len = layout.total;
         const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
         errdefer allocator.free(storage);
-        const output_starts: [*]usize = @ptrCast(@alignCast(storage.ptr));
-        const output_rows: [*]RowId = @ptrCast(@alignCast(storage.ptr + rows_offset));
-        const output_values: [*]f64 = @ptrCast(@alignCast(storage.ptr + values_offset));
-        @memcpy(output_starts[0 .. self.num_cols + 1], col_starts);
-        @memcpy(output_rows[0..write], compact_rows);
-        @memcpy(output_values[0..write], compact_values);
+        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. self.num_cols + 1];
+        const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + rows_offset)))[0..write];
+        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + values_offset)))[0..write];
+        fillColumnStartsAssumeValid(output_starts, compact_cols);
+        @memcpy(output_rows, compact_rows);
+        @memcpy(output_values, compact_values);
         const compact_starts: []foundation.HUInt = block: {
             const ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + compact_starts_offset));
             const result = ptr[0 .. self.num_cols + 1];
-            for (result, col_starts) |*dest, s| dest.* = @intCast(s);
+            for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
         return .{
             .num_rows = self.num_rows,
             .num_cols = self.num_cols,
-            .col_starts = output_starts[0 .. self.num_cols + 1],
-            .row_indices = output_rows[0..write],
-            .values = output_values[0..write],
+            .col_starts = output_starts,
+            .row_indices = output_rows,
+            .values = output_values,
             .storage = storage,
             .compact_col_starts = compact_starts,
         };
@@ -232,31 +223,13 @@ pub const MatrixBuilder = struct {
     /// Lightweight output builder for callers that do not need compact offsets.
     /// No page coloring — the three output arrays are packed consecutively with
     /// natural alignment padding so each array starts on its preferred boundary.
-    fn buildLean(self: *Self, allocator: std.mem.Allocator, write: usize, col_starts: []usize, compact_rows: []RowId, compact_values: []f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
-        const starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
-        const rows_bytes = std.math.mul(usize, write, @sizeOf(RowId)) catch return error.DimensionTooLarge;
-        const values_bytes = std.math.mul(usize, write, @sizeOf(f64)) catch return error.DimensionTooLarge;
-        const layout = memory.computeLayout(3, .{ starts_bytes, rows_bytes, values_bytes }, .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) }) catch return error.DimensionTooLarge;
-        const rows_offset = layout.offsets[1];
-        const values_offset = layout.offsets[2];
-        const storage_len = layout.total;
-        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
-        errdefer allocator.free(storage);
-        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. self.num_cols + 1];
-        const row_indices = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + rows_offset)))[0..write];
-        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + values_offset)))[0..write];
-        @memcpy(output_starts, col_starts);
-        @memcpy(row_indices, compact_rows);
-        @memcpy(output_values, compact_values);
-        return .{
-            .num_rows = self.num_rows,
-            .num_cols = self.num_cols,
-            .col_starts = output_starts,
-            .row_indices = row_indices,
-            .values = output_values,
-            .storage = storage,
-            .compact_col_starts = null,
-        };
+    fn buildLean(self: *Self, allocator: std.mem.Allocator, write: usize, compact_cols: []ColId, compact_rows: []RowId, compact_values: []f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+        var result = try csc.CscMatrix.initPackedUninitialized(allocator, self.num_rows, self.num_cols, write);
+        errdefer result.deinit(allocator);
+        fillColumnStartsAssumeValid(result.col_starts, compact_cols);
+        @memcpy(result.row_indices, compact_rows);
+        @memcpy(result.values, compact_values);
+        return result;
     }
 
     fn isSorted(self: Self) bool {
@@ -454,12 +427,10 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
     if (sorted_cols.len != length or sorted_values.len != length)
         return error.InconsistentStorage;
 
-    // Allocate temporary column-start counts.
-    const col_starts = try allocator.alloc(usize, num_cols + 1);
-    defer allocator.free(col_starts);
-    @memset(col_starts, 0);
-
-    // Pass 1: merge + count columns (no data storage — only col_starts)
+    // Pass 1 validates duplicate sums and determines the exact output size.
+    // The input is ordered by column, so pass 2 can write sequentially and
+    // build starts in the final storage without a scatter cursor.
+    var final_nnz: usize = 0;
     var read1: usize = 0;
     while (read1 < length) {
         const row = sorted_rows[read1];
@@ -471,20 +442,8 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
         }
         if (!std.math.isFinite(sum)) return error.NonFiniteValue;
         if (@abs(sum) <= zero_tolerance) continue;
-        col_starts[col.toUsize() + 1] += 1;
+        final_nnz += 1;
     }
-
-    // Prefix-sum raw counts into CSC offsets.
-    var c: usize = 0;
-    while (c < num_cols) : (c += 1) col_starts[c + 1] += col_starts[c];
-    const final_nnz = col_starts[num_cols];
-
-    // Allocate output storage now that final_nnz is known.
-    // Use a cursor array for pass 2 — borrow the first num_cols elements
-    // of col_starts as cursor (col_starts is prefix-sum, cursor is copy).
-    // After allocation, col_starts is memcpy'd to output and then reused as cursor.
-    const cursor = try allocator.alloc(foundation.HUInt, num_cols);
-    defer allocator.free(cursor);
 
     if (comptime include_compact_starts) {
         const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
@@ -495,68 +454,46 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
         const storage_len = layout.total;
         const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
         errdefer allocator.free(storage);
-        const output_starts: [*]usize = @ptrCast(@alignCast(storage.ptr));
-        const output_rows: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
-        const output_values: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[3]));
-        @memcpy(output_starts[0 .. num_cols + 1], col_starts);
-
-        // Pass 2: merge again, write directly to output.
-        for (cursor[0..num_cols], col_starts[0..num_cols]) |*dest, s| dest.* = @intCast(s);
-        var read2: usize = 0;
-        while (read2 < length) {
-            const row = sorted_rows[read2];
-            const col = sorted_cols[read2];
-            var sum = sorted_values[read2];
-            read2 += 1;
-            while (read2 < length and sameCoordinate(sorted_rows[read2], sorted_cols[read2], row, col)) : (read2 += 1) {
-                sum += sorted_values[read2];
-            }
-            if (@abs(sum) <= zero_tolerance) continue;
-            const dest: usize = @intCast(cursor[col.toUsize()]);
-            cursor[col.toUsize()] += 1;
-            output_rows[dest] = row;
-            output_values[dest] = sum;
-        }
+        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
+        const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..final_nnz];
+        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[3])))[0..final_nnz];
+        mergeSortedArraysIntoAssumeValid(sorted_rows, sorted_cols, sorted_values, zero_tolerance, output_starts, output_rows, output_values);
 
         const compact_starts: []foundation.HUInt = block: {
             const ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
             const result = ptr[0 .. num_cols + 1];
-            for (result, col_starts) |*dest, s| dest.* = @intCast(s);
+            for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts[0 .. num_cols + 1], .row_indices = output_rows[0..final_nnz], .values = output_values[0..final_nnz], .storage = storage, .compact_col_starts = compact_starts };
+        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = compact_starts };
     } else {
-        const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
-        const rows_bytes = std.math.mul(usize, final_nnz, @sizeOf(RowId)) catch return error.DimensionTooLarge;
-        const values_bytes = std.math.mul(usize, final_nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
-        const layout = memory.computeLayout(3, .{ starts_bytes, rows_bytes, values_bytes }, .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
-        errdefer allocator.free(storage);
-        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
-        const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[1])))[0..final_nnz];
-        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..final_nnz];
-        @memcpy(output_starts, col_starts);
-
-        // Pass 2: merge again, write directly to output.
-        for (cursor[0..num_cols], col_starts[0..num_cols]) |*dest, s| dest.* = @intCast(s);
-        var read2: usize = 0;
-        while (read2 < length) {
-            const row = sorted_rows[read2];
-            const col = sorted_cols[read2];
-            var sum = sorted_values[read2];
-            read2 += 1;
-            while (read2 < length and sameCoordinate(sorted_rows[read2], sorted_cols[read2], row, col)) : (read2 += 1) {
-                sum += sorted_values[read2];
-            }
-            if (@abs(sum) <= zero_tolerance) continue;
-            const dest: usize = @intCast(cursor[col.toUsize()]);
-            cursor[col.toUsize()] += 1;
-            output_rows[dest] = row;
-            output_values[dest] = sum;
-        }
-
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = null };
+        var result = try csc.CscMatrix.initPackedUninitialized(allocator, num_rows, num_cols, final_nnz);
+        errdefer result.deinit(allocator);
+        mergeSortedArraysIntoAssumeValid(sorted_rows, sorted_cols, sorted_values, zero_tolerance, result.col_starts, result.row_indices, result.values);
+        return result;
     }
+}
+
+fn mergeSortedArraysIntoAssumeValid(sorted_rows: []const RowId, sorted_cols: []const ColId, sorted_values: []const f64, zero_tolerance: f64, output_starts: []usize, output_rows: []RowId, output_values: []f64) void {
+    @memset(output_starts, 0);
+    var read: usize = 0;
+    var write: usize = 0;
+    while (read < sorted_rows.len) {
+        const row = sorted_rows[read];
+        const col = sorted_cols[read];
+        var sum = sorted_values[read];
+        read += 1;
+        while (read < sorted_rows.len and sameCoordinate(sorted_rows[read], sorted_cols[read], row, col)) : (read += 1) {
+            sum += sorted_values[read];
+        }
+        if (@abs(sum) <= zero_tolerance) continue;
+        output_starts[col.toUsize() + 1] += 1;
+        output_rows[write] = row;
+        output_values[write] = sum;
+        write += 1;
+    }
+    for (0..output_starts.len - 1) |col| output_starts[col + 1] += output_starts[col];
+    std.debug.assert(write == output_rows.len);
 }
 
 /// Experimental API: owning freeze for canonical (no-duplicate) arrays.
@@ -579,21 +516,7 @@ pub fn freezeFromCanonicalArraysAssumeValid(allocator: std.mem.Allocator, num_ro
     const nnz = sorted_rows.len;
     if (sorted_cols.len != nnz or sorted_values.len != nnz)
         return error.InconsistentStorage;
-    if (nnz == 0) {
-        const starts = try allocator.alloc(usize, num_cols + 1);
-        @memset(starts, 0);
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = starts, .row_indices = &.{}, .values = &.{}, .storage = null, .compact_col_starts = null };
-    }
-
-    // Pass 1: count entries per column (no merge needed — input is canonical)
-    const col_starts = try allocator.alloc(usize, num_cols + 1);
-    defer allocator.free(col_starts);
-    @memset(col_starts, 0);
-    for (sorted_cols) |col| col_starts[col.toUsize() + 1] += 1;
-
-    // Prefix-sum counts into CSC offsets
-    var c: usize = 0;
-    while (c < num_cols) : (c += 1) col_starts[c + 1] += col_starts[c];
+    if (nnz == 0) return csc.CscMatrix.initZero(allocator, num_rows, num_cols);
 
     if (comptime include_compact_starts) {
         const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
@@ -604,34 +527,33 @@ pub fn freezeFromCanonicalArraysAssumeValid(allocator: std.mem.Allocator, num_ro
         const storage_len = layout.total;
         const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
         errdefer allocator.free(storage);
-        const output_starts: [*]usize = @ptrCast(@alignCast(storage.ptr));
-        const output_rows: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
-        const output_values: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[3]));
-        @memcpy(output_starts[0 .. num_cols + 1], col_starts);
-        @memcpy(output_rows[0..nnz], sorted_rows);
-        @memcpy(output_values[0..nnz], sorted_values);
+        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
+        const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..nnz];
+        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[3])))[0..nnz];
+        fillColumnStartsAssumeValid(output_starts, sorted_cols);
+        @memcpy(output_rows, sorted_rows);
+        @memcpy(output_values, sorted_values);
         const compact_starts: []foundation.HUInt = block: {
             const ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
             const result = ptr[0 .. num_cols + 1];
-            for (result, col_starts) |*dest, s| dest.* = @intCast(s);
+            for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts[0 .. num_cols + 1], .row_indices = output_rows[0..nnz], .values = output_values[0..nnz], .storage = storage, .compact_col_starts = compact_starts };
+        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = compact_starts };
     } else {
-        const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
-        const rows_bytes = std.math.mul(usize, nnz, @sizeOf(RowId)) catch return error.DimensionTooLarge;
-        const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
-        const layout = memory.computeLayout(3, .{ starts_bytes, rows_bytes, values_bytes }, .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
-        errdefer allocator.free(storage);
-        const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
-        const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[1])))[0..nnz];
-        const output_values = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..nnz];
-        @memcpy(output_starts, col_starts);
-        @memcpy(output_rows, sorted_rows);
-        @memcpy(output_values, sorted_values);
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = null };
+        var result = try csc.CscMatrix.initPackedUninitialized(allocator, num_rows, num_cols, nnz);
+        errdefer result.deinit(allocator);
+        fillColumnStartsAssumeValid(result.col_starts, sorted_cols);
+        @memcpy(result.row_indices, sorted_rows);
+        @memcpy(result.values, sorted_values);
+        return result;
     }
+}
+
+inline fn fillColumnStartsAssumeValid(starts: []usize, sorted_cols: []const ColId) void {
+    @memset(starts, 0);
+    for (sorted_cols) |col| starts[col.toUsize() + 1] += 1;
+    for (0..starts.len - 1) |col| starts[col + 1] += starts[col];
 }
 
 test "freezeFromCanonical handles tridiagonal with no duplicates" {
@@ -644,6 +566,13 @@ test "freezeFromCanonical handles tridiagonal with no duplicates" {
     try std.testing.expectEqual(@as(usize, 3), matrix.nnz());
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, matrix.col_starts);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0, 3.0 }, matrix.values);
+
+    var compact = try freezeFromCanonicalArraysAssumeValid(std.testing.allocator, 3, 3, &rows, &cols, &values, 0.0, true);
+    defer compact.deinit(std.testing.allocator);
+    try compact.validate();
+    try std.testing.expect(compact.storage != null);
+    try std.testing.expect(compact.compact_col_starts != null);
+    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 2, 3 }, compact.compact_col_starts.?);
 }
 
 /// Stable API: caller-owned reusable buffers for CSC construction.
@@ -844,6 +773,12 @@ test "freezeFromSortedArrays merges duplicates" {
     try matrix.validate();
     try std.testing.expectEqual(@as(usize, 1), matrix.nnz());
     try std.testing.expectEqual(@as(f64, 3.0), matrix.values[0]);
+
+    var compact = try freezeFromSortedArraysAssumeValid(std.testing.allocator, 3, 2, &rows, &cols, &values, 0.0, true);
+    defer compact.deinit(std.testing.allocator);
+    try compact.validate();
+    try std.testing.expect(compact.compact_col_starts != null);
+    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 1 }, compact.compact_col_starts.?);
 }
 
 test "freezeFromSortedArrays handles odd nnz" {

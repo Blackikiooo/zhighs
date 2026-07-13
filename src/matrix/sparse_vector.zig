@@ -6,8 +6,11 @@
 
 const std = @import("std");
 const Foundation = @import("foundation");
+const memory = @import("memory.zig");
 
 pub const SparseVectorError = error{
+    /// Dimensions or packed allocation sizes exceed representable limits.
+    DimensionTooLarge,
     /// The vector has a nonzero value at an index outside its dimension.
     DimensionMismatch,
     /// The vector contains an explicit zero value, which is not allowed in canonical form.
@@ -141,6 +144,9 @@ pub fn SparseVector(comptime Id: type) type {
         dimension: usize,
         indices: []Id,
         values: []f64,
+        /// Optional single owning block for indices and values. A null value
+        /// preserves compatibility with caller-owned/separately allocated data.
+        storage: ?[]align(64) u8 = null,
 
         const Self = @This();
         pub const View = SparseVectorView(Id);
@@ -153,9 +159,25 @@ pub fn SparseVector(comptime Id: type) type {
             };
         }
 
+        /// Allocates one aligned block containing contiguous index and value
+        /// streams. Contents are uninitialized until filled by the caller.
+        pub fn initPackedUninitialized(allocator: std.mem.Allocator, dimension: usize, nonzeros: usize) (std.mem.Allocator.Error || SparseVectorError)!Self {
+            const indices_bytes = std.math.mul(usize, nonzeros, @sizeOf(Id)) catch return error.DimensionTooLarge;
+            const values_bytes = std.math.mul(usize, nonzeros, @sizeOf(f64)) catch return error.DimensionTooLarge;
+            const layout = memory.computeLayout(2, .{ indices_bytes, values_bytes }, .{ @alignOf(Id), @alignOf(f64) }) catch return error.DimensionTooLarge;
+            const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+            const indices_ptr = @as([*]Id, @ptrCast(@alignCast(storage.ptr)))[0..nonzeros];
+            const values_ptr = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[1])))[0..nonzeros];
+            return .{ .dimension = dimension, .indices = indices_ptr, .values = values_ptr, .storage = storage };
+        }
+
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            allocator.free(self.indices);
-            allocator.free(self.values);
+            if (self.storage) |storage| {
+                allocator.free(storage);
+            } else {
+                allocator.free(self.indices);
+                allocator.free(self.values);
+            }
             self.* = empty(0);
         }
 

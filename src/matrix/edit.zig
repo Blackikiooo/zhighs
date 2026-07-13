@@ -26,18 +26,17 @@ pub fn appendColumns(
     }
     const total_nnz = std.math.add(usize, matrix.nnz(), added_nnz) catch return error.DimensionTooLarge;
 
-    const starts = try allocator.alloc(usize, new_num_cols + 1);
-    errdefer allocator.free(starts);
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, matrix.num_rows, new_num_cols, total_nnz);
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
+    const rows = result.row_indices;
+    const values = result.values;
     @memcpy(starts[0 .. matrix.num_cols + 1], matrix.col_starts);
     var running = matrix.nnz();
     for (columns, 0..) |column, offset| {
         running += column.nnz();
         starts[matrix.num_cols + offset + 1] = running;
     }
-    const rows = try allocator.alloc(foundation.RowId, total_nnz);
-    errdefer allocator.free(rows);
-    const values = try allocator.alloc(f64, total_nnz);
-    errdefer allocator.free(values);
     @memcpy(rows[0..matrix.nnz()], matrix.row_indices);
     @memcpy(values[0..matrix.nnz()], matrix.values);
     var destination = matrix.nnz();
@@ -46,7 +45,7 @@ pub fn appendColumns(
         @memcpy(values[destination..][0..column.nnz()], column.values);
         destination += column.nnz();
     }
-    return .{ .num_rows = matrix.num_rows, .num_cols = new_num_cols, .col_starts = starts, .row_indices = rows, .values = values };
+    return result;
 }
 
 pub fn appendRows(
@@ -65,8 +64,11 @@ pub fn appendRows(
     }
     const total_nnz = std.math.add(usize, matrix.nnz(), added_nnz) catch return error.DimensionTooLarge;
 
-    const starts = try allocator.alloc(usize, matrix.num_cols + 1);
-    errdefer allocator.free(starts);
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, new_num_rows, matrix.num_cols, total_nnz);
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
+    const rows = result.row_indices;
+    const values = result.values;
     @memset(starts, 0);
     for (0..matrix.num_cols) |col|
         starts[col + 1] = matrix.col_starts[col + 1] - matrix.col_starts[col];
@@ -75,34 +77,139 @@ pub fn appendRows(
     }
     for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
 
-    const rows = try allocator.alloc(foundation.RowId, total_nnz);
-    errdefer allocator.free(rows);
-    const values = try allocator.alloc(f64, total_nnz);
-    errdefer allocator.free(values);
-    const next = try allocator.dupe(usize, starts[0..matrix.num_cols]);
-    defer allocator.free(next);
-
     // Existing row IDs are smaller than every appended row ID. Copying the old
     // columns first and then visiting new rows in order preserves row sorting.
     for (0..matrix.num_cols) |col| {
-        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            const destination = next[col];
-            rows[destination] = matrix.row_indices[position];
-            values[destination] = matrix.values[position];
-            next[col] += 1;
-        }
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        const count = end - begin;
+        const destination = starts[col];
+        @memcpy(rows[destination..][0..count], matrix.row_indices[begin..end]);
+        @memcpy(values[destination..][0..count], matrix.values[begin..end]);
+        starts[col] += count;
     }
     for (rows_to_add, 0..) |row, added_row| {
         const row_id = foundation.RowId.fromUsize(matrix.num_rows + added_row) catch unreachable;
         for (row.indices, row.values) |col_id, value| {
             const col = col_id.toUsize();
-            const destination = next[col];
+            const destination = starts[col];
             rows[destination] = row_id;
             values[destination] = value;
-            next[col] += 1;
+            starts[col] += 1;
         }
     }
-    return .{ .num_rows = new_num_rows, .num_cols = matrix.num_cols, .col_starts = starts, .row_indices = rows, .values = values };
+
+    var col = matrix.num_cols;
+    while (col > 0) {
+        starts[col] = starts[col - 1];
+        col -= 1;
+    }
+    starts[0] = 0;
+    return result;
+}
+
+/// Appends canonical CSR-like row streams beneath a CSC matrix without first
+/// materializing an array of per-row SparseVectorView descriptors.
+pub fn appendRowsFromCsr(
+    allocator: std.mem.Allocator,
+    matrix: csc.CscMatrix,
+    row_starts: []const usize,
+    col_indices: []const foundation.ColId,
+    stream_values: []const f64,
+) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+    try matrix.validate();
+    try validateCsrRowStreams(matrix.num_cols, row_starts, col_indices, stream_values);
+    return appendRowsFromCsrAssumeValid(allocator, matrix, row_starts, col_indices, stream_values);
+}
+
+/// Trusted allocation path for validated canonical CSR-like row streams.
+/// `starts[0..num_cols]` doubles as the scatter cursor and is restored after
+/// filling, avoiding a separate O(num_cols) cursor allocation.
+pub fn appendRowsFromCsrAssumeValid(
+    allocator: std.mem.Allocator,
+    matrix: csc.CscMatrix,
+    row_starts: []const usize,
+    col_indices: []const foundation.ColId,
+    stream_values: []const f64,
+) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+    std.debug.assert(row_starts.len > 0);
+    std.debug.assert(row_starts[0] == 0);
+    std.debug.assert(row_starts[row_starts.len - 1] == col_indices.len);
+    std.debug.assert(col_indices.len == stream_values.len);
+
+    const added_rows = row_starts.len - 1;
+    const new_num_rows = std.math.add(usize, matrix.num_rows, added_rows) catch return error.DimensionTooLarge;
+    try csc.validateDimensions(new_num_rows, matrix.num_cols);
+    const total_nnz = std.math.add(usize, matrix.nnz(), stream_values.len) catch return error.DimensionTooLarge;
+
+    var result = try csc.CscMatrix.initPackedUninitialized(allocator, new_num_rows, matrix.num_cols, total_nnz);
+    errdefer result.deinit(allocator);
+    const starts = result.col_starts;
+    const rows = result.row_indices;
+    const values = result.values;
+    @memset(starts, 0);
+    for (0..matrix.num_cols) |col|
+        starts[col + 1] = matrix.col_starts[col + 1] - matrix.col_starts[col];
+    for (col_indices) |col_id| starts[col_id.toUsize() + 1] += 1;
+    for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
+
+    // Existing row IDs precede every appended row ID. Fill them first, then
+    // visit appended rows in increasing order to preserve canonical sorting.
+    for (0..matrix.num_cols) |col| {
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        const count = end - begin;
+        const destination = starts[col];
+        @memcpy(rows[destination..][0..count], matrix.row_indices[begin..end]);
+        @memcpy(values[destination..][0..count], matrix.values[begin..end]);
+        starts[col] += count;
+    }
+    for (0..added_rows) |added_row| {
+        const row_id = foundation.RowId.fromUsize(matrix.num_rows + added_row) catch unreachable;
+        for (row_starts[added_row]..row_starts[added_row + 1]) |position| {
+            const col = col_indices[position].toUsize();
+            const destination = starts[col];
+            rows[destination] = row_id;
+            values[destination] = stream_values[position];
+            starts[col] += 1;
+        }
+    }
+
+    // Cursor col now holds the original final offset of column col+1. Shift
+    // those ends right by one slot to recover canonical column starts.
+    var col = matrix.num_cols;
+    while (col > 0) {
+        starts[col] = starts[col - 1];
+        col -= 1;
+    }
+    starts[0] = 0;
+
+    return result;
+}
+
+fn validateCsrRowStreams(
+    num_cols: usize,
+    row_starts: []const usize,
+    col_indices: []const foundation.ColId,
+    values: []const f64,
+) csc.MatrixError!void {
+    if (row_starts.len == 0 or row_starts[0] != 0) return error.InvalidRowStarts;
+    if (col_indices.len != values.len) return error.InconsistentStorage;
+    if (row_starts[row_starts.len - 1] != values.len) return error.InvalidRowStarts;
+    for (0..row_starts.len - 1) |row| {
+        const begin = row_starts[row];
+        const end = row_starts[row + 1];
+        if (begin > end or end > values.len) return error.InvalidRowStarts;
+        var previous_col: ?usize = null;
+        for (begin..end) |position| {
+            const col = col_indices[position].toUsize();
+            if (col >= num_cols) return error.IndexOutOfBounds;
+            if (previous_col) |previous| if (col <= previous) return error.IndicesNotStrictlyIncreasing;
+            if (!std.math.isFinite(values[position])) return error.NonFiniteValue;
+            if (values[position] == 0.0) return error.ExplicitZero;
+            previous_col = col;
+        }
+    }
 }
 
 pub fn deleteColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
@@ -170,6 +277,46 @@ test "append canonical columns and rows" {
     try completed.validate();
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 1, 4 }, completed.col_starts);
     try std.testing.expectEqualSlices(f64, &.{ 4.0, 2.0, 3.0, 5.0 }, completed.values);
+}
+
+test "append CSR row streams directly including an empty row" {
+    const builder_module = @import("builder.zig");
+    var builder = try builder_module.MatrixBuilder.init(2, 3);
+    defer builder.deinit(std.testing.allocator);
+    try builder.append(std.testing.allocator, try foundation.RowId.init(0), try foundation.ColId.init(0), 1.0);
+    try builder.append(std.testing.allocator, try foundation.RowId.init(1), try foundation.ColId.init(2), 2.0);
+    var base = try builder.freezeSortedLeanAssumeValid(std.testing.allocator, 0.0);
+    defer base.deinit(std.testing.allocator);
+
+    const row_starts = [_]usize{ 0, 2, 2, 3 };
+    const cols = [_]foundation.ColId{
+        try foundation.ColId.init(0),
+        try foundation.ColId.init(2),
+        try foundation.ColId.init(1),
+    };
+    const stream_values = [_]f64{ 3.0, 4.0, 5.0 };
+    var result = try appendRowsFromCsr(std.testing.allocator, base, &row_starts, &cols, &stream_values);
+    defer result.deinit(std.testing.allocator);
+    try result.validate();
+    try std.testing.expectEqual(@as(usize, 5), result.num_rows);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 3, 5 }, result.col_starts);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 3.0, 5.0, 2.0, 4.0 }, result.values);
+    try std.testing.expectEqual(@as(usize, 2), result.row_indices[1].toUsize());
+    try std.testing.expectEqual(@as(usize, 4), result.row_indices[2].toUsize());
+}
+
+test "append CSR row streams rejects malformed canonical data" {
+    var base = try csc.CscMatrix.initZero(std.testing.allocator, 1, 2);
+    defer base.deinit(std.testing.allocator);
+    const duplicate_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(0) };
+    try std.testing.expectError(
+        error.IndicesNotStrictlyIncreasing,
+        appendRowsFromCsr(std.testing.allocator, base, &.{ 0, 2 }, &duplicate_cols, &.{ 1.0, 2.0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidRowStarts,
+        appendRowsFromCsr(std.testing.allocator, base, &.{ 1, 1 }, &.{}, &.{}),
+    );
 }
 
 test "delete rows and columns remaps dimensions canonically" {
