@@ -58,6 +58,90 @@ FTRAN/BTRAN 和 Forrest--Tomlin 类更新。
 - [ ] 保持 strong failure safety：构建成功后再原子替换 authoritative matrix。
 - [ ] 避免结构变换后退化为三个彼此独立、未对齐且没有 compact metadata 的分配。
 
+## P0：借鉴 Burn 的有界操作流合并
+
+借鉴 Burn Tensor Operation Streams 的目标是减少中间存储、内存读写、分配和重复
+调度，而不是在求解器中引入通用 tensor JIT。zhighs 应采用带有明确同步屏障的
+延迟执行：只在 model update、compile/presolve 和少数专用 matrix kernel 边界捕获
+操作，生成可缓存的计划类型，然后一次执行和提交。
+
+推荐的数据流：
+
+```text
+用户建模操作
+    -> ModelEditStream
+    -> 规范化、合并、消除无效操作
+    -> ModelEditPlan
+    -> 一次矩阵物化与 revision 提交
+```
+
+### ModelEditStream 和 ModelEditPlan
+
+- [ ] 将 pending model changes 视为有限操作流，在 flush 前按稳定 ID、对象和字段
+  分组，不再逐条立即重建矩阵。
+- [ ] 定义 DOD `ModelEditPlan`，分别连续保存 coefficient、bounds、objective、
+  added rows/columns 和 deleted IDs；执行阶段只读取本次计划实际需要的 stream。
+- [ ] 合并同一 coefficient 的连续 set，采用 last-write-wins；连续 add 在保持规定
+  浮点顺序的前提下合并。
+- [ ] 合并同一变量的 lower/upper/objective/name 更新，并让 `addVar` 后紧随的字段
+  修改直接进入新变量的最终初始化数据。
+- [ ] 消除同一未发布对象在一个 segment 内的 add-then-delete 等无可观察效果操作。
+- [ ] 将 stable ID 到 dense position 的解析集中在 plan 阶段，避免执行阶段重复查找。
+- [ ] 只缓存不含具体句柄的计划类型，例如 `bounds_only`、`objective_only`、
+  `existing_coefficients_only`、`append_rows`、`append_columns` 和
+  `general_structural_merge`。
+- [ ] 为小型 batch 保留低开销 eager/直接路径；以 benchmark 决定切换阈值，避免
+  计划生成成本超过实际计算成本。
+
+### Compile/presolve pass fusion
+
+- [ ] 将 validate、problem classification、presolve analysis 和 scaling analysis
+  尽可能组合在分析阶段，但不在每一步物化一份完整中间矩阵。
+- [ ] 采用两遍式 fusion：Pass 1 统计 surviving dimensions/nnz、生成 row/column
+  remap 和 scaling；Pass 2 一次写出最终 packed CSC。
+- [ ] 在最终写出中合并 row/column remap、coefficient scaling、删除固定或冗余项、
+  数值过滤和 compact offset 生成。
+- [ ] compile plan 按结构 revision 和相关配置缓存；仅 bounds/objective revision
+  变化时复用结构分析、映射和矩阵 storage。
+- [ ] 不以不安全的严格单遍为目标；优先保证最终尺寸已知、单次物化和 strong
+  failure safety。
+
+### 专用 fused matrix kernels
+
+- [ ] 评估并补充 `y += alpha * A * x`、`y = alpha * A * x + beta * y` 等直接
+  kernel，避免一次性 dense temporary。
+- [ ] 评估在一次 CSC traversal 中完成 `reduced_cost = c - A^T*pi`、row activity、
+  residual 或统计量，但只合并同一阶段必然同时需要的输出。
+- [ ] 评估将 scaling、remap 和 CSC copy/freeze 合并到最终写出 traversal。
+- [ ] fused kernel 使用静态 Zig 函数、comptime specialization 和 caller-owned
+  workspace；simplex iteration 内不引入通用动态 scheduler、哈希或 allocator。
+- [ ] 分别测量减少的 bytes read/write、temporary bytes、cache miss 和总耗时；遍历
+  次数减少但寄存器压力、随机写或无用输出增加时不得合入。
+
+### ExpressionGraph execution plan
+
+- [ ] 在 NLP 路径启用前，将递归 `ExpressionGraph.evaluate` 编译为拓扑排序的 SoA
+  execution plan，确保共享 DAG 节点每次 evaluation 只计算一次。
+- [ ] 编译阶段实现 constant folding、common-subexpression elimination、identity
+  elimination 和安全的 strength reduction。
+- [ ] 根据节点引用次数分配并复用连续 value slots，避免每次 evaluation 分配。
+- [ ] 为 value、gradient、Jacobian sparsity 和后续 Hessian evaluation 设计共享分析，
+  避免分别递归遍历同一 DAG。
+- [ ] 只执行不会改变规定浮点语义的代数化简；禁止未经证明的浮点重结合。
+
+### 操作流同步屏障和语义
+
+- [ ] `optimize`、导出/写文件、读取 pending 影响的数据、获取 matrix/basis view、
+  callback 暴露状态和删除已发布稳定句柄之前必须 flush。
+- [ ] segment 内发生 write-after-read 或 read-after-write 且读取结果对用户可观察时，
+  在读取点结束当前 segment。
+- [ ] deferred validation 必须保持清晰的错误归属；不能让非法操作只在很晚的
+  `optimize` 中以无法定位的方式失败。
+- [ ] operation fusion 必须保持 duplicate merge 顺序、NaN/Inf/overflow 行为、
+  canonical CSC、stable ID 生命周期和 revision/basis/cache 失效语义。
+- [ ] 每个计划执行必须先构建完整 replacement，成功后再一次提交，失败时原模型
+  和所有当前 view/cache 仍保持有效。
+
 ## P1：将复用缓冲区接入生产路径
 
 - [ ] 让 `MatrixStore` 或上层 solve/compile session 持有可复用 CSR row cursor，
