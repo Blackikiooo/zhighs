@@ -223,13 +223,7 @@ pub fn applyPending(self: *Model) ModelError!void {
         }
 
         // Create the new CSC matrix and replace the store.
-        var new_csc = CscMatrix{
-            .num_rows = num_rows,
-            .num_cols = num_cols,
-            .col_starts = new_col_starts,
-            .row_indices = new_row_indices,
-            .values = new_values,
-        };
+        var new_csc = CscMatrix.initOwnedSlicesAssumeValid(num_rows, num_cols, new_col_starts, new_row_indices, new_values);
         // Validate (debug mode catches structural bugs).
         new_csc.validate() catch {
             alloc.free(new_col_starts);

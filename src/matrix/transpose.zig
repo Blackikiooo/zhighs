@@ -62,15 +62,15 @@ pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix)
     try transposeIntoAssumeValid(matrix, buffers.starts, buffers.rows, buffers.values, buffers.cursor);
     for (buffers.compact_starts, buffers.starts) |*destination, start| destination.* = @intCast(start);
 
-    return .{
-        .num_rows = matrix.num_cols,
-        .num_cols = matrix.num_rows,
-        .col_starts = buffers.starts,
-        .row_indices = buffers.rows,
-        .values = buffers.values,
-        .storage = buffers.storage,
-        .compact_col_starts = buffers.compact_starts,
-    };
+    return csc.CscMatrix.initPackedPartsAssumeValid(
+        matrix.num_cols,
+        matrix.num_rows,
+        buffers.starts,
+        buffers.rows,
+        buffers.values,
+        buffers.storage,
+        buffers.compact_starts,
+    );
 }
 
 /// Fast transpose without compact HUInt offsets.
@@ -111,15 +111,7 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
     } else {
         fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, cursor, rows, out_values);
     }
-    return .{
-        .num_rows = matrix.num_cols,
-        .num_cols = matrix.num_rows,
-        .col_starts = starts,
-        .row_indices = rows,
-        .values = out_values,
-        .storage = storage,
-        .compact_col_starts = null,
-    };
+    return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, null);
 }
 
 /// Owning transpose using HUInt (4-byte) internal starts for reduced memory
@@ -232,15 +224,7 @@ pub fn transposeLeanAssumeValidCompact(
         );
     }
 
-    return .{
-        .num_rows = matrix.num_cols,
-        .num_cols = matrix.num_rows,
-        .col_starts = starts,
-        .row_indices = rows,
-        .values = out_values,
-        .storage = storage,
-        .compact_col_starts = null,
-    };
+    return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, null);
 }
 
 pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
@@ -324,7 +308,7 @@ test "explicit transpose is canonical and swaps dimensions" {
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
 
     var result = try transpose(std.testing.allocator, matrix);
     defer result.deinit(std.testing.allocator);
@@ -361,7 +345,7 @@ test "transposeLean handles odd nnz" {
     var starts = [_]usize{ 0, 1, 3, 4 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1) };
     var values = [_]f64{ 3.0, 4.0, 5.0, 6.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
 
     var result = try transposeLeanAssumeValid(std.testing.allocator, matrix);
     defer result.deinit(std.testing.allocator);
@@ -377,7 +361,7 @@ test "transposeLean handles empty matrix (zero nnz)" {
     var starts = [_]usize{0} ** 4; // [0,0,0,0]
     var rows = [_]foundation.RowId{};
     var values = [_]f64{};
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 3, &starts, &rows, &values);
 
     var result = try transposeLeanAssumeValid(std.testing.allocator, matrix);
     defer result.deinit(std.testing.allocator);
@@ -392,7 +376,7 @@ test "transposeLean handles single-column odd-nnz matrix" {
     var starts = [_]usize{ 0, 3 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(4) };
     var values = [_]f64{ 1.0, 2.0, 3.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 5, .num_cols = 1, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(5, 1, &starts, &rows, &values);
 
     var result = try transposeLeanAssumeValid(std.testing.allocator, matrix);
     defer result.deinit(std.testing.allocator);

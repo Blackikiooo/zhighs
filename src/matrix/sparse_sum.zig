@@ -189,7 +189,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
                 vs[dst] = v;
                 dst += 1;
             }
-            return .{ .dimension = self.dimension, .indices = indices, .values = vs };
+            return OwnedVector.initOwnedSlicesAssumeValid(self.dimension, indices, vs);
         }
 
         fn lessThanId(_: void, lhs: Id, rhs: Id) bool {
@@ -262,7 +262,7 @@ test "sparse accumulator adds canonical vectors" {
     defer sum.deinit(std.testing.allocator);
     var ids = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var vals = [_]f64{ 2.0, -3.0 };
-    try sum.addVector(std.testing.allocator, -2.0, .{ .dimension = 3, .indices = &ids, .values = &vals });
+    try sum.addVector(std.testing.allocator, -2.0, sparse_vector.SparseVectorView(foundation.RowId).initAssumeValid(3, &ids, &vals));
     try std.testing.expectEqual(@as(f64, -4.0), sum.get(ids[0]));
     try std.testing.expectEqual(@as(f64, 6.0), sum.get(ids[1]));
 }

@@ -298,7 +298,7 @@ test "matrix norms and absolute statistics" {
     var starts = [_]usize{ 0, 2, 3 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1), try foundation.RowId.init(1) };
     var values = [_]f64{ -3.0, 4.0, -12.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
 
     try std.testing.expectEqual(@as(f64, 12.0), maxAbs(matrix));
     try std.testing.expectEqual(@as(f64, 12.0), oneNorm(matrix));
@@ -315,7 +315,7 @@ test "stable Frobenius norm avoids intermediate overflow" {
     var starts = [_]usize{ 0, 2 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var values = [_]f64{ 1e200, 1e200 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 1, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 1, &starts, &rows, &values);
     const norm = frobeniusNorm(matrix);
     try std.testing.expect(std.math.isFinite(norm));
     try std.testing.expectApproxEqRel(@sqrt(2.0) * 1e200, norm, 1e-15);
@@ -335,7 +335,7 @@ test "range assessment equality and alpha products" {
     var starts = [_]usize{ 0, 2, 3 };
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
     var values = [_]f64{ -0.25, 4.0, 20.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
     try std.testing.expect(eql(matrix, matrix));
     const range = absoluteRange(matrix).?;
     try std.testing.expectEqual(@as(f64, 0.25), range.min);
@@ -358,7 +358,7 @@ test "high precision products retain small residual" {
     var starts = [_]usize{ 0, 1, 2, 3 };
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(0), try RowId.init(0) };
     var values = [_]f64{ 1e16, 1.0, -1e16 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 1, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(1, 3, &starts, &rows, &values);
     var y: [1]f64 = undefined;
     var scratch: [1]foundation.HCD = undefined;
     try multiplyHighPrecision(matrix, &.{ 1.0, 1.0, 1.0 }, &y, &scratch);

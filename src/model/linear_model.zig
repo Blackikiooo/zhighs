@@ -26,7 +26,6 @@ const std = @import("std");
 const types = @import("types.zig");
 const problem_class = @import("problem_class.zig");
 const matrix = @import("matrix");
-const foundation = @import("foundation");
 
 const ObjectiveSense = types.ObjectiveSense;
 const INFINITY = types.INFINITY;
@@ -36,7 +35,6 @@ const ProblemClass = problem_class.ProblemClass;
 const DomainClass = problem_class.DomainClass;
 const ObjectiveClass = problem_class.ObjectiveClass;
 const ConstraintClass = problem_class.ConstraintClass;
-const RowId = foundation.RowId;
 
 // ── Integrality ────────────────────────────────────────────────────────────
 
@@ -126,21 +124,7 @@ pub const LinearModel = struct {
         errdefer allocator.free(row_upper);
 
         // Zero 0×0 CSC matrix.
-        const col_starts = try allocator.alloc(usize, 1);
-        errdefer allocator.free(col_starts);
-        col_starts[0] = 0;
-        const row_indices = try allocator.alloc(RowId, 0);
-        errdefer allocator.free(row_indices);
-        const values = try allocator.alloc(f64, 0);
-        errdefer allocator.free(values);
-
-        const csc = CscMatrix{
-            .num_rows = 0,
-            .num_cols = 0,
-            .col_starts = col_starts,
-            .row_indices = row_indices,
-            .values = values,
-        };
+        const csc = try CscMatrix.initZero(allocator, 0, 0);
         const store = MatrixStore.initAssumeValid(csc);
 
         return Self{

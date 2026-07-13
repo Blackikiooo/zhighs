@@ -263,7 +263,7 @@ test "append canonical columns and rows" {
     defer matrix.deinit(std.testing.allocator);
     var column_rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var column_values = [_]f64{ 2.0, 3.0 };
-    const columns = [_]sparse_vector.SparseVectorView(foundation.RowId){.{ .dimension = 2, .indices = &column_rows, .values = &column_values }};
+    const columns = [_]sparse_vector.SparseVectorView(foundation.RowId){sparse_vector.SparseVectorView(foundation.RowId).initAssumeValid(2, &column_rows, &column_values)};
     var with_column = try appendColumns(std.testing.allocator, matrix, &columns);
     defer with_column.deinit(std.testing.allocator);
     try with_column.validate();
@@ -271,7 +271,7 @@ test "append canonical columns and rows" {
 
     var row_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(2) };
     var row_values = [_]f64{ 4.0, 5.0 };
-    const new_rows = [_]sparse_vector.SparseVectorView(foundation.ColId){.{ .dimension = 3, .indices = &row_cols, .values = &row_values }};
+    const new_rows = [_]sparse_vector.SparseVectorView(foundation.ColId){sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(3, &row_cols, &row_values)};
     var completed = try appendRows(std.testing.allocator, with_column, &new_rows);
     defer completed.deinit(std.testing.allocator);
     try completed.validate();
@@ -344,7 +344,7 @@ test "structural edits validate vectors and deletion sets" {
     defer matrix.deinit(std.testing.allocator);
     var no_ids = [_]foundation.RowId{};
     var no_values = [_]f64{};
-    const wrong_columns = [_]sparse_vector.SparseVectorView(foundation.RowId){.{ .dimension = 3, .indices = &no_ids, .values = &no_values }};
+    const wrong_columns = [_]sparse_vector.SparseVectorView(foundation.RowId){sparse_vector.SparseVectorView(foundation.RowId).initAssumeValid(3, &no_ids, &no_values)};
     try std.testing.expectError(error.DimensionMismatch, appendColumns(std.testing.allocator, matrix, &wrong_columns));
     const duplicate = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(0) };
     try std.testing.expectError(error.IndicesNotStrictlyIncreasing, deleteRows(std.testing.allocator, matrix, &duplicate));

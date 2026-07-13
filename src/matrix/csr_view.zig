@@ -24,6 +24,18 @@ pub const CsrView = struct {
 
     const Self = @This();
 
+    /// Creates and validates a borrowed immutable CSR view.
+    pub fn init(num_rows: usize, num_cols: usize, row_starts: []const foundation.HUInt, col_indices: []const ColId, values: []const f64) csc.MatrixError!Self {
+        const result = initAssumeValid(num_rows, num_cols, row_starts, col_indices, values);
+        try result.validate();
+        return result;
+    }
+
+    /// Trusted constructor for CSR slices already known to be canonical.
+    pub inline fn initAssumeValid(num_rows: usize, num_cols: usize, row_starts: []const foundation.HUInt, col_indices: []const ColId, values: []const f64) Self {
+        return .{ .num_rows = num_rows, .num_cols = num_cols, .row_starts = row_starts, .col_indices = col_indices, .values = values };
+    }
+
     pub inline fn nnz(self: Self) usize {
         return self.values.len;
     }
@@ -68,11 +80,7 @@ pub const CsrView = struct {
     pub inline fn rowAssumeValid(self: Self, row_index: usize) sparse_vector.SparseVectorView(ColId) {
         const begin: usize = @intCast(self.row_starts[row_index]);
         const end: usize = @intCast(self.row_starts[row_index + 1]);
-        return .{
-            .dimension = self.num_cols,
-            .indices = self.col_indices[begin..end],
-            .values = self.values[begin..end],
-        };
+        return sparse_vector.SparseVectorView(ColId).initAssumeValid(self.num_cols, self.col_indices[begin..end], self.values[begin..end]);
     }
 
     /// CSR-native y = A*x. Each output row is an independent contiguous dot
@@ -251,13 +259,7 @@ pub const CsrCache = struct {
 
     /// Zero-overhead access for loops whose caller already checked the revision.
     pub inline fn viewAssumeCurrent(self: Self) CsrView {
-        return .{
-            .num_rows = self.num_rows,
-            .num_cols = self.num_cols,
-            .row_starts = self.row_starts,
-            .col_indices = self.col_indices,
-            .values = self.values,
-        };
+        return CsrView.initAssumeValid(self.num_rows, self.num_cols, self.row_starts, self.col_indices, self.values);
     }
 
     /// Combines revision and row-bound checks for occasional row access.
@@ -321,13 +323,7 @@ test "CSC to CSR conversion preserves rows including empty rows" {
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(2), try RowId.init(2), try RowId.init(0), try RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: csc.CscMatrix = .{
-        .num_rows = 3,
-        .num_cols = 3,
-        .col_starts = &starts,
-        .row_indices = &rows,
-        .values = &values,
-    };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
 
     var cache = try CsrCache.build(std.testing.allocator, matrix, 17);
     defer cache.deinit(std.testing.allocator);
@@ -359,25 +355,13 @@ test "CSR validation rejects malformed offsets and unordered columns" {
     var starts = [_]foundation.HUInt{ 0, 2 };
     var duplicate_cols = [_]ColId{ try ColId.init(0), try ColId.init(0) };
     var values = [_]f64{ 1.0, 2.0 };
-    const duplicate: CsrView = .{
-        .num_rows = 1,
-        .num_cols = 2,
-        .row_starts = &starts,
-        .col_indices = &duplicate_cols,
-        .values = &values,
-    };
+    const duplicate = CsrView.initAssumeValid(1, 2, &starts, &duplicate_cols, &values);
     try std.testing.expectError(error.IndicesNotStrictlyIncreasing, duplicate.validate());
 
     var bad_starts = [_]foundation.HUInt{ 1, 1 };
     var no_cols = [_]ColId{};
     var no_values = [_]f64{};
-    const bad: CsrView = .{
-        .num_rows = 1,
-        .num_cols = 1,
-        .row_starts = &bad_starts,
-        .col_indices = &no_cols,
-        .values = &no_values,
-    };
+    const bad = CsrView.initAssumeValid(1, 1, &bad_starts, &no_cols, &no_values);
     try std.testing.expectError(error.InvalidRowStarts, bad.validate());
 }
 
@@ -422,7 +406,7 @@ test "CSR native products match CSC products and scratch build" {
     var starts = [_]usize{ 0, 2, 3 };
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
     var values = [_]f64{ 2.0, 3.0, 4.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
     var scratch: [2]foundation.HUInt = undefined;
     var cache = try CsrCache.buildWithScratch(std.testing.allocator, matrix, 0, &scratch);
     defer cache.deinit(std.testing.allocator);

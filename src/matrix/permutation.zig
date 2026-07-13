@@ -87,7 +87,7 @@ test "row and column permutation preserves values at mapped coordinates" {
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
     const row_map = [_]foundation.RowId{ try foundation.RowId.init(2), try foundation.RowId.init(0), try foundation.RowId.init(1) };
     const col_map = [_]foundation.ColId{ try foundation.ColId.init(1), try foundation.ColId.init(2), try foundation.ColId.init(0) };
     var result = try permute(std.testing.allocator, matrix, &row_map, &col_map);

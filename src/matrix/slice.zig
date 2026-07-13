@@ -110,7 +110,7 @@ test "column extraction preserves requested canonical columns" {
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
     const selected = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(2) };
     var result = try extractColumns(std.testing.allocator, matrix, &selected);
     defer result.deinit(std.testing.allocator);
@@ -123,7 +123,7 @@ test "row extraction remaps row IDs and preserves columns" {
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
     const selected = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var result = try extractRows(std.testing.allocator, matrix, &selected);
     defer result.deinit(std.testing.allocator);
@@ -154,7 +154,7 @@ test "contiguous column range copies one CSC span" {
     var starts = [_]usize{ 0, 1, 1, 3 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var values = [_]f64{ 1.0, 2.0, 3.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 3, &starts, &rows, &values);
     var result = try extractColumnRange(std.testing.allocator, matrix, 1, 3);
     defer result.deinit(std.testing.allocator);
     try result.validate();

@@ -209,15 +209,7 @@ pub const MatrixBuilder = struct {
             for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
-        return .{
-            .num_rows = self.num_rows,
-            .num_cols = self.num_cols,
-            .col_starts = output_starts,
-            .row_indices = output_rows,
-            .values = output_values,
-            .storage = storage,
-            .compact_col_starts = compact_starts,
-        };
+        return csc.CscMatrix.initPackedPartsAssumeValid(self.num_rows, self.num_cols, output_starts, output_rows, output_values, storage, compact_starts);
     }
 
     /// Lightweight output builder for callers that do not need compact offsets.
@@ -304,10 +296,10 @@ test "builder batch-appends canonical rows and columns" {
     defer builder.deinit(std.testing.allocator);
     var column_rows = [_]RowId{ try RowId.init(0), try RowId.init(2) };
     var column_values = [_]f64{ 2.0, 6.0 };
-    try builder.appendColumn(std.testing.allocator, try ColId.init(1), .{ .dimension = 3, .indices = &column_rows, .values = &column_values });
+    try builder.appendColumn(std.testing.allocator, try ColId.init(1), sparse_vector.SparseVectorView(RowId).initAssumeValid(3, &column_rows, &column_values));
     var row_cols = [_]ColId{ try ColId.init(0), try ColId.init(2) };
     var row_values = [_]f64{ 3.0, 7.0 };
-    try builder.appendRow(std.testing.allocator, try RowId.init(1), .{ .dimension = 3, .indices = &row_cols, .values = &row_values });
+    try builder.appendRow(std.testing.allocator, try RowId.init(1), sparse_vector.SparseVectorView(ColId).initAssumeValid(3, &row_cols, &row_values));
     var matrix = try builder.freeze(std.testing.allocator, 0.0);
     defer matrix.deinit(std.testing.allocator);
     try matrix.validate();
@@ -323,7 +315,7 @@ test "builder validates coordinates values tolerance and batch dimensions" {
     try std.testing.expectError(error.InvalidTolerance, builder.freeze(std.testing.allocator, -1.0));
     var no_rows = [_]RowId{};
     var no_values = [_]f64{};
-    try std.testing.expectError(error.DimensionMismatch, builder.appendColumn(std.testing.allocator, try ColId.init(0), .{ .dimension = 2, .indices = &no_rows, .values = &no_values }));
+    try std.testing.expectError(error.DimensionMismatch, builder.appendColumn(std.testing.allocator, try ColId.init(0), sparse_vector.SparseVectorView(RowId).initAssumeValid(2, &no_rows, &no_values)));
 }
 
 test "duplicate summation follows insertion order" {
@@ -465,7 +457,7 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
             for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = compact_starts };
+        return csc.CscMatrix.initPackedPartsAssumeValid(num_rows, num_cols, output_starts, output_rows, output_values, storage, compact_starts);
     } else {
         var result = try csc.CscMatrix.initPackedUninitialized(allocator, num_rows, num_cols, final_nnz);
         errdefer result.deinit(allocator);
@@ -539,7 +531,7 @@ pub fn freezeFromCanonicalArraysAssumeValid(allocator: std.mem.Allocator, num_ro
             for (result, output_starts) |*dest, s| dest.* = @intCast(s);
             break :block result;
         };
-        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = output_starts, .row_indices = output_rows, .values = output_values, .storage = storage, .compact_col_starts = compact_starts };
+        return csc.CscMatrix.initPackedPartsAssumeValid(num_rows, num_cols, output_starts, output_rows, output_values, storage, compact_starts);
     } else {
         var result = try csc.CscMatrix.initPackedUninitialized(allocator, num_rows, num_cols, nnz);
         errdefer result.deinit(allocator);
@@ -642,7 +634,7 @@ pub fn freezeCanonicalIntoAssumeValid(buffers: *CscBuildBuffers, num_rows: usize
     @memcpy(buffers.row_indices[0..nnz], rows);
     @memcpy(buffers.values[0..nnz], vals);
 
-    return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = buffers.col_starts[0 .. num_cols + 1], .row_indices = buffers.row_indices[0..nnz], .values = buffers.values[0..nnz] };
+    return csc.CscView.initAssumeValid(num_rows, num_cols, buffers.col_starts[0 .. num_cols + 1], buffers.row_indices[0..nnz], buffers.values[0..nnz]);
 }
 
 test "freezeCanonicalIntoAssumeValid writes correct view" {

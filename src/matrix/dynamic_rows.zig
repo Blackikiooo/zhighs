@@ -101,7 +101,7 @@ pub const DynamicRowMatrix = struct {
         const begin = self.row_starts.items[index];
         const end = self.row_starts.items[index + 1];
         const fields = self.entries.slice();
-        return .{ .dimension = self.num_cols, .indices = fields.items(.col)[begin..end], .values = fields.items(.value)[begin..end] };
+        return sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(self.num_cols, fields.items(.col)[begin..end], fields.items(.value)[begin..end]);
     }
 
     /// Removes every row appended after checkpoint in O(1).
@@ -138,12 +138,12 @@ test "dynamic rows append access checkpoint and rollback" {
     defer rows.deinit(std.testing.allocator);
     var first_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(3) };
     var first_values = [_]f64{ 2.0, -1.0 };
-    const first_id = try rows.appendRow(std.testing.allocator, .{ .dimension = 4, .indices = &first_cols, .values = &first_values });
+    const first_id = try rows.appendRow(std.testing.allocator, sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(4, &first_cols, &first_values));
     try std.testing.expectEqual(@as(usize, 0), first_id.toUsize());
     const saved = rows.checkpoint();
     var second_cols = [_]foundation.ColId{try foundation.ColId.init(2)};
     var second_values = [_]f64{5.0};
-    _ = try rows.appendRow(std.testing.allocator, .{ .dimension = 4, .indices = &second_cols, .values = &second_values });
+    _ = try rows.appendRow(std.testing.allocator, sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(4, &second_cols, &second_values));
     try std.testing.expectEqual(@as(usize, 2), rows.numRows());
     try rows.rollback(saved);
     try std.testing.expectEqual(@as(usize, 1), rows.numRows());
@@ -166,8 +166,8 @@ test "dynamic rows batch reserve keeps append pointers stable" {
     const first_values = [_]f64{ 1.0, 2.0 };
     const second_cols = [_]foundation.ColId{try foundation.ColId.init(1)};
     const second_values = [_]f64{3.0};
-    _ = rows.appendRowPreReserved(.{ .dimension = 3, .indices = &first_cols, .values = &first_values });
-    _ = rows.appendRowPreReserved(.{ .dimension = 3, .indices = &second_cols, .values = &second_values });
+    _ = rows.appendRowPreReserved(sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(3, &first_cols, &first_values));
+    _ = rows.appendRowPreReserved(sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(3, &second_cols, &second_values));
 
     const appended_fields = rows.entries.slice();
     try std.testing.expectEqual(cols_ptr, appended_fields.items(.col).ptr);
@@ -184,7 +184,7 @@ test "dynamic rows batch merge into base CSC" {
     defer rows.deinit(std.testing.allocator);
     var cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(1) };
     var values = [_]f64{ 3.0, 4.0 };
-    _ = try rows.appendRow(std.testing.allocator, .{ .dimension = 2, .indices = &cols, .values = &values });
+    _ = try rows.appendRow(std.testing.allocator, sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(2, &cols, &values));
     var merged = try rows.appendToCsc(std.testing.allocator, base);
     defer merged.deinit(std.testing.allocator);
     try merged.validate();
@@ -198,6 +198,6 @@ test "dynamic row validation and invalid checkpoints" {
     defer rows.deinit(std.testing.allocator);
     var no_cols = [_]foundation.ColId{};
     var no_values = [_]f64{};
-    try std.testing.expectError(error.DimensionMismatch, rows.appendRow(std.testing.allocator, .{ .dimension = 2, .indices = &no_cols, .values = &no_values }));
+    try std.testing.expectError(error.DimensionMismatch, rows.appendRow(std.testing.allocator, sparse_vector.SparseVectorView(foundation.ColId).initAssumeValid(2, &no_cols, &no_values)));
     try std.testing.expectError(error.InvalidCheckpoint, rows.rollback(.{ .num_rows = 1, .nnz = 0 }));
 }

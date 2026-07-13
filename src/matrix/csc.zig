@@ -47,8 +47,76 @@ pub const CscMatrix = struct {
     values: []f64,
     storage: ?[]align(64) u8 = null,
     compact_col_starts: ?[]foundation.HUInt = null,
+    /// Relevant when `storage == null`: true means the three slices are
+    /// independent allocator-owned allocations; false denotes a borrowed
+    /// matrix facade that must not free its slices.
+    owns_separate_slices: bool = false,
 
     const Self = @This();
+
+    /// Wraps caller-owned slices and validates canonical CSC invariants.
+    /// Ownership transfers only on success; `deinit` frees all three slices.
+    pub fn initOwnedSlices(num_rows: usize, num_cols: usize, col_starts: []usize, row_indices: []RowId, values: []f64) MatrixError!Self {
+        const result = initOwnedSlicesAssumeValid(num_rows, num_cols, col_starts, row_indices, values);
+        try result.validate();
+        return result;
+    }
+
+    /// Trusted ownership-transfer constructor for canonical independent slices.
+    pub inline fn initOwnedSlicesAssumeValid(num_rows: usize, num_cols: usize, col_starts: []usize, row_indices: []RowId, values: []f64) Self {
+        return .{
+            .num_rows = num_rows,
+            .num_cols = num_cols,
+            .col_starts = col_starts,
+            .row_indices = row_indices,
+            .values = values,
+            .owns_separate_slices = true,
+        };
+    }
+
+    /// Creates a non-owning matrix facade over mutable slices and validates it.
+    /// Prefer `CscView` when mutation or an owning-only API is not required.
+    pub fn initBorrowed(num_rows: usize, num_cols: usize, col_starts: []usize, row_indices: []RowId, values: []f64) MatrixError!Self {
+        const result = initBorrowedAssumeValid(num_rows, num_cols, col_starts, row_indices, values);
+        try result.validate();
+        return result;
+    }
+
+    /// Trusted non-owning constructor, primarily for mutable kernels and tests.
+    pub inline fn initBorrowedAssumeValid(num_rows: usize, num_cols: usize, col_starts: []usize, row_indices: []RowId, values: []f64) Self {
+        return .{
+            .num_rows = num_rows,
+            .num_cols = num_cols,
+            .col_starts = col_starts,
+            .row_indices = row_indices,
+            .values = values,
+            .owns_separate_slices = false,
+        };
+    }
+
+    /// Trusted constructor for slices backed by one packed owning allocation.
+    pub inline fn initPackedPartsAssumeValid(num_rows: usize, num_cols: usize, col_starts: []usize, row_indices: []RowId, values: []f64, storage: []align(64) u8, compact_col_starts: ?[]foundation.HUInt) Self {
+        return .{
+            .num_rows = num_rows,
+            .num_cols = num_cols,
+            .col_starts = col_starts,
+            .row_indices = row_indices,
+            .values = values,
+            .storage = storage,
+            .compact_col_starts = compact_col_starts,
+        };
+    }
+
+    /// Creates an independent owning copy with explicit transfer contained
+    /// inside this constructor, so partial allocation failures cannot leak.
+    pub fn clone(self: Self, allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
+        const col_starts = try allocator.dupe(usize, self.col_starts);
+        errdefer allocator.free(col_starts);
+        const row_indices = try allocator.dupe(RowId, self.row_indices);
+        errdefer allocator.free(row_indices);
+        const values = try allocator.dupe(f64, self.values);
+        return initOwnedSlicesAssumeValid(self.num_rows, self.num_cols, col_starts, row_indices, values);
+    }
 
     /// Allocates one 64-byte-aligned packed block for CSC starts, row IDs and
     /// values. Contents are intentionally uninitialized; callers must fill a
@@ -67,14 +135,15 @@ pub const CscMatrix = struct {
         const starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr));
         const rows_ptr: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
         const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
-        return .{
-            .num_rows = num_rows,
-            .num_cols = num_cols,
-            .col_starts = starts_ptr[0 .. num_cols + 1],
-            .row_indices = rows_ptr[0..nonzeros],
-            .values = values_ptr[0..nonzeros],
-            .storage = storage,
-        };
+        return initPackedPartsAssumeValid(
+            num_rows,
+            num_cols,
+            starts_ptr[0 .. num_cols + 1],
+            rows_ptr[0..nonzeros],
+            values_ptr[0..nonzeros],
+            storage,
+            null,
+        );
     }
 
     /// Creates a structurally valid all-zero matrix.
@@ -87,7 +156,7 @@ pub const CscMatrix = struct {
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.storage) |storage| {
             allocator.free(storage);
-        } else {
+        } else if (self.owns_separate_slices) {
             allocator.free(self.col_starts);
             allocator.free(self.row_indices);
             allocator.free(self.values);
@@ -141,11 +210,7 @@ pub const CscMatrix = struct {
     pub inline fn columnAssumeValid(self: Self, col_index: usize) sparse_vector.SparseVectorView(RowId) {
         const begin = self.col_starts[col_index];
         const end = self.col_starts[col_index + 1];
-        return .{
-            .dimension = self.num_rows,
-            .indices = self.row_indices[begin..end],
-            .values = self.values[begin..end],
-        };
+        return sparse_vector.SparseVectorView(RowId).initAssumeValid(self.num_rows, self.row_indices[begin..end], self.values[begin..end]);
     }
 
     /// Computes y = A * x, checking only vector dimensions.
@@ -278,7 +343,7 @@ pub const CscMatrix = struct {
     /// write into externally-managed buffers so the caller retains full control
     /// over allocation lifetime.
     pub fn view(self: Self) CscView {
-        return .{ .num_rows = self.num_rows, .num_cols = self.num_cols, .col_starts = self.col_starts, .row_indices = self.row_indices, .values = self.values };
+        return CscView.initAssumeValid(self.num_rows, self.num_cols, self.col_starts, self.row_indices, self.values);
     }
 };
 
@@ -290,6 +355,18 @@ pub const CscView = struct {
     col_starts: []const usize,
     row_indices: []const RowId,
     values: []const f64,
+
+    /// Creates and validates a borrowed immutable CSC view.
+    pub fn init(num_rows: usize, num_cols: usize, col_starts: []const usize, row_indices: []const RowId, values: []const f64) MatrixError!CscView {
+        const result = initAssumeValid(num_rows, num_cols, col_starts, row_indices, values);
+        try result.validate();
+        return result;
+    }
+
+    /// Trusted constructor for slices already known to be canonical.
+    pub inline fn initAssumeValid(num_rows: usize, num_cols: usize, col_starts: []const usize, row_indices: []const RowId, values: []const f64) CscView {
+        return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = col_starts, .row_indices = row_indices, .values = values };
+    }
 
     pub inline fn nnz(self: CscView) usize {
         return self.values.len;
@@ -430,12 +507,38 @@ test "packed uninitialized CSC uses one aligned owning allocation" {
     try matrix.validate();
 }
 
+test "named CSC constructors preserve explicit ownership" {
+    var borrowed_starts = [_]usize{ 0, 1 };
+    var borrowed_rows = [_]RowId{try RowId.init(0)};
+    var borrowed_values = [_]f64{2.0};
+    var borrowed = try CscMatrix.initBorrowed(1, 1, &borrowed_starts, &borrowed_rows, &borrowed_values);
+    try std.testing.expect(!borrowed.owns_separate_slices);
+    borrowed.deinit(std.testing.allocator); // Must not attempt to free stack slices.
+
+    var owned = block: {
+        const owned_starts = try std.testing.allocator.dupe(usize, &.{ 0, 1 });
+        errdefer std.testing.allocator.free(owned_starts);
+        const owned_rows = try std.testing.allocator.dupe(RowId, &.{try RowId.init(0)});
+        errdefer std.testing.allocator.free(owned_rows);
+        const owned_values = try std.testing.allocator.dupe(f64, &.{3.0});
+        break :block try CscMatrix.initOwnedSlices(1, 1, owned_starts, owned_rows, owned_values);
+    };
+    defer owned.deinit(std.testing.allocator);
+    try std.testing.expect(owned.owns_separate_slices);
+
+    var copy = try owned.clone(std.testing.allocator);
+    defer copy.deinit(std.testing.allocator);
+    try std.testing.expect(copy.col_starts.ptr != owned.col_starts.ptr);
+    try std.testing.expect(copy.row_indices.ptr != owned.row_indices.ptr);
+    try std.testing.expect(copy.values.ptr != owned.values.ptr);
+}
+
 test "CSC column views and both multiplication directions" {
     // Matrix rows: [2,0,-1], [0,4,0], [3,0,5].
     var starts = [_]usize{ 0, 2, 3, 5 };
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(2), try RowId.init(1), try RowId.init(0), try RowId.init(2) };
     var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
-    const matrix: CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
     try matrix.validate();
     const second = try matrix.column(try ColId.init(1));
     try std.testing.expectEqual(@as(usize, 1), second.nnz());
@@ -452,19 +555,19 @@ test "CSC rejects malformed structure and values" {
     var bad_starts = [_]usize{ 1, 1 };
     var no_rows = [_]RowId{};
     var no_values = [_]f64{};
-    const bad_start: CscMatrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &bad_starts, .row_indices = &no_rows, .values = &no_values };
+    const bad_start = CscMatrix.initBorrowedAssumeValid(1, 1, &bad_starts, &no_rows, &no_values);
     try std.testing.expectError(error.InvalidColumnStarts, bad_start.validate());
 
     var starts = [_]usize{ 0, 2 };
     var duplicate_rows = [_]RowId{ try RowId.init(0), try RowId.init(0) };
     var values = [_]f64{ 1.0, 2.0 };
-    const duplicate: CscMatrix = .{ .num_rows = 2, .num_cols = 1, .col_starts = &starts, .row_indices = &duplicate_rows, .values = &values };
+    const duplicate = CscMatrix.initBorrowedAssumeValid(2, 1, &starts, &duplicate_rows, &values);
     try std.testing.expectError(error.IndicesNotStrictlyIncreasing, duplicate.validate());
 
     var one_start = [_]usize{ 0, 1 };
     var one_row = [_]RowId{try RowId.init(0)};
     var zero = [_]f64{0.0};
-    const explicit_zero: CscMatrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &one_start, .row_indices = &one_row, .values = &zero };
+    const explicit_zero = CscMatrix.initBorrowedAssumeValid(1, 1, &one_start, &one_row, &zero);
     try std.testing.expectError(error.ExplicitZero, explicit_zero.validate());
 }
 

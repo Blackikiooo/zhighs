@@ -9,6 +9,7 @@ const numerical_module = @import("numerical.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
+const matrix = @import("matrix");
 
 pub const Algorithm = enum { primal_revised, dual_revised };
 pub const SolvePhase = enum { phase_one, dual_feasibility_repair, phase_two };
@@ -1290,7 +1291,7 @@ test "engine solves a standard-form LP with primal revised simplex" {
         .col_upper = &[_]f64{ std.math.inf(f64), std.math.inf(f64) },
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{4},
-        .matrix = .{ .num_rows = 1, .num_cols = 2, .col_starts = &[_]usize{ 0, 1, 2 }, .row_indices = &rows, .values = &[_]f64{ 1, 2 } },
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &rows, &[_]f64{ 1, 2 }),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1316,7 +1317,7 @@ test "engine solves with a nonzero structural lower bound" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{5},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .maximize,
         .objective_offset = 0,
     };
@@ -1338,7 +1339,7 @@ test "engine flips a nonbasic variable to its finite upper bound" {
         .col_upper = &[_]f64{3},
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{10},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .maximize,
         .objective_offset = 0,
     };
@@ -1359,7 +1360,7 @@ test "engine pivots a variable downward from its upper bound" {
         .col_upper = &[_]f64{5},
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{std.math.inf(f64)},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1380,7 +1381,7 @@ test "engine normalizes and solves a ranged row" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{1},
         .row_upper = &[_]f64{5},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .maximize,
         .objective_offset = 0,
     };
@@ -1400,7 +1401,7 @@ test "Phase I restores feasibility for a greater-equal row" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{std.math.inf(f64)},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1420,7 +1421,7 @@ test "Phase I removes zero artificial basics after redundant equalities" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{ 1, 1 },
         .row_upper = &[_]f64{ 1, 1 },
-        .matrix = .{ .num_rows = 2, .num_cols = 1, .col_starts = &[_]usize{ 0, 2 }, .row_indices = &rows, .values = &[_]f64{ 1, 1 } },
+        .matrix = matrix.CscView.initAssumeValid(2, 1, &[_]usize{ 0, 2 }, &rows, &[_]f64{ 1, 1 }),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1442,7 +1443,7 @@ test "Phase I detects an infeasible LP" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{ 2, -std.math.inf(f64) },
         .row_upper = &[_]f64{ std.math.inf(f64), 1 },
-        .matrix = .{ .num_rows = 2, .num_cols = 1, .col_starts = &[_]usize{ 0, 2 }, .row_indices = &rows, .values = &[_]f64{ 1, 1 } },
+        .matrix = matrix.CscView.initAssumeValid(2, 1, &[_]usize{ 0, 2 }, &rows, &[_]f64{ 1, 1 }),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1460,7 +1461,7 @@ test "engine detects an unbounded improving structural column" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{1},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1479,7 +1480,7 @@ test "Phase I respects a zero iteration limit" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{std.math.inf(f64)},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1498,7 +1499,7 @@ test "deterministic work limit spans Phase I and Phase II" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{std.math.inf(f64)},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1528,7 +1529,7 @@ test "iteration callback can stop without allocating callback state" {
         .col_upper = &[_]f64{1},
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{1},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1560,7 +1561,7 @@ test "structured iteration logging obeys its deterministic interval" {
         .col_upper = &[_]f64{1},
         .row_lower = &[_]f64{-std.math.inf(f64)},
         .row_upper = &[_]f64{1},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1585,7 +1586,7 @@ test "engine rejects malformed borrowed problem dimensions" {
         .col_upper = &[_]f64{1},
         .row_lower = &.{},
         .row_upper = &.{},
-        .matrix = .{ .num_rows = 0, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1603,7 +1604,7 @@ test "engine honors an immediate time limit" {
         .col_upper = &[_]f64{1},
         .row_lower = &.{},
         .row_upper = &.{},
-        .matrix = .{ .num_rows = 0, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1621,7 +1622,7 @@ test "engine honors a caller-owned atomic interrupt flag" {
         .col_upper = &[_]f64{1},
         .row_lower = &.{},
         .row_upper = &.{},
-        .matrix = .{ .num_rows = 0, .num_cols = 1, .col_starts = &[_]usize{ 0, 0 }, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1641,7 +1642,7 @@ test "imported dual-feasible basis reoptimizes a changed RHS" {
         .col_upper = &[_]f64{std.math.inf(f64)},
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{std.math.inf(f64)},
-        .matrix = .{ .num_rows = 1, .num_cols = 1, .col_starts = &[_]usize{ 0, 1 }, .row_indices = &rows, .values = &[_]f64{1} },
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &rows, &[_]f64{1}),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
@@ -1689,7 +1690,7 @@ test "neither-feasible imported basis is repaired without a crash restart" {
         .col_upper = &[_]f64{ 1, std.math.inf(f64) },
         .row_lower = &[_]f64{2},
         .row_upper = &[_]f64{2},
-        .matrix = .{ .num_rows = 1, .num_cols = 2, .col_starts = &[_]usize{ 0, 1, 2 }, .row_indices = &rows, .values = &[_]f64{ 1, 1 } },
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &rows, &[_]f64{ 1, 1 }),
         .objective_sense = .minimize,
         .objective_offset = 0,
     };

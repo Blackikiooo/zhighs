@@ -12,15 +12,12 @@ const types = @import("types.zig");
 const Model = @import("model.zig").Model;
 const compile_model_module = @import("compile_model.zig");
 const compiled_model_view_module = @import("compiled_model_view.zig");
-const foundation = @import("foundation");
 const matrix = @import("matrix");
 const solver = @import("solver");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
 const Sense = types.Sense;
-const RowId = foundation.RowId;
-const CscMatrix = matrix.CscMatrix;
 const MatrixStore = matrix.MatrixStore;
 
 const SimplexCallbackBridge = struct {
@@ -65,13 +62,7 @@ pub fn optimize(self: *Model) ModelError!void {
             .col_upper = self.var_ub,
             .row_sense = self.constr_sense,
             .row_rhs = self.constr_rhs,
-            .matrix = .{
-                .num_rows = csc.num_rows,
-                .num_cols = csc.num_cols,
-                .col_starts = csc.col_starts,
-                .row_indices = csc.row_indices,
-                .values = csc.values,
-            },
+            .matrix = matrix.CscView.initAssumeValid(csc.num_rows, csc.num_cols, csc.col_starts, csc.row_indices, csc.values),
         }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.DimensionMismatch => error.InvalidArgument,
@@ -105,13 +96,7 @@ pub fn optimize(self: *Model) ModelError!void {
                 .col_upper = linear.col_upper,
                 .row_lower = linear.row_lower,
                 .row_upper = linear.row_upper,
-                .matrix = .{
-                    .num_rows = csc.num_rows,
-                    .num_cols = csc.num_cols,
-                    .col_starts = csc.col_starts,
-                    .row_indices = csc.row_indices,
-                    .values = csc.values,
-                },
+                .matrix = matrix.CscView.initAssumeValid(csc.num_rows, csc.num_cols, csc.col_starts, csc.row_indices, csc.values),
             });
         },
         .milp,
@@ -389,13 +374,7 @@ pub fn copy(self: *Model, new_name: []const u8) ModelError!Model {
 
     // Clone the matrix.
     const csc_src = self.matrix.csc();
-    const csc_copy = CscMatrix{
-        .num_rows = csc_src.num_rows,
-        .num_cols = csc_src.num_cols,
-        .col_starts = try self.allocator.dupe(usize, csc_src.col_starts),
-        .row_indices = try self.allocator.dupe(RowId, csc_src.row_indices),
-        .values = try self.allocator.dupe(f64, csc_src.values),
-    };
+    const csc_copy = try csc_src.clone(self.allocator);
     // Free the initial zero matrix from init().
     new.matrix.deinit(self.allocator);
     new.matrix = MatrixStore.initAssumeValid(csc_copy);

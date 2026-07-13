@@ -193,7 +193,7 @@ test "scaling apply and remove are reversible" {
     var starts = [_]usize{ 0, 2, 3 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1), try foundation.RowId.init(1) };
     var values = [_]f64{ 2.0, -3.0, 4.0 };
-    var matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    var matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
     const original = values;
     const factors: ScalingView = .{ .row = &.{ 2.0, 0.5 }, .col = &.{ 4.0, 0.25 } };
     try apply(&matrix, factors);
@@ -207,7 +207,7 @@ test "checked scaling failure does not partially modify values" {
     var starts = [_]usize{ 0, 2 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var values = [_]f64{ 2.0, 3.0 };
-    var matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 1, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    var matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 1, &starts, &rows, &values);
     try std.testing.expectError(error.NumericalOverflow, apply(&matrix, .{ .row = &.{ 1.0, 1e308 }, .col = &.{2.0} }));
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, matrix.values);
     try std.testing.expectError(error.InvalidScaling, apply(&matrix, .{ .row = &.{ 1.0, 0.0 }, .col = &.{1.0} }));
@@ -217,7 +217,7 @@ test "max equilibration handles empty rows and columns" {
     var starts = [_]usize{ 0, 2, 2 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2) };
     var values = [_]f64{ 2.0, -8.0 };
-    const matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 2, &starts, &rows, &values);
     var row_factors: [3]f64 = undefined;
     var col_factors: [2]f64 = undefined;
     try computeMaxEquilibration(matrix, &row_factors, &col_factors);
@@ -229,7 +229,7 @@ test "single row and column scaling are checked and transactional" {
     var starts = [_]usize{ 0, 2, 3 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1), try foundation.RowId.init(1) };
     var values = [_]f64{ 2.0, 3.0, 4.0 };
-    var matrix: csc.CscMatrix = .{ .num_rows = 2, .num_cols = 2, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    var matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
     try scaleColumn(&matrix, try foundation.ColId.init(0), 2.0);
     try std.testing.expectEqualSlices(f64, &.{ 4.0, 6.0, 4.0 }, matrix.values);
     try scaleRow(&matrix, try foundation.RowId.init(1), 0.5);
@@ -242,7 +242,7 @@ test "power-of-two scaling matches bounded nearest exponent policy" {
     var starts = [_]usize{ 0, 1, 2, 2 };
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var values = [_]f64{ 3.0, 0.01 };
-    var matrix: csc.CscMatrix = .{ .num_rows = 3, .num_cols = 3, .col_starts = &starts, .row_indices = &rows, .values = &values };
+    var matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
     var columns: [3]f64 = undefined;
     try computePowerOfTwoColumnFactors(matrix, 4, &columns);
     try std.testing.expectEqualSlices(f64, &.{ 0.25, 16.0, 1.0 }, &columns);

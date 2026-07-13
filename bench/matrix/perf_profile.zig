@@ -42,16 +42,25 @@ fn structuralHash(starts: []const usize, indices: anytype, values: []const f64) 
     for (starts) |s| {
         const v: u64 = @intCast(s);
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     for (indices) |idx| {
         const v: u64 = @intCast(idx.toUsize());
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     for (values) |v| {
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     return h;
 }
@@ -63,16 +72,25 @@ fn structuralHashCsr(row_starts: []const zhighs.HUInt, col_indices: anytype, val
     for (row_starts) |s| {
         const v: u64 = @intCast(s);
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     for (col_indices) |idx| {
         const v: u64 = @intCast(idx.toUsize());
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     for (values) |v| {
         const bytes = std.mem.asBytes(&v);
-        for (bytes) |b| { h ^= b; h *%= 0x100000001b3; }
+        for (bytes) |b| {
+            h ^= b;
+            h *%= 0x100000001b3;
+        }
     }
     return h;
 }
@@ -294,14 +312,7 @@ pub fn main(init: std.process.Init) !void {
             defer h.allocator.free(indices_copy);
             const values_copy = try h.allocator.dupe(f64, h.matrix.values);
             defer h.allocator.free(values_copy);
-            const matrix_copy = zhighs.matrix.CscMatrix{
-                .num_rows = h.matrix.num_rows,
-                .num_cols = h.matrix.num_cols,
-                .col_starts = starts_copy,
-                .row_indices = indices_copy,
-                .values = values_copy,
-                .compact_col_starts = null,
-            };
+            const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
             var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(h.allocator, matrix_copy, 0, h.csr_buffers.cursor);
             clobberPtr(cache.values.ptr);
             cache.deinit(h.allocator);
@@ -315,14 +326,7 @@ pub fn main(init: std.process.Init) !void {
             defer h.allocator.free(indices_copy);
             const values_copy = try h.allocator.dupe(f64, h.matrix.values);
             defer h.allocator.free(values_copy);
-            const matrix_copy = zhighs.matrix.CscMatrix{
-                .num_rows = h.matrix.num_rows,
-                .num_cols = h.matrix.num_cols,
-                .col_starts = starts_copy,
-                .row_indices = indices_copy,
-                .values = values_copy,
-                .compact_col_starts = null,
-            };
+            const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
             var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(h.allocator, matrix_copy, 0, h.csr_buffers.cursor);
             defer cache.deinit(h.allocator);
             result_struct_hash = structuralHashCsr(cache.row_starts, cache.col_indices, cache.values);
@@ -481,9 +485,22 @@ pub fn main(init: std.process.Init) !void {
             var idx: usize = 0;
             for (0..dimension) |col| {
                 const col_id = zhighs.ColId.fromUsizeAssumeValid(col);
-                if (col != 0) { prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col - 1); prep_cols[idx] = col_id; prep_vals[idx] = -1.0; idx += 1; }
-                prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col); prep_cols[idx] = col_id; prep_vals[idx] = 4.0; idx += 1;
-                if (col + 1 < dimension) { prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col + 1); prep_cols[idx] = col_id; prep_vals[idx] = -1.0; idx += 1; }
+                if (col != 0) {
+                    prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col - 1);
+                    prep_cols[idx] = col_id;
+                    prep_vals[idx] = -1.0;
+                    idx += 1;
+                }
+                prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col);
+                prep_cols[idx] = col_id;
+                prep_vals[idx] = 4.0;
+                idx += 1;
+                if (col + 1 < dimension) {
+                    prep_rows[idx] = zhighs.RowId.fromUsizeAssumeValid(col + 1);
+                    prep_cols[idx] = col_id;
+                    prep_vals[idx] = -1.0;
+                    idx += 1;
+                }
             }
         }
 

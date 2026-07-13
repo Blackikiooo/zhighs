@@ -64,7 +64,7 @@ test "ProblemView validates borrowed dimensions" {
         .col_upper = &.{},
         .row_lower = &.{},
         .row_upper = &.{},
-        .matrix = .{ .num_rows = 0, .num_cols = 0, .col_starts = &[_]usize{0}, .row_indices = &.{}, .values = &.{} },
+        .matrix = matrix.CscView.initAssumeValid(0, 0, &[_]usize{0}, &.{}, &.{}),
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };

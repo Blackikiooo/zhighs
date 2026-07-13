@@ -50,6 +50,18 @@ pub fn SparseVectorView(comptime Id: type) type {
         values: []const f64,
 
         const Self = @This();
+
+        /// Creates and validates a borrowed canonical sparse-vector view.
+        pub fn init(dimension: usize, indices: []const Id, values: []const f64) SparseVectorError!Self {
+            const result = initAssumeValid(dimension, indices, values);
+            try result.validate();
+            return result;
+        }
+
+        /// Trusted constructor for slices already known to be canonical.
+        pub inline fn initAssumeValid(dimension: usize, indices: []const Id, values: []const f64) Self {
+            return .{ .dimension = dimension, .indices = indices, .values = values };
+        }
         /// Computes the number of nonzero values in the vector.
         pub inline fn nnz(self: Self) usize {
             return self.indices.len;
@@ -159,6 +171,18 @@ pub fn SparseVector(comptime Id: type) type {
             };
         }
 
+        /// Takes ownership of two independently allocated canonical streams.
+        pub fn initOwnedSlices(dimension: usize, indices: []Id, values: []f64) SparseVectorError!Self {
+            const result = initOwnedSlicesAssumeValid(dimension, indices, values);
+            try result.validate();
+            return result;
+        }
+
+        /// Trusted ownership-transfer constructor for independent streams.
+        pub inline fn initOwnedSlicesAssumeValid(dimension: usize, indices: []Id, values: []f64) Self {
+            return .{ .dimension = dimension, .indices = indices, .values = values };
+        }
+
         /// Allocates one aligned block containing contiguous index and value
         /// streams. Contents are uninitialized until filled by the caller.
         pub fn initPackedUninitialized(allocator: std.mem.Allocator, dimension: usize, nonzeros: usize) (std.mem.Allocator.Error || SparseVectorError)!Self {
@@ -186,11 +210,7 @@ pub fn SparseVector(comptime Id: type) type {
         }
 
         pub inline fn view(self: *const Self) View {
-            return .{
-                .dimension = self.dimension,
-                .indices = self.indices,
-                .values = self.values,
-            };
+            return View.initAssumeValid(self.dimension, self.indices, self.values);
         }
 
         pub fn validate(self: *const Self) SparseVectorError!void {
@@ -207,11 +227,7 @@ test "canonical RowId sparse-vector view validates and computes" {
         RowId.fromUsizeAssumeValid(3),
     };
     const values = [_]f64{ 2.0, -4.0 };
-    const vector: View = .{
-        .dimension = 5,
-        .indices = &indices,
-        .values = &values,
-    };
+    const vector = View.initAssumeValid(5, &indices, &values);
 
     try vector.validate();
     try std.testing.expectEqual(@as(usize, 2), vector.nnz());
@@ -233,11 +249,7 @@ test "canonical ColId sparse-vector view is supported" {
     const ColId = Foundation.ColId;
     const indices = [_]ColId{ColId.fromUsizeAssumeValid(2)};
     const values = [_]f64{7.0};
-    const vector: SparseVectorView(ColId) = .{
-        .dimension = 4,
-        .indices = &indices,
-        .values = &values,
-    };
+    const vector = SparseVectorView(ColId).initAssumeValid(4, &indices, &values);
 
     try vector.validate();
     try std.testing.expectEqual(@as(f64, 21.0), try vector.dotDense(&.{ 0.0, 0.0, 3.0, 0.0 }));
@@ -251,61 +263,33 @@ test "sparse-vector validation rejects broken invariants" {
 
     try std.testing.expectError(
         SparseVectorError.LengthMismatch,
-        (SparseVectorView(RowId){
-            .dimension = 3,
-            .indices = &.{ id0, id1 },
-            .values = &.{1.0},
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(3, &.{ id0, id1 }, &.{1.0}).validate(),
     );
     try std.testing.expectError(
         SparseVectorError.IndicesNotStrictlyIncreasing,
-        (SparseVectorView(RowId){
-            .dimension = 3,
-            .indices = &.{ id1, id0 },
-            .values = &.{ 1.0, 2.0 },
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(3, &.{ id1, id0 }, &.{ 1.0, 2.0 }).validate(),
     );
     try std.testing.expectError(
         SparseVectorError.IndicesNotStrictlyIncreasing,
-        (SparseVectorView(RowId){
-            .dimension = 3,
-            .indices = &.{ id1, id1 },
-            .values = &.{ 1.0, 2.0 },
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(3, &.{ id1, id1 }, &.{ 1.0, 2.0 }).validate(),
     );
     try std.testing.expectError(
         SparseVectorError.IndexOutOfBounds,
-        (SparseVectorView(RowId){
-            .dimension = 2,
-            .indices = &.{id2},
-            .values = &.{1.0},
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(2, &.{id2}, &.{1.0}).validate(),
     );
     try std.testing.expectError(
         SparseVectorError.ExplicitZero,
-        (SparseVectorView(RowId){
-            .dimension = 3,
-            .indices = &.{id0},
-            .values = &.{0.0},
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(3, &.{id0}, &.{0.0}).validate(),
     );
     try std.testing.expectError(
         SparseVectorError.NonFiniteValue,
-        (SparseVectorView(RowId){
-            .dimension = 3,
-            .indices = &.{id0},
-            .values = &.{std.math.nan(f64)},
-        }).validate(),
+        SparseVectorView(RowId).initAssumeValid(3, &.{id0}, &.{std.math.nan(f64)}).validate(),
     );
 }
 
 test "checked dense operations reject dimension mismatch" {
     const RowId = Foundation.RowId;
-    const vector: SparseVectorView(RowId) = .{
-        .dimension = 2,
-        .indices = &.{RowId.fromUsizeAssumeValid(0)},
-        .values = &.{1.0},
-    };
+    const vector = SparseVectorView(RowId).initAssumeValid(2, &.{RowId.fromUsizeAssumeValid(0)}, &.{1.0});
 
     try std.testing.expectError(
         SparseVectorError.DimensionMismatch,

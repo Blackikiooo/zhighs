@@ -42,9 +42,7 @@ const HessianFormat = hessian_module.HessianFormat;
 const QuadraticConstraint = quadratic_model_module.QuadraticConstraint;
 const QuadraticModel = quadratic_model_module.QuadraticModel;
 const CompiledModel = compiled_model_module.CompiledModel;
-const CscMatrix = matrix.CscMatrix;
 const MatrixStore = matrix.MatrixStore;
-const RowId = foundation.RowId;
 const ColId = foundation.ColId;
 
 // ── CompileError ─────────────────────────────────────────────────────────────
@@ -148,21 +146,8 @@ pub fn compileModel(allocator: std.mem.Allocator, model: *const Model) (CompileE
         // ── Copy the constraint matrix ─────────────────────────────────────
         const src_csc = model.matrix.csc();
 
-        const csc_col_starts = try allocator.dupe(usize, src_csc.col_starts);
-        errdefer allocator.free(csc_col_starts);
-        const csc_row_indices = try allocator.dupe(RowId, src_csc.row_indices);
-        errdefer allocator.free(csc_row_indices);
-        const csc_values = try allocator.dupe(f64, src_csc.values);
-        errdefer allocator.free(csc_values);
-
         // Build CscMatrix + MatrixStore.
-        var csc_buf = CscMatrix{
-            .num_rows = src_csc.num_rows,
-            .num_cols = src_csc.num_cols,
-            .col_starts = csc_col_starts,
-            .row_indices = csc_row_indices,
-            .values = csc_values,
-        };
+        var csc_buf = try src_csc.clone(allocator);
         _ = &csc_buf;
         errdefer csc_buf.deinit(allocator);
 
