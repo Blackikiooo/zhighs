@@ -10,12 +10,53 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const matrix_module = b.createModule(.{
+        .root_source_file = b.path("src/matrix/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "foundation", .module = foundation.module }},
+    });
+    const model_module = b.createModule(.{
+        .root_source_file = b.path("src/model/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+        },
+    });
+    const lp_module = b.createModule(.{
+        .root_source_file = b.path("src/lp/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "model", .module = model_module },
+        },
+    });
+    const solver_module = b.createModule(.{
+        .root_source_file = b.path("src/solver/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "model", .module = model_module },
+            .{ .name = "lp", .module = lp_module },
+        },
+    });
+
     const mod = b.addModule("zhighs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     mod.addImport("foundation", foundation.module);
+    mod.addImport("matrix", matrix_module);
+    mod.addImport("model", model_module);
+    mod.addImport("lp", lp_module);
+    mod.addImport("solver", solver_module);
 
     const exe = b.addExecutable(.{
         .name = "zhighs",
@@ -76,17 +117,6 @@ pub fn build(b: *std.Build) void {
     const run_hcd_bench = b.addRunArtifact(hcd_bench);
     const hcd_bench_step = b.step("bench-hcd", "Run the HCD microbenchmark");
     hcd_bench_step.dependOn(&run_hcd_bench.step);
-
-    const matrix_module = b.createModule(.{
-        .root_source_file = b.path("src/matrix/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "foundation", .module = foundation.module },
-        },
-    });
-    // Make matrix available to model files (used via @import("matrix")).
-    mod.addImport("matrix", matrix_module);
 
     const matrix_bench_module = b.createModule(.{
         .root_source_file = b.path("bench/matrix/root.zig"),
@@ -155,16 +185,6 @@ pub fn build(b: *std.Build) void {
     // ── Model core test (no API/solver/presolve dependency) ─────
     // Tests the solver-internal model IR layer independently of the
     // Gurobi-style user Model, API bindings, presolve, and simplex.
-
-    const model_module = b.createModule(.{
-        .root_source_file = b.path("src/model/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "foundation", .module = foundation.module },
-            .{ .name = "matrix", .module = matrix_module },
-        },
-    });
 
     const model_test_root = b.createModule(.{
         .root_source_file = b.path("test/model/root.zig"),

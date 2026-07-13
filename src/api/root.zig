@@ -35,7 +35,7 @@
 //! ```
 
 const std = @import("std");
-const model_root = @import("../model/root.zig");
+const model_root = @import("model");
 
 pub const Env = model_root.Env;
 pub const Model = model_root.Model;
