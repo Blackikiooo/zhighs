@@ -159,6 +159,22 @@ pub fn build(b: *std.Build) void {
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);
 
+    const dense_lu_bench = b.addExecutable(.{
+        .name = "dense-lu-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/dense_lu_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = matrix_bench_module }},
+        }),
+    });
+    const run_dense_lu_bench = b.addRunArtifact(dense_lu_bench);
+    const dense_lu_bench_step = b.step("bench-dense-lu", "Run multi-dimension DenseLU FTRAN/BTRAN benchmarks");
+    dense_lu_bench_step.dependOn(&run_dense_lu_bench.step);
+    const install_dense_lu_bench = b.addInstallArtifact(dense_lu_bench, .{});
+    const build_dense_lu_bench_step = b.step("build-bench-dense-lu", "Build the DenseLU benchmark for perf stat");
+    build_dense_lu_bench_step.dependOn(&install_dense_lu_bench.step);
+
     const perf_profile = b.addExecutable(.{
         .name = "perf-profile",
         .root_module = b.createModule(.{

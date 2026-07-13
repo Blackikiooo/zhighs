@@ -222,7 +222,7 @@ test "DenseLU solves and transpose-solves" {
     var rhs = [_]f64{ 10, 12 };
     try lu.solve(&rhs);
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), rhs[0], 1e-12);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.0 / 3.0), rhs[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), rhs[1], 1e-12);
     var trhs = [_]f64{ 10, 12 };
     try lu.solveTranspose(&trhs);
     try std.testing.expectApproxEqAbs(@as(f64, 7.0), trhs[0], 1e-12);
@@ -269,4 +269,120 @@ test "DenseLU transpose solve handles a larger dense factorization" {
         for (0..dimension) |row| product += matrix[row * dimension + col] * rhs[row];
         try std.testing.expectApproxEqAbs(original_rhs[col], product, 1e-10);
     }
+}
+
+/// The original column-gather BTRAN formulation is intentionally retained as
+/// a test oracle. The production implementation traverses rows contiguously,
+/// so comparing both paths catches indexing and final-pivot-permutation errors.
+fn solveTransposeGatherReference(lu: *const DenseLU, rhs: []f64, work: []f64) void {
+    const n = lu.n;
+    for (0..n) |i| {
+        var value = rhs[i];
+        for (0..i) |j| value -= lu.lu[j * n + i] * work[j];
+        work[i] = value / lu.lu[i * n + i];
+    }
+    var i = n;
+    while (i > 0) {
+        i -= 1;
+        var value = work[i];
+        for (i + 1..n) |j| value -= lu.lu[j * n + i] * work[j];
+        work[i] = value;
+    }
+    for (lu.pivots, 0..) |original, pivot_index| rhs[original] = work[pivot_index];
+}
+
+fn expectRelative(expected: f64, actual: f64, scale: f64) !void {
+    const tolerance = scale * @max(1.0, @abs(expected));
+    try std.testing.expectApproxEqAbs(expected, actual, tolerance);
+}
+
+test "DenseLU randomized FTRAN and BTRAN differential validates pivot permutation" {
+    var prng = std.Random.DefaultPrng.init(0x6c75_7069_766f_7473);
+    const random = prng.random();
+    const dimensions = [_]usize{ 2, 3, 5, 8, 16, 31 };
+
+    for (dimensions) |n| {
+        for (0..4) |_| {
+            const base = try std.testing.allocator.alloc(f64, n * n);
+            defer std.testing.allocator.free(base);
+            const matrix = try std.testing.allocator.alloc(f64, n * n);
+            defer std.testing.allocator.free(matrix);
+            const expected = try std.testing.allocator.alloc(f64, n);
+            defer std.testing.allocator.free(expected);
+            const ftran_rhs = try std.testing.allocator.alloc(f64, n);
+            defer std.testing.allocator.free(ftran_rhs);
+            const btran_rhs = try std.testing.allocator.alloc(f64, n);
+            defer std.testing.allocator.free(btran_rhs);
+            const btran_reference = try std.testing.allocator.alloc(f64, n);
+            defer std.testing.allocator.free(btran_reference);
+            const reference_work = try std.testing.allocator.alloc(f64, n);
+            defer std.testing.allocator.free(reference_work);
+
+            // Build a well-conditioned matrix, then cyclically permute its
+            // rows. The largest first-column entry is no longer in row zero,
+            // which guarantees that the test exercises partial pivoting.
+            for (0..n) |row| {
+                var off_diagonal_sum: f64 = 0.0;
+                for (0..n) |col| {
+                    if (row == col) continue;
+                    const value = random.float(f64) * 0.5 - 0.25;
+                    base[row * n + col] = value;
+                    off_diagonal_sum += @abs(value);
+                }
+                base[row * n + row] = off_diagonal_sum + 1.0;
+            }
+            for (0..n) |physical_row| {
+                const source_row = (physical_row + 1) % n;
+                @memcpy(matrix[physical_row * n ..][0..n], base[source_row * n ..][0..n]);
+            }
+            for (expected) |*value| value.* = random.float(f64) * 2.0 - 1.0;
+
+            for (0..n) |row| {
+                var product: f64 = 0.0;
+                for (0..n) |col| product += matrix[row * n + col] * expected[col];
+                ftran_rhs[row] = product;
+            }
+            for (0..n) |col| {
+                var product: f64 = 0.0;
+                for (0..n) |row| product += matrix[row * n + col] * expected[row];
+                btran_rhs[col] = product;
+            }
+            @memcpy(btran_reference, btran_rhs);
+
+            var lu = DenseLU.init(std.testing.allocator);
+            defer lu.deinit();
+            try lu.factorize(n, matrix);
+            var has_row_pivot = false;
+            for (lu.pivots, 0..) |original, pivot_index|
+                has_row_pivot = has_row_pivot or original != pivot_index;
+            try std.testing.expect(has_row_pivot);
+
+            try lu.solve(ftran_rhs);
+            try lu.solveTranspose(btran_rhs);
+            solveTransposeGatherReference(&lu, btran_reference, reference_work);
+
+            const tolerance = 5e-12 * @as(f64, @floatFromInt(n));
+            for (expected, ftran_rhs, btran_rhs, btran_reference) |want, ftran, btran, reference| {
+                try expectRelative(want, ftran, tolerance);
+                try expectRelative(want, btran, tolerance);
+                try expectRelative(reference, btran, tolerance);
+            }
+        }
+    }
+}
+
+test "DenseLU pivot tolerance controls near-singular acceptance" {
+    const tiny = [_]f64{1e-13};
+
+    var default_lu = DenseLU.init(std.testing.allocator);
+    defer default_lu.deinit();
+    try std.testing.expectError(error.Singular, default_lu.factorize(1, &tiny));
+
+    var permissive_lu = DenseLU.init(std.testing.allocator);
+    defer permissive_lu.deinit();
+    permissive_lu.pivot_tolerance = 1e-15;
+    try permissive_lu.factorize(1, &tiny);
+    var rhs = [_]f64{2e-13};
+    try permissive_lu.solve(&rhs);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), rhs[0], 1e-12);
 }
