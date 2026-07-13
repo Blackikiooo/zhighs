@@ -187,16 +187,31 @@ pub const DenseLU = struct {
     pub fn solveTranspose(self: *DenseLU, rhs: []f64) DenseLuError!void {
         if (rhs.len != self.n) return error.DimensionMismatch;
         @memcpy(self.work, rhs);
+
+        // Solve U^T z = rhs by scattering each completed component through
+        // one contiguous row of U.  The equivalent gather formulation reads
+        // lu[j * n + i] down a column of row-major storage and becomes
+        // cache/TLB bound once the factorization no longer fits in cache.
         for (0..self.n) |i| {
-            for (0..i) |j| self.work[i] -= self.lu[j * self.n + i] * self.work[j];
-            self.work[i] /= self.lu[i * self.n + i];
+            const row = self.lu[i * self.n ..][0..self.n];
+            const solved = self.work[i] / row[i];
+            self.work[i] = solved;
+            for (self.work[i + 1 ..], row[i + 1 ..]) |*pending, coefficient|
+                pending.* -= coefficient * solved;
         }
-        var row = self.n;
-        while (row > 0) {
-            row -= 1;
-            for (row + 1..self.n) |j| self.work[row] -= self.lu[j * self.n + row] * self.work[j];
+
+        // Solve L^T y = z in reverse order.  L has an implicit unit diagonal;
+        // scattering y[row] into earlier entries again traverses one
+        // contiguous row instead of gathering a strided column.
+        var i = self.n;
+        while (i > 0) {
+            i -= 1;
+            const solved = self.work[i];
+            const row = self.lu[i * self.n ..][0..i];
+            for (self.work[0..i], row) |*pending, coefficient|
+                pending.* -= coefficient * solved;
         }
-        for (self.pivots, 0..) |original, i| rhs[original] = self.work[i];
+        for (self.pivots, 0..) |original, pivot_index| rhs[original] = self.work[pivot_index];
     }
 };
 
@@ -225,4 +240,33 @@ test "DenseLU owned factorization avoids matrix copy" {
     try lu.solve(&rhs);
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), rhs[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), rhs[1], 1e-12);
+}
+
+test "DenseLU transpose solve handles a larger dense factorization" {
+    const dimension = 17;
+    var matrix: [dimension * dimension]f64 = undefined;
+    for (0..dimension) |row| {
+        for (0..dimension) |col| {
+            const pattern: i32 = @intCast((row * 17 + col * 13) % 11);
+            matrix[row * dimension + col] = if (row == col)
+                20.0 + @as(f64, @floatFromInt(row))
+            else
+                @as(f64, @floatFromInt(pattern - 5)) * 0.1;
+        }
+    }
+
+    var lu = DenseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    try lu.factorize(dimension, &matrix);
+
+    var rhs: [dimension]f64 = undefined;
+    for (&rhs, 0..) |*value, i| value.* = @as(f64, @floatFromInt(i + 1)) * 0.25 - 1.0;
+    const original_rhs = rhs;
+    try lu.solveTranspose(&rhs);
+
+    for (0..dimension) |col| {
+        var product: f64 = 0.0;
+        for (0..dimension) |row| product += matrix[row * dimension + col] * rhs[row];
+        try std.testing.expectApproxEqAbs(original_rhs[col], product, 1e-10);
+    }
 }

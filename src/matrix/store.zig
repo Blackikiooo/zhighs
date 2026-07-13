@@ -5,6 +5,7 @@
 //! they do not own or mutate the authoritative CSC storage.
 
 const std = @import("std");
+const foundation = @import("foundation");
 const csc_module = @import("csc.zig");
 const csr_module = @import("csr_view.zig");
 
@@ -18,6 +19,10 @@ pub const MatrixStore = struct {
     matrix_storage: csc_module.CscMatrix,
     matrix_revision: u64 = 0,
     csr_cache: ?csr_module.CsrCache = null,
+    /// High-water-mark workspace reused by CSC-to-CSR rebuilds. Structural
+    /// matrix replacement invalidates the derived cache but retains this
+    /// allocation for the next revision.
+    csr_cursor_scratch: []foundation.HUInt = &.{},
 
     const Self = @This();
 
@@ -35,6 +40,7 @@ pub const MatrixStore = struct {
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.csr_cache) |*cache| cache.deinit(allocator);
+        allocator.free(self.csr_cursor_scratch);
         self.matrix_storage.deinit(allocator);
         self.* = undefined;
     }
@@ -61,10 +67,17 @@ pub const MatrixStore = struct {
 
         // Build first, then release the stale cache. If allocation fails, the
         // authoritative matrix and any old cache remain fully valid.
-        var replacement = try csr_module.CsrCache.buildAssumeValid(
+        if (self.csr_cursor_scratch.len < self.matrix_storage.num_rows) {
+            self.csr_cursor_scratch = try allocator.realloc(
+                self.csr_cursor_scratch,
+                self.matrix_storage.num_rows,
+            );
+        }
+        var replacement = try csr_module.CsrCache.buildWithScratchAssumeValid(
             allocator,
             self.matrix_storage,
             self.matrix_revision,
+            self.csr_cursor_scratch,
         );
         errdefer replacement.deinit(allocator);
 
@@ -123,6 +136,15 @@ test "matrix replacement increments revision and rebuilds CSR" {
     try std.testing.expectEqual(@as(usize, 3), rebuilt.num_rows);
     try std.testing.expectEqual(@as(usize, 2), rebuilt.num_cols);
     try std.testing.expect(model.csr_cache.?.isCurrent(1));
+    try std.testing.expectEqual(@as(usize, 3), model.csr_cursor_scratch.len);
+
+    const scratch_ptr = model.csr_cursor_scratch.ptr;
+    var smaller = try csc_module.CscMatrix.initZero(std.testing.allocator, 1, 1);
+    try model.replaceMatrixAssumeValid(std.testing.allocator, smaller);
+    smaller = undefined;
+    _ = try model.csr(std.testing.allocator);
+    try std.testing.expectEqual(scratch_ptr, model.csr_cursor_scratch.ptr);
+    try std.testing.expectEqual(@as(usize, 3), model.csr_cursor_scratch.len);
 }
 
 test "revision overflow rejects replacement without changing ownership" {
