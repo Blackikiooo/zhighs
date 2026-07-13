@@ -52,7 +52,9 @@ pub fn getIntAttr(self: Model, attr: Attr) ModelError!i64 {
 pub fn setIntAttr(self: *Model, attr: Attr, value: i64) ModelError!void {
     switch (attr) {
         .model_sense => {
-            self.sense = try ObjectiveSense.fromModelSenseValue(@intCast(value));
+            const sense = try ObjectiveSense.fromModelSenseValue(@intCast(value));
+            try markModelDataModified(self, .objective);
+            self.sense = sense;
         },
         else => return error.InvalidAttribute,
     }
@@ -72,6 +74,7 @@ pub fn getDblAttr(self: Model, attr: Attr) ModelError!f64 {
 pub fn setDblAttr(self: *Model, attr: Attr, value: f64) ModelError!void {
     switch (attr) {
         .obj_con => {
+            try markModelDataModified(self, .objective);
             self.obj_con = value;
         },
         else => return error.InvalidAttribute,
@@ -188,18 +191,22 @@ pub fn setDblAttrElement(self: *Model, attr: Attr, element: usize, value: f64) M
     switch (attr) {
         .lb => {
             if (element >= self.var_lb.len) return error.IndexOutOfRange;
+            try markModelDataModified(self, .bounds);
             self.var_lb[element] = value;
         },
         .ub => {
             if (element >= self.var_ub.len) return error.IndexOutOfRange;
+            try markModelDataModified(self, .bounds);
             self.var_ub[element] = value;
         },
         .obj => {
             if (element >= self.var_obj.len) return error.IndexOutOfRange;
+            try markModelDataModified(self, .objective);
             self.var_obj[element] = value;
         },
         .rhs => {
             if (element >= self.constr_rhs.len) return error.IndexOutOfRange;
+            try markModelDataModified(self, .bounds);
             self.constr_rhs[element] = value;
         },
         .start => {
@@ -238,11 +245,15 @@ pub fn setCharAttrElement(self: *Model, attr: Attr, element: usize, value: u8) M
     switch (attr) {
         .v_type => {
             if (element >= self.var_type.len) return error.IndexOutOfRange;
-            self.var_type[element] = try VarType.fromCode(value);
+            const var_type = try VarType.fromCode(value);
+            try markModelDataModified(self, .structure);
+            self.var_type[element] = var_type;
         },
         .sense => {
             if (element >= self.constr_sense.len) return error.IndexOutOfRange;
-            self.constr_sense[element] = try Sense.fromCode(value);
+            const sense = try Sense.fromCode(value);
+            try markModelDataModified(self, .bounds);
+            self.constr_sense[element] = sense;
         },
         else => return error.InvalidAttribute,
     }
@@ -414,4 +425,9 @@ fn countVarType(self: Model, vt: VarType) usize {
         if (t == vt) count += 1;
     }
     return count;
+}
+
+fn markModelDataModified(self: *Model, kind: @import("revisions.zig").RevisionKind) ModelError!void {
+    try self.markRevision(kind);
+    self.revision = std.math.add(u64, self.revision, 1) catch return error.RevisionOverflow;
 }

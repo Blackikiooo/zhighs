@@ -60,7 +60,7 @@ pub const Sense = enum(u8) {
 ///
 /// The numeric encoding (1 = minimise, -1 = maximise) matches the convention
 /// used by several mature solver APIs, making interop straightforward.
-pub const ObjectiveSense = enum(i8) {
+pub const ObjectiveSense = enum(i2) {
     minimize = 1,
     maximize = -1,
 
@@ -99,6 +99,7 @@ pub const Status = enum(u8) {
     numeric = 11,
     in_progress = 12,
     user_obj_limit = 13,
+    work_limit = 14,
 
     pub const DEFAULT: Status = .loaded;
 
@@ -119,6 +120,7 @@ pub const Status = enum(u8) {
             .numeric => "NUMERIC",
             .in_progress => "IN_PROGRESS",
             .user_obj_limit => "USER_OBJ_LIMIT",
+            .work_limit => "WORK_LIMIT",
         };
     }
 };

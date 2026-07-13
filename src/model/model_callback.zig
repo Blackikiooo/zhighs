@@ -24,7 +24,7 @@ pub fn getCallbackFunc(self: Model, usrstate: *?*anyopaque) ?CallbackFunc {
 }
 
 pub fn terminate(self: *Model) void {
-    self.interrupted = true;
+    self.interrupted.store(true, .release);
 }
 
 pub fn cbGet(self: Model, what: i32, result: *anyopaque) ModelError!void {

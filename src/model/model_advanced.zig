@@ -12,6 +12,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Model = @import("model.zig").Model;
 const Env = @import("env.zig").Env;
+const solver = @import("solver");
 
 const ModelError = types.ModelError;
 const FeasRelaxType = types.FeasRelaxType;
@@ -130,7 +131,68 @@ pub fn fixModel(self: *Model) ModelError!void {
 /// Retrieve the basis head
 pub fn getBasisHead(self: Model, head: []usize) ModelError!void {
     if (head.len < self.num_constrs) return error.InvalidArgument;
-    return error.FeatureNotAvailable;
+    if (!self.basis_available or self.basis_head.len != self.num_constrs) return error.NotOptimized;
+    for (self.basis_head, head[0..self.num_constrs]) |column, *output| output.* = column;
+}
+
+/// Export an owning basis snapshot. The returned snapshot is independent of
+/// the model and must be deinitialized by the caller.
+pub fn exportBasisSnapshot(self: Model, allocator: std.mem.Allocator) ModelError!solver.LpBasisSnapshot {
+    if (self.has_pending or !self.basis_available or self.vbasis.len != self.num_vars or self.cbasis.len != self.num_constrs or
+        self.basis_head.len != self.num_constrs)
+        return error.NotOptimized;
+    return solver.LpBasisSnapshot.initFromView(allocator, .{
+        .structural_status = basisStatusView(self.vbasis),
+        .logical_status = basisStatusView(self.cbasis),
+        .basic_index = self.basis_head,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidArgument,
+    };
+}
+
+/// Import and own a validated basis description for the next optimization.
+/// Caller memory is copied and may be released immediately after this call.
+pub fn importBasisView(self: *Model, view: solver.LpBasisView) ModelError!void {
+    try self.updateModel();
+    view.validate(self.num_vars, self.num_constrs) catch return error.InvalidArgument;
+    const vbasis = self.allocator.alloc(types.BasisStatus, self.num_vars) catch return error.OutOfMemory;
+    errdefer self.allocator.free(vbasis);
+    const cbasis = self.allocator.alloc(types.BasisStatus, self.num_constrs) catch return error.OutOfMemory;
+    errdefer self.allocator.free(cbasis);
+    const basis_head = self.allocator.dupe(u32, view.basic_index) catch return error.OutOfMemory;
+    errdefer self.allocator.free(basis_head);
+    for (vbasis, view.structural_status) |*output, status| output.* = publicBasisStatus(status);
+    for (cbasis, view.logical_status) |*output, status| output.* = publicBasisStatus(status);
+
+    self.allocator.free(self.vbasis);
+    self.allocator.free(self.cbasis);
+    self.allocator.free(self.basis_head);
+    self.vbasis = vbasis;
+    self.cbasis = cbasis;
+    self.basis_head = basis_head;
+    self.basis_available = true;
+}
+
+fn basisStatusView(status: []const types.BasisStatus) []const solver.LpBasisStatus {
+    comptime {
+        std.debug.assert(@sizeOf(types.BasisStatus) == @sizeOf(solver.LpBasisStatus));
+        std.debug.assert(@intFromEnum(types.BasisStatus.basic) == @intFromEnum(solver.LpBasisStatus.basic));
+        std.debug.assert(@intFromEnum(types.BasisStatus.non_basic_lower) == @intFromEnum(solver.LpBasisStatus.at_lower));
+        std.debug.assert(@intFromEnum(types.BasisStatus.non_basic_upper) == @intFromEnum(solver.LpBasisStatus.at_upper));
+        std.debug.assert(@intFromEnum(types.BasisStatus.super_non_basic) == @intFromEnum(solver.LpBasisStatus.superbasic));
+    }
+    const pointer: [*]const solver.LpBasisStatus = @ptrCast(status.ptr);
+    return pointer[0..status.len];
+}
+
+fn publicBasisStatus(status: solver.LpBasisStatus) types.BasisStatus {
+    return switch (status) {
+        .basic => .basic,
+        .at_lower, .fixed => .non_basic_lower,
+        .at_upper => .non_basic_upper,
+        .superbasic, .free => .super_non_basic,
+    };
 }
 
 // ══════════════════════════════════════════════════════════════════════════

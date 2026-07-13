@@ -30,6 +30,9 @@ const std = @import("std");
 const types = @import("types.zig");
 const env_module = @import("env.zig");
 const Attr = @import("attrs.zig").Attr;
+const compiled_model_view = @import("compiled_model_view.zig");
+const revision_module = @import("revisions.zig");
+const solver = @import("solver");
 
 // Foundation types (strongly-typed indices, etc.)
 const foundation = @import("foundation");
@@ -108,6 +111,10 @@ pub const Model = struct {
     sense: ObjectiveSense = .minimize,
     status: Status = .loaded,
     revision: u64 = 0,
+    revisions: revision_module.RevisionSet = .{},
+    // Derived canonical row bounds reused by zero-copy LP solve views.
+    compiled_view_cache: compiled_model_view.CompiledModelViewCache = .{},
+    lp_session: solver.LpSolveSession,
 
     // ── Solutions (populated after `optimize`) ─────────────────────────
     solution: []f64 = &.{}, // X
@@ -125,6 +132,9 @@ pub const Model = struct {
     // ── Basis ──────────────────────────────────────────────────────────
     vbasis: []BasisStatus = &.{},
     cbasis: []BasisStatus = &.{},
+    /// Global structural/logical column occupying every basis row.
+    basis_head: []u32 = &.{},
+    basis_available: bool = false,
 
     // ── Start vectors (warm-start / MIP start) ─────────────────────────
     mip_start: []f64 = &.{}, // MIP start (Start attribute)
@@ -176,9 +186,13 @@ pub const Model = struct {
     pwlobj_ydata: []f64 = &.{}, // packed y values
 
     // ── Callback / interrupt state ─────────────────────────────────────
-    interrupted: bool = false,
+    interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     const Self = @This();
+
+    pub fn markRevision(self: *Self, kind: revision_module.RevisionKind) ModelError!void {
+        self.revisions.bump(kind) catch return error.RevisionOverflow;
+    }
 
     // ── Construction / destruction ─────────────────────────────────────
 
@@ -189,6 +203,7 @@ pub const Model = struct {
             .env = env,
             .name = "",
             .matrix = undefined,
+            .lp_session = solver.LpSolveSession.init(allocator),
         };
         self.name = try allocator.dupe(u8, name);
         const empty = CscMatrix.initZero(allocator, 0, 0) catch return error.OutOfMemory;
@@ -219,12 +234,15 @@ pub const Model = struct {
         alloc.free(self.q_row);
         alloc.free(self.q_col);
         alloc.free(self.q_val);
+        self.compiled_view_cache.deinit(alloc);
+        self.lp_session.deinit();
         alloc.free(self.solution);
         alloc.free(self.reduced_cost);
         alloc.free(self.slack);
         alloc.free(self.pi);
         alloc.free(self.vbasis);
         alloc.free(self.cbasis);
+        alloc.free(self.basis_head);
         alloc.free(self.mip_start);
         alloc.free(self.p_start);
         alloc.free(self.d_start);
@@ -489,6 +507,8 @@ pub const Model = struct {
     pub const presolveModel = @import("model_advanced.zig").presolveModel;
     pub const fixModel = @import("model_advanced.zig").fixModel;
     pub const getBasisHead = @import("model_advanced.zig").getBasisHead;
+    pub const exportBasisSnapshot = @import("model_advanced.zig").exportBasisSnapshot;
+    pub const importBasisView = @import("model_advanced.zig").importBasisView;
     pub const getEnv = @import("model_params.zig").getEnv;
     pub const getAttrInfo = @import("model_params.zig").getAttrInfo;
     pub const msg = @import("model_params.zig").msg;
@@ -614,6 +634,245 @@ test "Model.optimize on empty model returns error" {
     defer model.deinit();
 
     try std.testing.expectError(error.EmptyModel, model.optimize());
+}
+
+test "Model.optimize publishes an LP solution and basis attributes" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "lp");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 5.0, "capacity");
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, "x");
+    try model.setIntAttr(.model_sense, -1);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), model.obj_val, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), model.solution[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), model.slack[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), model.pi[0], 1e-12);
+    try std.testing.expectEqual(BasisStatus.basic, model.vbasis[0]);
+    try std.testing.expectEqual(@as(usize, 1), model.lp_session.cold_solves);
+    const factor_buffer = model.lp_session.engine.factorization.dense_lu.lu.ptr;
+
+    const cached_revision = model.compiled_view_cache.source_revision.?;
+    const cached_row_upper_ptr = model.compiled_view_cache.row_upper.ptr;
+    try model.optimize();
+    try std.testing.expectEqual(cached_revision, model.compiled_view_cache.source_revision.?);
+    try std.testing.expectEqual(cached_row_upper_ptr, model.compiled_view_cache.row_upper.ptr);
+    try std.testing.expectEqual(@as(usize, 1), model.lp_session.reoptimizations);
+    try std.testing.expectEqual(factor_buffer, model.lp_session.engine.factorization.dense_lu.lu.ptr);
+
+    try model.setDblAttrElement(.rhs, 0, 4.0);
+    try model.optimize();
+    try std.testing.expect(model.compiled_view_cache.source_revision.? > cached_revision);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), model.compiled_view_cache.row_upper[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), model.solution[0], 1e-12);
+    try std.testing.expectEqual(@as(usize, 2), model.lp_session.reoptimizations);
+}
+
+test "matrix-value revisions invalidate a persistent LP session" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "matrix_revision");
+    defer model.deinit();
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 4.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, -1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+    try std.testing.expectEqual(@as(usize, 1), model.lp_session.cold_solves);
+
+    try model.chgCoeff(0, 0, 2.0);
+    try model.optimize();
+    try std.testing.expectEqual(@as(usize, 2), model.lp_session.cold_solves);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), model.solution[0], 1e-12);
+}
+
+test "Model.optimize publishes infeasible status without stale solution arrays" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "infeasible_lp");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 1.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 0.0, 2.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.infeasible, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+    try std.testing.expectEqual(@as(usize, 0), model.pi.len);
+}
+
+test "Model.optimize maps an immediate TimeLimit" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setDblParam("TimeLimit", 0.0);
+    var model = try Model.init(std.testing.allocator, &env, "limited_lp");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .continuous, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.time_limit, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+}
+
+test "Model.optimize maps an immediate deterministic WorkLimit" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setDblParam("WorkLimit", 0.0);
+    var model = try Model.init(std.testing.allocator, &env, "work_limited_lp");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, -1.0, 0.0, 1.0, .continuous, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.work_limit, model.status);
+    try std.testing.expectEqual(@as(u64, 0), model.lp_session.engine.work_used);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+}
+
+test "Model callback bridge reports simplex iterations without allocation" {
+    const CallbackState = struct {
+        calls: usize = 0,
+        last_where: CallbackWhere = .polling,
+
+        fn callback(where: CallbackWhere, user_data: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            self.calls += 1;
+            self.last_where = where;
+        }
+    };
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var callback_state = CallbackState{};
+    env.setCallbackFunc(CallbackState.callback, &callback_state);
+    var model = try Model.init(std.testing.allocator, &env, "callback_lp");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, -1.0, 0.0, 1.0, .continuous, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expect(callback_state.calls >= 1);
+    try std.testing.expectEqual(CallbackWhere.simplex, callback_state.last_where);
+}
+
+test "Model.optimize warm-starts RHS changes through dual simplex" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "dual_reopt");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 2.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+    try std.testing.expectApproxEqAbs(@as(f64, 2), model.solution[0], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), model.basis_head.len);
+
+    try model.setDblAttrElement(.rhs, 0, -1.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), model.solution[0], 1e-12);
+    try std.testing.expect(model.iter_count <= 1);
+}
+
+test "Model.optimize warm-starts bound changes through dual simplex" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "bound_reopt");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 5.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.setIntAttr(.model_sense, -1);
+    try model.optimize();
+    try std.testing.expectApproxEqAbs(@as(f64, 5), model.solution[0], 1e-12);
+
+    try model.setDblAttrElement(.ub, 0, 3.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), model.solution[0], 1e-12);
+    try std.testing.expect(model.iter_count <= 1);
+}
+
+test "Model.optimize warm-starts objective changes through primal simplex" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "objective_reopt");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 5.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, -1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+    try std.testing.expectApproxEqAbs(@as(f64, 5), model.solution[0], 1e-12);
+
+    try model.setDblAttrElement(.obj, 0, 1.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), model.solution[0], 1e-12);
+    try std.testing.expect(model.iter_count <= 1);
+}
+
+test "dual BFRT flips a boxed variable before the entering pivot" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "bfrt_reopt");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 1.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 2.0, 0.0, std.math.inf(f64), .continuous, "basic");
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, 0.5, .continuous, "boxed");
+    try model.optimize();
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), model.solution[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), model.solution[1], 1e-12);
+
+    try model.setDblAttrElement(.rhs, 0, -1.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), model.solution[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), model.solution[1], 1e-12);
+    try std.testing.expect(model.iter_count <= 1);
+}
+
+test "dual warm reoptimization proves infeasibility after a bound change" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "dual_infeasible");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 2.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+
+    try model.setDblAttrElement(.ub, 0, 1.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.infeasible, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+}
+
+test "Model exports and imports an owning basis snapshot" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var source = try Model.init(std.testing.allocator, &env, "basis_source");
+    defer source.deinit();
+    try source.addConstr(0, &.{}, &.{}, .less_equal, 5.0, null);
+    try source.addVar(1, &[_]usize{0}, &[_]f64{1.0}, -1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try source.optimize();
+    var snapshot = try source.exportBasisSnapshot(std.testing.allocator);
+    defer snapshot.deinit();
+
+    var target = try Model.init(std.testing.allocator, &env, "basis_target");
+    defer target.deinit();
+    try target.addConstr(0, &.{}, &.{}, .less_equal, 5.0, null);
+    try target.addVar(1, &[_]usize{0}, &[_]f64{1.0}, -1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try target.updateModel();
+    try target.importBasisView(snapshot.view());
+    try target.optimize();
+    try std.testing.expectEqual(Status.optimal, target.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 5), target.solution[0], 1e-12);
+    try std.testing.expectEqual(@as(i64, 0), target.iter_count);
 }
 
 test "Model.reset clears solution state" {
@@ -1024,9 +1283,9 @@ test "Model.terminate sets interrupt flag" {
     var model = try Model.init(std.testing.allocator, &env, "test");
     defer model.deinit();
 
-    try std.testing.expect(!model.interrupted);
+    try std.testing.expect(!model.interrupted.load(.acquire));
     model.terminate();
-    try std.testing.expect(model.interrupted);
+    try std.testing.expect(model.interrupted.load(.acquire));
 }
 
 test "Model.chgCoeffs queues multiple coefficient changes" {

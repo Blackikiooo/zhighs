@@ -16,15 +16,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "foundation", .module = foundation.module }},
     });
-    const model_module = b.createModule(.{
-        .root_source_file = b.path("src/model/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "foundation", .module = foundation.module },
-            .{ .name = "matrix", .module = matrix_module },
-        },
-    });
     const lp_module = b.createModule(.{
         .root_source_file = b.path("src/lp/root.zig"),
         .target = target,
@@ -32,7 +23,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
-            .{ .name = "model", .module = model_module },
         },
     });
     const solver_module = b.createModule(.{
@@ -42,8 +32,17 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
-            .{ .name = "model", .module = model_module },
             .{ .name = "lp", .module = lp_module },
+        },
+    });
+    const model_module = b.createModule(.{
+        .root_source_file = b.path("src/model/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "solver", .module = solver_module },
         },
     });
 
@@ -142,6 +141,19 @@ pub fn build(b: *std.Build) void {
     const run_matrix_bench = b.addRunArtifact(matrix_bench);
     const matrix_bench_step = b.step("bench-matrix", "Run sparse matrix microbenchmarks");
     matrix_bench_step.dependOn(&run_matrix_bench.step);
+
+    const simplex_session_bench = b.addExecutable(.{
+        .name = "simplex-session-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/session_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_simplex_session_bench = b.addRunArtifact(simplex_session_bench);
+    const simplex_session_bench_step = b.step("bench-simplex", "Run cold and warm simplex-session benchmarks");
+    simplex_session_bench_step.dependOn(&run_simplex_session_bench.step);
 
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");

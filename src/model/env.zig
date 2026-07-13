@@ -255,6 +255,7 @@ pub const Env = struct {
             // ── Limits ─────────────────────────────────────────────────
             .{ .name = "TimeLimit", .value = .{ .double = INFINITY } },
             .{ .name = "IterationLimit", .value = .{ .int = std.math.maxInt(i64) } },
+            .{ .name = "WorkLimit", .value = .{ .double = INFINITY } },
             .{ .name = "NodeLimit", .value = .{ .int = std.math.maxInt(i64) } },
             .{ .name = "SolutionLimit", .value = .{ .int = std.math.maxInt(i64) } },
             .{ .name = "GapLimit", .value = .{ .double = 1e-10 } },
@@ -264,6 +265,7 @@ pub const Env = struct {
             .{ .name = "OutputFlag", .value = .{ .int = 1 } },
             .{ .name = "LogToConsole", .value = .{ .int = 1 } },
             .{ .name = "DisplayInterval", .value = .{ .int = 5 } },
+            .{ .name = "SimplexLogInterval", .value = .{ .int = 100 } },
             .{ .name = "MIPGap", .value = .{ .double = 1e-4 } },
             .{ .name = "MIPGapAbs", .value = .{ .double = 1e-10 } },
 

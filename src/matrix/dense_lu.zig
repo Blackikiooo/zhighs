@@ -15,6 +15,8 @@ pub const DenseLU = struct {
     pivots: []usize = &.{},
     work: []f64 = &.{},
     pivot_tolerance: f64 = 1e-12,
+    min_abs_pivot: f64 = std.math.inf(f64),
+    max_abs_pivot: f64 = 0.0,
 
     pub fn init(allocator: std.mem.Allocator) DenseLU {
         return .{ .allocator = allocator };
@@ -39,6 +41,8 @@ pub const DenseLU = struct {
         @memcpy(next_lu, matrix);
         for (next_pivots, 0..) |*pivot, i| pivot.* = i;
 
+        var min_abs_pivot = std.math.inf(f64);
+        var max_abs_pivot: f64 = 0.0;
         for (0..n) |column| {
             var pivot_row = column;
             var pivot_abs: f64 = 0.0;
@@ -55,6 +59,8 @@ pub const DenseLU = struct {
                 std.mem.swap(usize, &next_pivots[column], &next_pivots[pivot_row]);
             }
             const diagonal = next_lu[column * n + column];
+            min_abs_pivot = @min(min_abs_pivot, @abs(diagonal));
+            max_abs_pivot = @max(max_abs_pivot, @abs(diagonal));
             for (column + 1..n) |row| {
                 next_lu[row * n + column] /= diagonal;
                 const multiplier = next_lu[row * n + column];
@@ -68,6 +74,8 @@ pub const DenseLU = struct {
         self.pivots = next_pivots;
         self.work = next_work;
         self.n = n;
+        self.min_abs_pivot = if (n == 0) 1.0 else min_abs_pivot;
+        self.max_abs_pivot = if (n == 0) 1.0 else max_abs_pivot;
     }
 
     /// Zero-copy variant. Ownership of `matrix` is transferred to this LU
@@ -81,6 +89,8 @@ pub const DenseLU = struct {
         const next_work = self.allocator.alloc(f64, n) catch return error.OutOfMemory;
         errdefer self.allocator.free(next_work);
         for (next_pivots, 0..) |*pivot, i| pivot.* = i;
+        var min_abs_pivot = std.math.inf(f64);
+        var max_abs_pivot: f64 = 0.0;
         for (0..n) |column| {
             var pivot_row = column;
             var pivot_abs: f64 = 0.0;
@@ -97,6 +107,8 @@ pub const DenseLU = struct {
                 std.mem.swap(usize, &next_pivots[column], &next_pivots[pivot_row]);
             }
             const diagonal = matrix[column * n + column];
+            min_abs_pivot = @min(min_abs_pivot, @abs(diagonal));
+            max_abs_pivot = @max(max_abs_pivot, @abs(diagonal));
             for (column + 1..n) |row| {
                 matrix[row * n + column] /= diagonal;
                 const multiplier = matrix[row * n + column];
@@ -110,6 +122,51 @@ pub const DenseLU = struct {
         self.pivots = next_pivots;
         self.work = next_work;
         self.n = n;
+        self.min_abs_pivot = if (n == 0) 1.0 else min_abs_pivot;
+        self.max_abs_pivot = if (n == 0) 1.0 else max_abs_pivot;
+    }
+
+    /// Re-factorize the existing `lu` buffer after the caller overwrites it
+    /// with a new row-major matrix. No allocation is performed.
+    pub fn refactorizeInPlace(self: *DenseLU) DenseLuError!void {
+        const n = self.n;
+        if (self.lu.len != n * n or self.pivots.len != n or self.work.len != n) return error.DimensionMismatch;
+        for (self.pivots, 0..) |*pivot, i| pivot.* = i;
+        var min_abs_pivot = std.math.inf(f64);
+        var max_abs_pivot: f64 = 0.0;
+        for (0..n) |column| {
+            var pivot_row = column;
+            var pivot_abs: f64 = 0.0;
+            for (column..n) |row| {
+                const value = @abs(self.lu[row * n + column]);
+                if (value > pivot_abs) {
+                    pivot_abs = value;
+                    pivot_row = row;
+                }
+            }
+            if (!std.math.isFinite(pivot_abs) or pivot_abs <= self.pivot_tolerance) return error.Singular;
+            if (pivot_row != column) {
+                for (0..n) |j| std.mem.swap(f64, &self.lu[column * n + j], &self.lu[pivot_row * n + j]);
+                std.mem.swap(usize, &self.pivots[column], &self.pivots[pivot_row]);
+            }
+            const diagonal = self.lu[column * n + column];
+            min_abs_pivot = @min(min_abs_pivot, @abs(diagonal));
+            max_abs_pivot = @max(max_abs_pivot, @abs(diagonal));
+            for (column + 1..n) |row| {
+                self.lu[row * n + column] /= diagonal;
+                const multiplier = self.lu[row * n + column];
+                for (column + 1..n) |j| self.lu[row * n + j] -= multiplier * self.lu[column * n + j];
+            }
+        }
+        self.min_abs_pivot = if (n == 0) 1.0 else min_abs_pivot;
+        self.max_abs_pivot = if (n == 0) 1.0 else max_abs_pivot;
+    }
+
+    /// Cheap stability signal used for refactorization policy. This is pivot
+    /// spread, deliberately not presented as a rigorous matrix condition number.
+    pub fn pivotConditionEstimate(self: DenseLU) f64 {
+        if (self.min_abs_pivot <= 0.0) return std.math.inf(f64);
+        return self.max_abs_pivot / self.min_abs_pivot;
     }
 
     pub fn solve(self: *DenseLU, rhs: []f64) DenseLuError!void {

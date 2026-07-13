@@ -37,6 +37,17 @@ pub fn updateModel(self: *Model) ModelError!void {
 pub fn applyPending(self: *Model) ModelError!void {
     const alloc = self.allocator;
 
+    var structure_changed = false;
+    var matrix_values_changed = false;
+    var bounds_changed = false;
+    var objective_changed = false;
+    for (self.pending.items) |change| switch (change) {
+        .add_var, .add_constr, .del_vars, .del_constrs, .chg_type => structure_changed = true,
+        .chg_coeff => matrix_values_changed = true,
+        .chg_bounds, .chg_rhs, .chg_sense => bounds_changed = true,
+        .chg_obj => objective_changed = true,
+    };
+
     // Count how many vars and constrs will be added.
     var new_vars: usize = 0;
     var new_constrs: usize = 0;
@@ -699,4 +710,8 @@ pub fn applyPending(self: *Model) ModelError!void {
         self.genconstr_handles.bindDenseWithAllocator(alloc, id, @intCast(self.genconstr_handles.liveLen())) catch return error.OutOfMemory;
     }
     self.revision += 1;
+    if (structure_changed) try self.markRevision(.structure);
+    if (matrix_values_changed) try self.markRevision(.matrix_values);
+    if (bounds_changed) try self.markRevision(.bounds);
+    if (objective_changed) try self.markRevision(.objective);
 }
