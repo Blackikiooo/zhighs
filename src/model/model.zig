@@ -16,6 +16,14 @@
 //!
 //! Methods are split across sub-files for maintainability and re-exported
 //! via `pub const` so they remain callable as `model.method(...)`.
+//!
+//! ## Responsibility
+//!
+//! This file defines the `Model` data layout, lifetime management, basic size
+//! queries, and the public method surface.  Domain behaviour belongs in the
+//! corresponding `model_*.zig` implementation file; new operations should not
+//! be implemented here unless they directly manage the model's core lifetime
+//! or representation.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -288,126 +296,126 @@ pub const Model = struct {
     pub const getStrAttrList = @import("model_attr.zig").getStrAttrList;
     pub const getCharAttrList = @import("model_attr.zig").getCharAttrList;
 
-    pub const addVar = @import("model_api.zig").addVar;
-    pub const addVars = @import("model_api.zig").addVars;
-    pub const addConstr = @import("model_api.zig").addConstr;
-    pub const addConstrs = @import("model_api.zig").addConstrs;
-    pub const addSOS = @import("model_api.zig").addSOS;
-    pub const addQConstr = @import("model_api.zig").addQConstr;
-    pub const addGenConstrMax = @import("model_api.zig").addGenConstrMax;
-    pub const addGenConstrMin = @import("model_api.zig").addGenConstrMin;
-    pub const addGenConstrAbs = @import("model_api.zig").addGenConstrAbs;
-    pub const addGenConstrAnd = @import("model_api.zig").addGenConstrAnd;
-    pub const addGenConstrOr = @import("model_api.zig").addGenConstrOr;
-    pub const addGenConstrIndicator = @import("model_api.zig").addGenConstrIndicator;
-    pub const addGenConstrPWL = @import("model_api.zig").addGenConstrPWL;
-    pub const addGenConstrPoly = @import("model_api.zig").addGenConstrPoly;
-    pub const addGenConstrExp = @import("model_api.zig").addGenConstrExp;
-    pub const addGenConstrExpA = @import("model_api.zig").addGenConstrExpA;
-    pub const addGenConstrLog = @import("model_api.zig").addGenConstrLog;
-    pub const addGenConstrLogA = @import("model_api.zig").addGenConstrLogA;
-    pub const addGenConstrPow = @import("model_api.zig").addGenConstrPow;
-    pub const addGenConstrSin = @import("model_api.zig").addGenConstrSin;
-    pub const addGenConstrCos = @import("model_api.zig").addGenConstrCos;
-    pub const addGenConstrTan = @import("model_api.zig").addGenConstrTan;
-    pub const addGenConstrLogistic = @import("model_api.zig").addGenConstrLogistic;
-    pub const addGenConstrNorm = @import("model_api.zig").addGenConstrNorm;
-    pub const addGenConstrNL = @import("model_api.zig").addGenConstrNL;
-    pub const getGenConstrMax = @import("model_api.zig").getGenConstrMax;
-    pub const getGenConstrMin = @import("model_api.zig").getGenConstrMin;
-    pub const getGenConstrAbs = @import("model_api.zig").getGenConstrAbs;
-    pub const getGenConstrAnd = @import("model_api.zig").getGenConstrAnd;
-    pub const getGenConstrOr = @import("model_api.zig").getGenConstrOr;
-    pub const getGenConstrIndicator = @import("model_api.zig").getGenConstrIndicator;
-    pub const getGenConstrPWL = @import("model_api.zig").getGenConstrPWL;
-    pub const getGenConstrPoly = @import("model_api.zig").getGenConstrPoly;
-    pub const getGenConstrExp = @import("model_api.zig").getGenConstrExp;
-    pub const getGenConstrExpA = @import("model_api.zig").getGenConstrExpA;
-    pub const getGenConstrLog = @import("model_api.zig").getGenConstrLog;
-    pub const getGenConstrLogA = @import("model_api.zig").getGenConstrLogA;
-    pub const getGenConstrPow = @import("model_api.zig").getGenConstrPow;
-    pub const getGenConstrSin = @import("model_api.zig").getGenConstrSin;
-    pub const getGenConstrCos = @import("model_api.zig").getGenConstrCos;
-    pub const getGenConstrTan = @import("model_api.zig").getGenConstrTan;
-    pub const getGenConstrLogistic = @import("model_api.zig").getGenConstrLogistic;
-    pub const getGenConstrNorm = @import("model_api.zig").getGenConstrNorm;
-    pub const getGenConstrNL = @import("model_api.zig").getGenConstrNL;
-    pub const delGenConstrs = @import("model_api.zig").delGenConstrs;
-    pub const getQConstrByName = @import("model_api.zig").getQConstrByName;
-    pub const setPWLObj = @import("model_api.zig").setPWLObj;
-    pub const getPWLObj = @import("model_api.zig").getPWLObj;
-    pub const getJSonSolution = @import("model_api.zig").getJSonSolution;
-    pub const convertToFixed = @import("model_api.zig").convertToFixed;
-    pub const chgCoeff = @import("model_api.zig").chgCoeff;
-    pub const chgCoeffs = @import("model_api.zig").chgCoeffs;
-    pub const chgBounds = @import("model_api.zig").chgBounds;
-    pub const chgObj = @import("model_api.zig").chgObj;
-    pub const chgRHS = @import("model_api.zig").chgRHS;
-    pub const chgSense = @import("model_api.zig").chgSense;
-    pub const chgVarType = @import("model_api.zig").chgVarType;
-    pub const delVars = @import("model_api.zig").delVars;
-    pub const delConstrs = @import("model_api.zig").delConstrs;
-    pub const addRangeConstr = @import("model_api.zig").addRangeConstr;
-    pub const addRangeConstrs = @import("model_api.zig").addRangeConstrs;
-    pub const addQPterms = @import("model_api.zig").addQPterms;
-    pub const delQ = @import("model_api.zig").delQ;
-    pub const getQ = @import("model_api.zig").getQ;
-    pub const delQConstrs = @import("model_api.zig").delQConstrs;
-    pub const getQConstr = @import("model_api.zig").getQConstr;
-    pub const delSOS = @import("model_api.zig").delSOS;
-    pub const getSOS = @import("model_api.zig").getSOS;
-    pub const getVarByName = @import("model_api.zig").getVarByName;
-    pub const getConstrByName = @import("model_api.zig").getConstrByName;
-    pub const getCoeff = @import("model_api.zig").getCoeff;
-    pub const getVars = @import("model_api.zig").getVars;
-    pub const getConstrs = @import("model_api.zig").getConstrs;
-    pub const setObjectiveN = @import("model_api.zig").setObjectiveN;
-    pub const computeIIS = @import("model_api.zig").computeIIS;
-    pub const feasRelax = @import("model_api.zig").feasRelax;
-    pub const getCallbackFunc = @import("model_api.zig").getCallbackFunc;
-    pub const setCallbackFunc = @import("model_api.zig").setCallbackFunc;
-    pub const terminate = @import("model_api.zig").terminate;
-    pub const presolveModel = @import("model_api.zig").presolveModel;
-    pub const fixModel = @import("model_api.zig").fixModel;
-    pub const getBasisHead = @import("model_api.zig").getBasisHead;
-    pub const readModel = @import("model_api.zig").readModel;
-    pub const getEnv = @import("model_api.zig").getEnv;
-    pub const getAttrInfo = @import("model_api.zig").getAttrInfo;
-    pub const msg = @import("model_api.zig").msg;
-    pub const setLogCallbackFunc = @import("model_api.zig").setLogCallbackFunc;
-    pub const getLogCallbackFunc = @import("model_api.zig").getLogCallbackFunc;
-    pub const cbGet = @import("model_api.zig").cbGet;
-    pub const cbCut = @import("model_api.zig").cbCut;
-    pub const cbLazy = @import("model_api.zig").cbLazy;
-    pub const cbSolution = @import("model_api.zig").cbSolution;
-    pub const cbSetDblParam = @import("model_api.zig").cbSetDblParam;
-    pub const cbSetIntParam = @import("model_api.zig").cbSetIntParam;
-    pub const cbSetStrParam = @import("model_api.zig").cbSetStrParam;
-    pub const cbSetParam = @import("model_api.zig").cbSetParam;
-    pub const cbProceed = @import("model_api.zig").cbProceed;
-    pub const cbStopOneMultiObj = @import("model_api.zig").cbStopOneMultiObj;
-    pub const setCallbackFuncAdv = @import("model_api.zig").setCallbackFuncAdv;
-    pub const tuneModel = @import("model_api.zig").tuneModel;
-    pub const getTuneResult = @import("model_api.zig").getTuneResult;
-    pub const getDblParamInfo = @import("model_api.zig").getDblParamInfo;
-    pub const getIntParamInfo = @import("model_api.zig").getIntParamInfo;
-    pub const getStrParamInfo = @import("model_api.zig").getStrParamInfo;
-    pub const copyModelToEnv = @import("model_api.zig").copyModelToEnv;
-    pub const version = @import("model_api.zig").version;
-    pub const singleScenarioModel = @import("model_api.zig").singleScenarioModel;
-    pub const getErrormsg = @import("model_api.zig").getErrormsg;
-    pub const setIntParam = @import("model_api.zig").setIntParam;
-    pub const getIntParam = @import("model_api.zig").getIntParam;
-    pub const setDblParam = @import("model_api.zig").setDblParam;
-    pub const getDblParam = @import("model_api.zig").getDblParam;
-    pub const setStrParam = @import("model_api.zig").setStrParam;
-    pub const getStrParam = @import("model_api.zig").getStrParam;
-    pub const setParam = @import("model_api.zig").setParam;
-    pub const writeParams = @import("model_api.zig").writeParams;
-    pub const readParams = @import("model_api.zig").readParams;
-    pub const resetParams = @import("model_api.zig").resetParams;
+    pub const addVar = @import("model_linear.zig").addVar;
+    pub const addVars = @import("model_linear.zig").addVars;
+    pub const addConstr = @import("model_linear.zig").addConstr;
+    pub const addConstrs = @import("model_linear.zig").addConstrs;
+    pub const addSOS = @import("model_constraints.zig").addSOS;
+    pub const addQConstr = @import("model_constraints.zig").addQConstr;
+    pub const addGenConstrMax = @import("model_genconstr.zig").addGenConstrMax;
+    pub const addGenConstrMin = @import("model_genconstr.zig").addGenConstrMin;
+    pub const addGenConstrAbs = @import("model_genconstr.zig").addGenConstrAbs;
+    pub const addGenConstrAnd = @import("model_genconstr.zig").addGenConstrAnd;
+    pub const addGenConstrOr = @import("model_genconstr.zig").addGenConstrOr;
+    pub const addGenConstrIndicator = @import("model_genconstr.zig").addGenConstrIndicator;
+    pub const addGenConstrPWL = @import("model_genconstr.zig").addGenConstrPWL;
+    pub const addGenConstrPoly = @import("model_genconstr.zig").addGenConstrPoly;
+    pub const addGenConstrExp = @import("model_genconstr.zig").addGenConstrExp;
+    pub const addGenConstrExpA = @import("model_genconstr.zig").addGenConstrExpA;
+    pub const addGenConstrLog = @import("model_genconstr.zig").addGenConstrLog;
+    pub const addGenConstrLogA = @import("model_genconstr.zig").addGenConstrLogA;
+    pub const addGenConstrPow = @import("model_genconstr.zig").addGenConstrPow;
+    pub const addGenConstrSin = @import("model_genconstr.zig").addGenConstrSin;
+    pub const addGenConstrCos = @import("model_genconstr.zig").addGenConstrCos;
+    pub const addGenConstrTan = @import("model_genconstr.zig").addGenConstrTan;
+    pub const addGenConstrLogistic = @import("model_genconstr.zig").addGenConstrLogistic;
+    pub const addGenConstrNorm = @import("model_genconstr.zig").addGenConstrNorm;
+    pub const addGenConstrNL = @import("model_genconstr.zig").addGenConstrNL;
+    pub const getGenConstrMax = @import("model_genconstr.zig").getGenConstrMax;
+    pub const getGenConstrMin = @import("model_genconstr.zig").getGenConstrMin;
+    pub const getGenConstrAbs = @import("model_genconstr.zig").getGenConstrAbs;
+    pub const getGenConstrAnd = @import("model_genconstr.zig").getGenConstrAnd;
+    pub const getGenConstrOr = @import("model_genconstr.zig").getGenConstrOr;
+    pub const getGenConstrIndicator = @import("model_genconstr.zig").getGenConstrIndicator;
+    pub const getGenConstrPWL = @import("model_genconstr.zig").getGenConstrPWL;
+    pub const getGenConstrPoly = @import("model_genconstr.zig").getGenConstrPoly;
+    pub const getGenConstrExp = @import("model_genconstr.zig").getGenConstrExp;
+    pub const getGenConstrExpA = @import("model_genconstr.zig").getGenConstrExpA;
+    pub const getGenConstrLog = @import("model_genconstr.zig").getGenConstrLog;
+    pub const getGenConstrLogA = @import("model_genconstr.zig").getGenConstrLogA;
+    pub const getGenConstrPow = @import("model_genconstr.zig").getGenConstrPow;
+    pub const getGenConstrSin = @import("model_genconstr.zig").getGenConstrSin;
+    pub const getGenConstrCos = @import("model_genconstr.zig").getGenConstrCos;
+    pub const getGenConstrTan = @import("model_genconstr.zig").getGenConstrTan;
+    pub const getGenConstrLogistic = @import("model_genconstr.zig").getGenConstrLogistic;
+    pub const getGenConstrNorm = @import("model_genconstr.zig").getGenConstrNorm;
+    pub const getGenConstrNL = @import("model_genconstr.zig").getGenConstrNL;
+    pub const delGenConstrs = @import("model_genconstr.zig").delGenConstrs;
+    pub const getQConstrByName = @import("model_constraints.zig").getQConstrByName;
+    pub const setPWLObj = @import("model_objective.zig").setPWLObj;
+    pub const getPWLObj = @import("model_objective.zig").getPWLObj;
+    pub const getJSonSolution = @import("model_advanced.zig").getJSonSolution;
+    pub const convertToFixed = @import("model_advanced.zig").convertToFixed;
+    pub const chgCoeff = @import("model_linear.zig").chgCoeff;
+    pub const chgCoeffs = @import("model_linear.zig").chgCoeffs;
+    pub const chgBounds = @import("model_linear.zig").chgBounds;
+    pub const chgObj = @import("model_linear.zig").chgObj;
+    pub const chgRHS = @import("model_linear.zig").chgRHS;
+    pub const chgSense = @import("model_linear.zig").chgSense;
+    pub const chgVarType = @import("model_linear.zig").chgVarType;
+    pub const delVars = @import("model_linear.zig").delVars;
+    pub const delConstrs = @import("model_linear.zig").delConstrs;
+    pub const addRangeConstr = @import("model_linear.zig").addRangeConstr;
+    pub const addRangeConstrs = @import("model_linear.zig").addRangeConstrs;
+    pub const addQPterms = @import("model_constraints.zig").addQPterms;
+    pub const delQ = @import("model_constraints.zig").delQ;
+    pub const getQ = @import("model_constraints.zig").getQ;
+    pub const delQConstrs = @import("model_constraints.zig").delQConstrs;
+    pub const getQConstr = @import("model_constraints.zig").getQConstr;
+    pub const delSOS = @import("model_constraints.zig").delSOS;
+    pub const getSOS = @import("model_constraints.zig").getSOS;
+    pub const getVarByName = @import("model_linear.zig").getVarByName;
+    pub const getConstrByName = @import("model_linear.zig").getConstrByName;
+    pub const getCoeff = @import("model_linear.zig").getCoeff;
+    pub const getVars = @import("model_linear.zig").getVars;
+    pub const getConstrs = @import("model_linear.zig").getConstrs;
+    pub const setObjectiveN = @import("model_advanced.zig").setObjectiveN;
+    pub const computeIIS = @import("model_advanced.zig").computeIIS;
+    pub const feasRelax = @import("model_advanced.zig").feasRelax;
+    pub const getCallbackFunc = @import("model_callback.zig").getCallbackFunc;
+    pub const setCallbackFunc = @import("model_callback.zig").setCallbackFunc;
+    pub const terminate = @import("model_callback.zig").terminate;
+    pub const presolveModel = @import("model_advanced.zig").presolveModel;
+    pub const fixModel = @import("model_advanced.zig").fixModel;
+    pub const getBasisHead = @import("model_advanced.zig").getBasisHead;
+    pub const getEnv = @import("model_params.zig").getEnv;
+    pub const getAttrInfo = @import("model_params.zig").getAttrInfo;
+    pub const msg = @import("model_params.zig").msg;
+    pub const setLogCallbackFunc = @import("model_params.zig").setLogCallbackFunc;
+    pub const getLogCallbackFunc = @import("model_params.zig").getLogCallbackFunc;
+    pub const cbGet = @import("model_callback.zig").cbGet;
+    pub const cbCut = @import("model_callback.zig").cbCut;
+    pub const cbLazy = @import("model_callback.zig").cbLazy;
+    pub const cbSolution = @import("model_callback.zig").cbSolution;
+    pub const cbSetDblParam = @import("model_callback.zig").cbSetDblParam;
+    pub const cbSetIntParam = @import("model_callback.zig").cbSetIntParam;
+    pub const cbSetStrParam = @import("model_callback.zig").cbSetStrParam;
+    pub const cbSetParam = @import("model_callback.zig").cbSetParam;
+    pub const cbProceed = @import("model_callback.zig").cbProceed;
+    pub const cbStopOneMultiObj = @import("model_callback.zig").cbStopOneMultiObj;
+    pub const setCallbackFuncAdv = @import("model_callback.zig").setCallbackFuncAdv;
+    pub const tuneModel = @import("model_params.zig").tuneModel;
+    pub const getTuneResult = @import("model_params.zig").getTuneResult;
+    pub const getDblParamInfo = @import("model_params.zig").getDblParamInfo;
+    pub const getIntParamInfo = @import("model_params.zig").getIntParamInfo;
+    pub const getStrParamInfo = @import("model_params.zig").getStrParamInfo;
+    pub const copyModelToEnv = @import("model_advanced.zig").copyModelToEnv;
+    pub const version = @import("model_params.zig").version;
+    pub const singleScenarioModel = @import("model_advanced.zig").singleScenarioModel;
+    pub const getErrormsg = @import("model_params.zig").getErrormsg;
+    pub const setIntParam = @import("model_params.zig").setIntParam;
+    pub const getIntParam = @import("model_params.zig").getIntParam;
+    pub const setDblParam = @import("model_params.zig").setDblParam;
+    pub const getDblParam = @import("model_params.zig").getDblParam;
+    pub const setStrParam = @import("model_params.zig").setStrParam;
+    pub const getStrParam = @import("model_params.zig").getStrParam;
+    pub const setParam = @import("model_params.zig").setParam;
+    pub const writeParams = @import("model_params.zig").writeParams;
+    pub const readParams = @import("model_params.zig").readParams;
+    pub const resetParams = @import("model_params.zig").resetParams;
 
     pub const writeModel = @import("model_io.zig").writeModel;
+    pub const readModel = @import("model_io.zig").readModel;
     pub const read = @import("model_io.zig").read;
 };
 
@@ -597,6 +605,31 @@ test "Model.addQPterms delQ removes all terms" {
     try std.testing.expectEqual(@as(usize, 0), model.q_nz);
 }
 
+test "Model.addQConstr respects explicit nonzero counts" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addQConstr(
+        1,
+        &[_]i32{ 0, 99 },
+        &[_]i32{ 0, 99 },
+        &[_]f64{ 2.0, 99.0 },
+        1,
+        &[_]usize{ 0, 99 },
+        &[_]f64{ 1.0, 99.0 },
+        .less_equal,
+        3.0,
+        "qconstr",
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), model.qconstr_qrow.len);
+    try std.testing.expectEqual(@as(usize, 1), model.qconstr_lind.len);
+    try std.testing.expectEqual(@as(f64, 2.0), model.qconstr_qval[0]);
+    try std.testing.expectEqual(@as(f64, 1.0), model.qconstr_lval[0]);
+}
+
 test "Model.addSOS stores SOS constraint" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();
@@ -630,6 +663,24 @@ test "Model.addGenConstrMax stores general constraint" {
     try model.addGenConstrMax(0, 2, &[_]usize{ 0, 1 }, 0.0, "max1");
     try std.testing.expectEqual(@as(usize, 1), model.genconstr_count);
     try std.testing.expectEqual(GenConstrType.max, model.genconstr_types[0]);
+}
+
+test "packed general constraints preserve following constraint offsets" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "test");
+    defer model.deinit();
+
+    try model.addGenConstrPWL(0, 1, 2, &[_]f64{ 0.0, 1.0 }, &[_]f64{ 0.0, 2.0 }, "pwl");
+    try model.addGenConstrMax(2, 2, &[_]usize{ 3, 4 }, 0.0, "max");
+
+    var resvar: usize = undefined;
+    var num_vars: usize = undefined;
+    var vars: [2]usize = undefined;
+    try model.getGenConstrMax(1, &resvar, &num_vars, &vars);
+    try std.testing.expectEqual(@as(usize, 2), resvar);
+    try std.testing.expectEqual(@as(usize, 2), num_vars);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 3, 4 }, &vars);
 }
 
 test "Model.terminate sets interrupt flag" {

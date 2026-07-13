@@ -2,6 +2,12 @@
 //!
 //! Problem and solution data are read/written through uniform
 //! `get*Attr` / `set*Attr` methods keyed by an `Attr` enum value.
+//!
+//! ## Responsibility
+//!
+//! Owns scalar, element, array, and list attribute dispatch plus attribute
+//! validation and type conversion.  It does not own the underlying model data
+//! or general-purpose construction and mutation APIs.
 
 const std = @import("std");
 const types = @import("types.zig");

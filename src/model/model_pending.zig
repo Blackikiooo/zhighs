@@ -2,6 +2,12 @@
 //!
 //! Modifications are queued and applied in batch by `updateModel`.  This module
 //! owns the change record type and the low-level queue primitives.
+//!
+//! ## Responsibility
+//!
+//! Defines pending-change ownership, enqueue/discard behaviour, automatic flush
+//! thresholds, and lightweight pending counts.  It does not interpret or apply
+//! changes; committed-state mutation belongs to `model_update.zig`.
 
 const std = @import("std");
 const types = @import("types.zig");

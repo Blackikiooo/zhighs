@@ -1,4 +1,11 @@
 //! Solve, reset, copy, and MIP-query methods for `Model`.
+//!
+//! ## Responsibility
+//!
+//! Owns the main optimization lifecycle: flushing updates, compiling solver IR,
+//! dispatching by problem class, resetting solution state, copying committed
+//! models, and classifying MIP models.  Presolve-only and other auxiliary
+//! workflows belong to `model_advanced.zig`.
 
 const std = @import("std");
 const types = @import("types.zig");

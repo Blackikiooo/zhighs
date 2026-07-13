@@ -2,6 +2,13 @@
 //!
 //! All queued modifications are flushed to the committed state by
 //! `updateModel` / `applyPending`.
+//!
+//! ## Responsibility
+//!
+//! Interprets `PendingChange` records and atomically updates committed arrays,
+//! names, dimensions, and the constraint matrix.  Queue ownership and cleanup
+//! are defined in `model_pending.zig`; public edit requests are created by
+//! `model_linear.zig`.
 
 const std = @import("std");
 const types = @import("types.zig");
