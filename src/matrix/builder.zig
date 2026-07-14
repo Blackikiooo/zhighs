@@ -115,6 +115,9 @@ pub const MatrixBuilder = struct {
     /// Canonicalizes the builder and returns an independent owning CSC matrix.
     /// Values with abs(value) <= zero_tolerance are omitted after duplicates are
     /// summed. The builder remains reusable and holds the compacted triplets.
+    /// This output allocator may differ from the allocator used by append and
+    /// deinit: for example, triplets may live in a resettable session arena
+    /// while the returned matrix uses a longer-lived allocator.
     pub fn freeze(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         return self.freezeInternal(allocator, zero_tolerance, true, true);
     }
@@ -184,13 +187,14 @@ pub const MatrixBuilder = struct {
     }
 
     /// Build a canonical CSC matrix from merged triplets, allocating all output
-    /// arrays in a single page-colored buffer with compact HUInt offsets.
+    /// arrays in one naturally packed, 64-byte-aligned buffer with compact
+    /// HUInt offsets.
     fn buildCompact(self: *Self, allocator: std.mem.Allocator, write: usize, compact_cols: []ColId, compact_rows: []RowId, compact_values: []f64) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         const starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
         const rows_bytes = std.math.mul(usize, write, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, write, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const compact_starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
+        const layout = memory.computeLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, .{ 64, 64, 64, 64 }) catch return error.DimensionTooLarge;
         const compact_starts_offset = layout.offsets[1];
         const rows_offset = layout.offsets[2];
         const values_offset = layout.offsets[3];

@@ -2,6 +2,20 @@
 
 const std = @import("std");
 
+/// Native SIMD lane count for a scalar type on the selected build target.
+/// Callers still need an unaligned scalar tail because borrowed matrix slices
+/// are not required to begin at a vector boundary.
+pub fn nativeVectorLanes(comptime T: type) comptime_int {
+    if (@import("builtin").cpu.arch == .x86_64) {
+        const features = @import("builtin").cpu.features;
+        if (std.Target.x86.featureSetHas(features, .avx512f)) return 64 / @sizeOf(T);
+        if (std.Target.x86.featureSetHas(features, .avx2)) return 32 / @sizeOf(T);
+        return 16 / @sizeOf(T);
+    }
+    // AArch64 NEON and the conservative generic vector width are 128 bits.
+    return 16 / @sizeOf(T);
+}
+
 /// Generic vectorized clear for any integer or float type.
 /// Uses comptime-unrolled @Vector(VW, T) stores for aligned hot paths.
 /// The vector width VW and unroll factor UN can be tuned per architecture.
@@ -10,19 +24,7 @@ fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) v
 
     // Pick vector width from the target SIMD ISA.
     // VW is chosen so that VW × @sizeOf(T) fills a single vector register.
-    const VW = comptime brk: {
-        if (@import("builtin").cpu.arch == .x86_64) {
-            const feat = @import("builtin").cpu.features;
-            if (std.Target.x86.featureSetHas(feat, .avx512f)) {
-                break :brk 64 / @sizeOf(T); // 512-bit
-            }
-            if (std.Target.x86.featureSetHas(feat, .avx2)) {
-                break :brk 32 / @sizeOf(T); // 256-bit
-            }
-            break :brk 16 / @sizeOf(T); // 128-bit SSE2 baseline
-        }
-        break :brk 32 / @sizeOf(T); // generic fallback
-    };
+    const VW = nativeVectorLanes(T);
     // Unroll factor tuned by microarchitecture.
     // Zen-family benefit from deep unrolling (larger store buffers, write combining);
     // Intel cores prefer shallower unrolling to avoid uop-cache pressure.
@@ -236,15 +238,15 @@ test "computeLayout add overflow caught" {
 test "computePageColoredLayout basic" {
     const layout = try computePageColoredLayout(3, .{ 100, 200, 300 }, .{ 0, 64, 128 });
     try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
-    try std.testing.expectEqual(@as(usize, 4096 + 64), layout.offsets[1]);          // alignForward(100,4096)+64 = 4160
-    try std.testing.expectEqual(@as(usize, 4096*2 + 128), layout.offsets[2]);       // alignForward(4360,4096)+128 = 8192+128 = 8320
+    try std.testing.expectEqual(@as(usize, 4096 + 64), layout.offsets[1]); // alignForward(100,4096)+64 = 4160
+    try std.testing.expectEqual(@as(usize, 4096 * 2 + 128), layout.offsets[2]); // alignForward(4360,4096)+128 = 8192+128 = 8320
 }
 
 test "computePageColoredLayout zero-size fields" {
     const layout = try computePageColoredLayout(3, .{ 0, 0, 0 }, .{ 0, 64, 128 });
     try std.testing.expectEqual(@as(usize, 0), layout.offsets[0]);
-    try std.testing.expectEqual(@as(usize, 64), layout.offsets[1]);                 // alignForward(0,4096)=0, +64=64
-    try std.testing.expectEqual(@as(usize, 4096 + 128), layout.offsets[2]);         // alignForward(64,4096)=4096, +128=4224
+    try std.testing.expectEqual(@as(usize, 64), layout.offsets[1]); // alignForward(0,4096)=0, +64=64
+    try std.testing.expectEqual(@as(usize, 4096 + 128), layout.offsets[2]); // alignForward(64,4096)=4096, +128=4224
 }
 
 test "computePageColoredLayout overflow caught" {

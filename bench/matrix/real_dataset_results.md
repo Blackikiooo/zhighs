@@ -100,3 +100,80 @@ Synthetic fixed-core `perf stat` corroborated the direction: CSC dropped from
 about 363M to 282M cycles per profiling process and CSR from about 355M to
 222M. The HiGHS references were about 318M and 283M cycles. Full matrix
 acceptance subsequently passed all four gates.
+
+## 2026-07-14 post-layout/SIMD/allocator rerun
+
+This rerun supersedes the grouped five-process comparison above. Synthetic
+kernels used 11 alternating-order processes on CPU 2; real datasets used seven
+alternating-order processes. Zig was built with `ReleaseFast -Dcpu=native` and
+the C++ harness with `-O3 -march=native -DNDEBUG -flto`, against the same HiGHS
+commit `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`. Every checksum and structural
+hash matched. Raw synthetic results are in
+`/tmp/zhighs-matrix-after-layout/results`, and real-process reports are in
+`/tmp/zhighs-matrix-after-layout/real`.
+
+### Interleaved real-data medians
+
+| dataset | kernel | zhighs | HiGHS | zhighs relative |
+| --- | --- | ---: | ---: | ---: |
+| thermal1 | CSC SpMV | 0.559 ms | 0.603 ms | 7.3% faster |
+| cage12 | CSC SpMV | 1.841 ms | 1.860 ms | 1.0% faster |
+| webbase-1M | CSC SpMV | 4.604 ms | 5.332 ms | 13.7% faster |
+| thermal1 | CSR SpMV | 0.529 ms | 0.533 ms | 0.8% faster |
+| cage12 | CSR SpMV | 1.696 ms | 1.803 ms | 5.9% faster |
+| webbase-1M | CSR SpMV | 4.273 ms | 5.128 ms | 16.7% faster |
+| thermal1 | CSC -> CSR reusable | 1.571 ms | 1.879 ms | 16.4% faster |
+| cage12 | CSC -> CSR reusable | 9.050 ms | 8.994 ms | 0.6% slower |
+| webbase-1M | CSC -> CSR reusable | 14.002 ms | 14.612 ms | 4.2% faster |
+
+The sub-1% thermal CSR and cage conversion differences are parity, not a
+meaningful lead. The larger webbase advantages and thermal conversion advantage
+were repeatable across the seven samples. The current conclusion is therefore
+that zhighs SpMV is at least in the same class as HiGHS and usually faster on
+this corpus, but it is not uniformly faster for every sparsity distribution.
+
+### Stable synthetic ownership and construction results
+
+| kernel (50k dimension, 149,998 nnz) | zhighs | C++/HiGHS harness | result |
+| --- | ---: | ---: | ---: |
+| CSR dense SpMV | 89.990 us | 113.018 us | zhighs 20.4% faster |
+| apply full row/column scale | 107.836 us | 118.864 us | zhighs 9.3% faster |
+| CSC -> CSR reusable | 272.527 us | 334.395 us | zhighs 18.5% faster |
+| CSC -> CSR owning | 1,365.465 us | 1,396.231 us | zhighs 2.2% faster |
+| transpose reusable/into | 291.938 us | 288.059 us | parity; zhighs 1.3% slower |
+| transpose owning | 920.299 us | 337.142 us | zhighs 2.73x slower |
+| builder canonical owning | 745.046 us | 256.373 us | zhighs 2.91x slower |
+| builder reusable | 277.446 us | 310.629 us | zhighs 10.7% faster |
+| builder general/sort | 3,009.064 us | 3,433.172 us | zhighs 12.4% faster |
+| sparse accumulate | 81.419 us | 243.653 us | zhighs 2.99x faster |
+
+The owning-transpose result improved about 7.7% versus the immediately prior
+Zig implementation (compact output reused as cursor), but remains the largest
+HiGHS gap. The near-equal reusable transpose shows that counting/prefix/scatter
+is not the cause. The owning Zig result constructs and retains both `usize` and
+`HUInt` starts, whereas the C++ result stores one `HighsInt` stream. The same
+representation and output-construction cost is visible in canonical builder;
+the reusable builder is already faster. These are the next justified perf and
+assembly targets. `csc_ax_dense`, `csc_atx_dense`, `alpha_ax_plus_y`, and
+`product_quad` had 13-45% median absolute deviation in at least one side during
+this synthetic run, so their single-run rankings are not used for a verdict;
+the real-data SpMV table is the authoritative product comparison.
+
+### Fair memory interpretation
+
+The acceptance runner peak RSS is not comparable with the narrower C++ runner:
+it deliberately keeps CSC, CSR workspace, transpose workspace, scaling copies,
+slice and permutation validation objects alive. For authoritative w32 CSC
+streams, the comparable formulas are currently `12*(cols+1) + 12*nnz` bytes
+for zhighs (wide plus compact starts) and `4*(cols+1) + 12*nnz` for HiGHS.
+
+| dataset | zhighs authoritative CSC | HiGHS authoritative CSC | zhighs overhead |
+| --- | ---: | ---: | ---: |
+| thermal1 | 7.52 MiB | 6.89 MiB | 9.2% |
+| cage12 | 24.75 MiB | 23.76 MiB | 4.2% |
+| webbase-1M | 46.98 MiB | 39.35 MiB | 19.4% |
+
+Thus the earlier whole-process impression that zhighs was universally crushed
+on memory was not a fair CSC-only comparison. A real and material deficit does
+remain for matrices with many columns: the duplicate wide/compact offset
+streams cost 7.63 MiB on webbase-1M and directly affect owning construction.

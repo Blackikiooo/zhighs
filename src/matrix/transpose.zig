@@ -56,21 +56,7 @@ pub fn transpose(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.A
 /// Transposes a canonical CSC matrix without repeating structural validation.
 /// The result carries compact HUInt offsets for downstream CSR/transpose speed.
 pub fn transposeAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
-    if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
-    var buffers = try TransposeBuffers.init(allocator, matrix.num_rows, matrix.nnz());
-    errdefer buffers.deinit(allocator);
-    try transposeIntoAssumeValid(matrix, buffers.starts, buffers.rows, buffers.values, buffers.cursor);
-    for (buffers.compact_starts, buffers.starts) |*destination, start| destination.* = @intCast(start);
-
-    return csc.CscMatrix.initPackedPartsAssumeValid(
-        matrix.num_cols,
-        matrix.num_rows,
-        buffers.starts,
-        buffers.rows,
-        buffers.values,
-        buffers.storage,
-        buffers.compact_starts,
-    );
+    return transposeLeanAssumeValidCompact(allocator, matrix);
 }
 
 /// Fast transpose without compact HUInt offsets.
@@ -114,10 +100,10 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
     return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, null);
 }
 
-/// Owning transpose using HUInt (4-byte) internal starts for reduced memory
-/// traffic.  Otherwise identical to `transposeLeanAssumeValid`.
-/// Experimental API: lean transpose retaining compact offsets. The compact
-/// representation may change when LP/presolve integration fixes its consumers.
+/// Owning transpose using HUInt (4-byte) cursor traffic and retaining compact
+/// offsets for downstream kernels. The compact output stream is reused as the
+/// cursor during construction and restored before return, so no dead scratch
+/// is retained and no separate cursor allocation is required.
 pub fn transposeLeanAssumeValidCompact(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -143,6 +129,12 @@ pub fn transposeLeanAssumeValidCompact(
         @sizeOf(foundation.RowId),
     ) catch return error.DimensionTooLarge;
 
+    const compact_starts_bytes = std.math.mul(
+        usize,
+        starts_len,
+        @sizeOf(foundation.HUInt),
+    ) catch return error.DimensionTooLarge;
+
     const values_bytes = std.math.mul(
         usize,
         nnz,
@@ -150,10 +142,11 @@ pub fn transposeLeanAssumeValidCompact(
     ) catch return error.DimensionTooLarge;
 
     const layout = memory.computeLayout(
-        3,
-        .{ starts_bytes, rows_bytes, values_bytes },
+        4,
+        .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes },
         .{
             @alignOf(usize),
+            @alignOf(foundation.HUInt),
             @alignOf(foundation.RowId),
             @alignOf(f64),
         },
@@ -169,19 +162,24 @@ pub fn transposeLeanAssumeValidCompact(
 
     const rows = @as(
         [*]foundation.RowId,
-        @ptrCast(@alignCast(storage.ptr + layout.offsets[1])),
-    )[0..nnz];
-
-    const out_values = @as(
-        [*]f64,
         @ptrCast(@alignCast(storage.ptr + layout.offsets[2])),
     )[0..nnz];
 
-    // Compact cursor remains HUInt throughout the scatter phase.
-    const cursor = try allocator.alloc(foundation.HUInt, new_num_cols);
-    defer allocator.free(cursor);
+    const compact_starts = @as(
+        [*]foundation.HUInt,
+        @ptrCast(@alignCast(storage.ptr + layout.offsets[1])),
+    )[0..starts_len];
 
-    @memset(cursor, 0);
+    const out_values = @as(
+        [*]f64,
+        @ptrCast(@alignCast(storage.ptr + layout.offsets[3])),
+    )[0..nnz];
+
+    // The final compact starts stream doubles as the scatter cursor. It is
+    // restored from wide starts after scatter, avoiding a second allocation
+    // without retaining dead workspace in the owning result.
+    const cursor = compact_starts[0..new_num_cols];
+    @memset(compact_starts, 0);
 
     // Direct histogram: no shifted +1 representation required.
     for (matrix.row_indices) |row_id| {
@@ -195,7 +193,6 @@ pub fn transposeLeanAssumeValidCompact(
 
         cursor[row] = running;
         starts[row] = @intCast(running);
-
         running += count;
     }
     starts[new_num_cols] = @intCast(running);
@@ -224,7 +221,9 @@ pub fn transposeLeanAssumeValidCompact(
         );
     }
 
-    return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, null);
+    for (compact_starts, starts) |*destination, start| destination.* = @intCast(start);
+
+    return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, compact_starts);
 }
 
 pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
@@ -333,6 +332,7 @@ test "transposing twice reproduces canonical CSC exactly" {
     defer original.deinit(std.testing.allocator);
     var once = try transposeAssumeValid(std.testing.allocator, original);
     defer once.deinit(std.testing.allocator);
+    try std.testing.expect(once.compact_col_starts != null);
     var twice = try transposeAssumeValid(std.testing.allocator, once);
     defer twice.deinit(std.testing.allocator);
 

@@ -72,7 +72,7 @@ pub fn scaleColumn(matrix: *csc.CscMatrix, col: foundation.ColId, factor: f64) c
         const result = value * factor;
         if (!std.math.isFinite(result) or result == 0.0) return error.NumericalOverflow;
     }
-    for (matrix.values[begin..end]) |*value| value.* *= factor;
+    scaleContiguousAssumeValid(matrix.values[begin..end], factor);
 }
 
 pub fn scaleRow(matrix: *csc.CscMatrix, row: foundation.RowId, factor: f64) csc.MatrixError!void {
@@ -100,10 +100,25 @@ pub fn applyColumnFactors(matrix: *csc.CscMatrix, factors: []const f64) csc.Matr
         }
     }
     for (0..matrix.num_cols) |col| {
-        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            matrix.values[position] *= factors[col];
-        }
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        scaleContiguousAssumeValid(matrix.values[begin..end], factors[col]);
     }
+}
+
+/// Explicit SIMD is intentional: LLVM does not vectorize the dynamically sized
+/// inner column loop even in ReleaseFast. Short columns use only the scalar
+/// tail, while columns at least one native vector wide use packed multiplies.
+inline fn scaleContiguousAssumeValid(values: []f64, factor: f64) void {
+    const lanes = memory.nativeVectorLanes(f64);
+    const Vec = @Vector(lanes, f64);
+    const vector_factor: Vec = @splat(factor);
+    var position: usize = 0;
+    while (position + lanes <= values.len) : (position += lanes) {
+        const pointer: *align(1) Vec = @ptrCast(values.ptr + position);
+        pointer.* *= vector_factor;
+    }
+    while (position < values.len) : (position += 1) values[position] *= factor;
 }
 
 pub fn applyRowFactors(matrix: *csc.CscMatrix, factors: []const f64) csc.MatrixError!void {
@@ -211,6 +226,22 @@ test "checked scaling failure does not partially modify values" {
     try std.testing.expectError(error.NumericalOverflow, apply(&matrix, .{ .row = &.{ 1.0, 1e308 }, .col = &.{2.0} }));
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, matrix.values);
     try std.testing.expectError(error.InvalidScaling, apply(&matrix, .{ .row = &.{ 1.0, 0.0 }, .col = &.{1.0} }));
+}
+
+test "column scaling SIMD bulk and scalar tail are exact" {
+    var starts = [_]usize{ 0, 9 };
+    var rows = [_]foundation.RowId{
+        try foundation.RowId.init(0), try foundation.RowId.init(1), try foundation.RowId.init(2),
+        try foundation.RowId.init(3), try foundation.RowId.init(4), try foundation.RowId.init(5),
+        try foundation.RowId.init(6), try foundation.RowId.init(7), try foundation.RowId.init(8),
+    };
+    // Use an intentionally offset slice: borrowed values do not promise native
+    // vector alignment, so both the bulk load/store and tail must support it.
+    var storage = [_]f64{ 99.0, 1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0 };
+    var matrix = csc.CscMatrix.initBorrowedAssumeValid(9, 1, &starts, &rows, storage[1..]);
+    try scaleColumn(&matrix, try foundation.ColId.init(0), 2.0);
+    try std.testing.expectEqualSlices(f64, &.{ 2.0, -4.0, 6.0, -8.0, 10.0, -12.0, 14.0, -16.0, 18.0 }, matrix.values);
+    try std.testing.expectEqual(@as(f64, 99.0), storage[0]);
 }
 
 test "max equilibration handles empty rows and columns" {

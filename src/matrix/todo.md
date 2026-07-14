@@ -405,3 +405,106 @@ gate 通过，真实数据与 synthetic profile 方向一致，且 `todo.md` 保
   full report 为 `/tmp/zhighs-matrix-acceptance/20260714T065632Z/summary.tsv`，四项全部 PASS。
   首次 full 尝试因未传 `MATRIX_DATASET_RUNNER` 而非代码失败，补齐 runner 路径后通过；
   该环境配置失败保留记录，不计作内核回归。
+
+## 2026-07-14 Matrix 布局、显式 SIMD 与 allocator 专项
+
+本批次坚持单变量实验：auto-layout/SoA 审计、显式 `@Vector` 和 allocator 策略分别测量，
+不得用一个组合改动宣称其中任一项有效。返回 owning 对象的 API 必须继续由调用方 allocator
+分配和释放；特殊 allocator 只用于生命周期边界清晰的 session 或短命 scratch。
+
+### E. 布局与生命周期
+
+- [x] 逐项计算 CSC、CSR、transpose、builder、sparse vector 的 authoritative bytes、scratch
+  bytes、padding 和 header，覆盖空/小/中/百万 nnz；结果写入 `bench/matrix/layout_results.md`。
+  authoritative owning data 若 page coloring 无可重复 cycles 收益且增加超过一页或 5%，则拒绝。
+- [x] 将默认 `transposeAssumeValid` 从“最终结果永久携带 cursor scratch”的布局切换为已经
+  存在的 lean compact 路径，前提是时间、结构 hash 和峰值字节实验通过。
+- [x] 评估 `CsrBuffers`/`TransposeBuffers` 是否应拆为 output storage 与 workspace；复用型
+  buffers 可以组合持有，但发布的 owning matrix/cache 不得保留无消费者的 scratch。
+- [x] 审计 Zig auto-layout 控制块中 slice 数量和按值传递边界；只在测得调用/寄存器开销时
+  缩减 header，不为了几十字节破坏清晰 ownership。
+
+布局结论：Zig 普通 struct 是 auto-layout，字段顺序不能作为 ABI/padding 优化手段；当前
+`CscMatrix` 104 B、view 64 B，真正的成本在 SoA 数据流而非控制头。w32 triplet builder 的
+`MultiArrayList` 为 24 B/entry（w64 为 32 B），SoA 方向正确，但 sequence 流仍为 8 B/entry。
+默认 compact builder 已由 page-colored 改为自然 packed + 64 B stream alignment：16 列/32 nnz
+由 12,736 B 降为 704 B，synthetic CSC sampled cycles 288.5M -> 284.5M。默认 owning transpose
+改为复用 compact starts 作为临时 cursor，scatter 后恢复最终 offsets；50k 列案例减少约
+200 KiB（约旧结果 8%）常驻空间且不再发生第二次分配，五进程 synthetic median
+约 982 us -> 906 us（快 7.7%），checksum/structural hash 相同。复用型
+`CsrBuffers`/`TransposeBuffers` 继续允许 output+workspace 组合持有；发布的
+`CsrCache` 和 owning transpose 均不再把 cursor 当 authoritative bytes。双 wide/compact starts
+在 webbase-1M 仍增加约 7.63 MiB，因 compact starts 已被热内核消费，留作后续公共 API 迁移项。
+
+### F. 显式 `@Vector` 候选
+
+- [x] 对连续列 value scaling 建立 scalar/auto-vector/manual `@Vector` A/B，并检查 LLVM 汇编；
+  checked preflight 与 mutation 分开测量，保持 failure atomicity。
+- [x] 对 `absoluteRange`/`maxAbs`/`assessValues` 评估显式 abs/min/max/compare reduction；验证
+  NaN、Inf、signed zero 语义和短 slice 尾部。
+- [x] 明确拒绝无收益候选：CSC scatter SpMV、transpose/CSR scatter、row scaling 的 gather/
+  scatter 或循环依赖若 perf 不支持，不引入手工 lane 构造。
+- [x] 仅当 perf cycles、instructions 与真实调用基准稳定改善且代码尺寸可接受时替换生产实现；
+  生产实现已替换，本批次 w32/w64、完整工程测试与 full acceptance 已收口。
+
+SIMD 结论：ReleaseFast scalar 列循环反汇编为 `vmulsd`，显式路径为 `vmulpd`。8/16/32/128
+nnz/列的 manual/scalar 时间比为 0.659/0.636/0.624/0.773，3 nnz/列为 0.993（中性）；因此
+短列自然走 scalar tail，较长连续列使用 native vector。`absoluteRange` 在 4K/131K/2M values
+的比值为 0.249/0.252/0.358，并由 `maxAbs` 复用。canonical matrix 禁止 NaN/Inf；新增测试覆盖
+非对齐 borrowed slice、signed zero、vector bulk 和 tail。`assessValues` 的计数循环、CSC scatter
+SpMV、transpose/CSR scatter、row scaling 均因早退、间接寻址或写依赖不强制向量化。
+
+### G. allocator 场景实验
+
+- [x] 比较 `smp_allocator`、`page_allocator`、Arena retain/reset 对短命批量 matrix build 的
+  时间、逻辑分配次数和 Arena retained capacity；Arena 只允许绑定 compile/presolve session 生命周期。
+- [x] 对 CSR/transpose 短命 cursor 比较普通 alloc/free、caller-owned reusable scratch 与小型
+  stack/fixed-buffer fallback；必须覆盖小矩阵和大矩阵回退。
+- [x] 保持 SpMV、norm、scaling 等迭代热循环 allocation-free；不得用 allocator 替代工作区复用。
+- [x] 特殊 allocator 只有在端到端场景净收益且 ownership/deinit 明确时进入生产路径；否则记录
+  “调用方可选策略”，不在 matrix 内核硬编码。
+
+allocator 结论：4 KiB stack fallback 在 64/256/1024/4096 个 HUInt scratch 上分别为普通
+alloc/free 的约 1.69/1.20/1.04/1.03 倍，拒绝替换；page allocator 在 64 维 build 慢 13.7--22.6 倍，
+512/4096 维无稳定收益，也拒绝。Arena retain/reset 对重复 512/4096 维 sorted build 降至
+`smp_allocator` 的 0.17--0.28/约 0.28，但会将返回对象生命周期绑定到 session reset，因此不在 matrix
+内部硬编码。`MatrixBuilder.freeze` 已明确 construction allocator 与 owning output allocator 可
+不同；compile/presolve 可由调用方用 Arena 管 triplet，再用长生命周期 allocator 输出矩阵。
+现有 reusable build/CSR/transpose-into buffers 是 ownership 清晰的生产方案。
+实验中的预留 sorted build 每轮有两次逻辑分配（triplet SoA 与 owning CSC）；Arena warm-up
+之后 reset-retain 不再请求 backing allocation，64/512/4096 维 retained capacity 分别约
+10.6/81.5/648.5 KiB。这里不把 Arena retention 当成 independently owned matrix 的峰值内存优势。
+
+本批次验证：`zig build test-matrix -Doptimize=ReleaseFast` 的 w32/w64 均通过，完整
+`zig build test -Doptimize=ReleaseFast` 通过，quick gate 通过；复用 compact-starts cursor 的
+最终版本 fail-closed full report 为
+`/tmp/zhighs-matrix-acceptance/20260714T085054Z/summary.tsv`，HiGHS differential、structural/
+OOM、三份真实大数据、Debug/ReleaseSafe/ReleaseFast × w32/w64 四项全部 PASS。此前
+`20260714T083447Z` 首轮仅因默认 Zig global cache 只读导致 differential 构建失败，使用
+`/tmp/zhighs-zig-cache` 重跑后通过，该环境失败不计作内核回归。
+
+### H. 修复后再次对比 HiGHS（2026-07-14）
+
+- [x] synthetic 使用 CPU 2、11 进程、Zig/C++ 交替先后顺序；真实 SuiteSparse 使用 7 进程
+  交替顺序。Zig `ReleaseFast -Dcpu=native`，C++ `-O3 -march=native -DNDEBUG -flto`，HiGHS
+  commit `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`；全部 checksum/structural hash 一致。
+- [x] 真实数据中，thermal/cage/web 的 CSC SpMV 分别比 HiGHS 快 7.3%/1.0%/13.7%，CSR
+  分别快 0.8%/5.9%/16.7%；CSC->CSR reusable 分别快 16.4%、慢 0.6%、快 4.2%。低于 1%
+  只判定为持平，不宣称领先。完整表写入 `bench/matrix/real_dataset_results.md`。
+- [x] synthetic 稳定项：CSR dense 快 20.4%，full scale 快 9.3%，CSR reusable conversion
+  快 18.5%，owning CSR 快 2.2%，transpose-into 慢 1.3%（持平），reusable builder 快 10.7%，
+  general builder 快 12.4%，sparse accumulate 快 66.6%。
+- [ ] owning transpose 仍为 920 us vs HiGHS 337 us（Zig 慢 2.73x）；本次 cursor 复用已令
+  Zig 自身快约 7.7%，但 reusable transpose 已基本持平，差距集中于 owning allocation 与
+  双 wide/compact starts 输出。下一批用 perf/汇编单独定位，不再修改 scatter 内核。
+- [ ] canonical owning builder 仍为 745 us vs 256 us（慢 2.91x），但 reusable builder 已快
+  10.7%；下一批拆分 output allocation、wide starts 填充、输入扫描/memcpy 做单变量 perf。
+- [ ] 建立等生命周期的 RSS runner。目前 acceptance Zig 进程额外保留 CSR/transpose/scaling/
+  permutation 验证对象，不能与窄 C++ runner RSS 直接比较。按 authoritative w32 CSC 数组计算，
+  Zig 相对 HiGHS 在 thermal/cage/web 多 9.2%/4.2%/19.4%；webbase 的双 offsets 多 7.63 MiB。
+
+本轮结论：不能说所有 matrix 路径已经完全超过 HiGHS。SpMV、reusable CSR conversion、通用
+builder 和 sparse accumulator 已达到持平或领先；主要剩余差距已收敛到 owning transpose、
+canonical/sorted owning build 以及双 offsets 的内存成本。高 MAD 的 synthetic CSC/product
+排名不作为结论，真实数据交错 medians 才作为 SpMV 判据。原始结果位于
+`/tmp/zhighs-matrix-after-layout/results` 与 `/tmp/zhighs-matrix-after-layout/real`。

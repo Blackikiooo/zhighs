@@ -28,8 +28,20 @@ pub fn eql(lhs: csc.CscMatrix, rhs: csc.CscMatrix) bool {
 /// Minimum and maximum absolute nonzero value, or null for an empty matrix.
 pub fn absoluteRange(matrix: csc.CscMatrix) ?AbsoluteRange {
     if (matrix.values.len == 0) return null;
-    var result: AbsoluteRange = .{ .min = @abs(matrix.values[0]), .max = @abs(matrix.values[0]) };
-    for (matrix.values[1..]) |value| {
+    const lanes = memory.nativeVectorLanes(f64);
+    const Vec = @Vector(lanes, f64);
+    var minima: Vec = @splat(std.math.inf(f64));
+    var maxima: Vec = @splat(0.0);
+    var position: usize = 0;
+    while (position + lanes <= matrix.values.len) : (position += lanes) {
+        const pointer: *align(1) const Vec = @ptrCast(matrix.values.ptr + position);
+        const magnitudes = @abs(pointer.*);
+        minima = @min(minima, magnitudes);
+        maxima = @max(maxima, magnitudes);
+    }
+    var result: AbsoluteRange = .{ .min = @reduce(.Min, minima), .max = @reduce(.Max, maxima) };
+    while (position < matrix.values.len) : (position += 1) {
+        const value = matrix.values[position];
         const magnitude = @abs(value);
         result.min = @min(result.min, magnitude);
         result.max = @max(result.max, magnitude);
@@ -59,9 +71,7 @@ pub fn hasLargeValue(matrix: csc.CscMatrix, large_limit: f64) csc.MatrixError!bo
 
 /// Largest absolute matrix entry. Returns zero for an empty matrix.
 pub fn maxAbs(matrix: csc.CscMatrix) f64 {
-    var result: f64 = 0.0;
-    for (matrix.values) |value| result = @max(result, @abs(value));
-    return result;
+    return if (absoluteRange(matrix)) |range| range.max else 0.0;
 }
 
 /// Writes the absolute sum of every column.
@@ -351,6 +361,23 @@ test "range assessment equality and alpha products" {
     var yt = [_]f64{ 1.0, 2.0 };
     try addTransposeProduct(matrix, 0.5, &.{ 2.0, 3.0 }, &yt);
     try std.testing.expectEqualSlices(f64, &.{ 6.75, 32.0 }, &yt);
+}
+
+test "absolute range SIMD bulk and scalar tail handle unaligned finite values" {
+    const RowId = foundation.RowId;
+    var starts = [_]usize{ 0, 9 };
+    var rows = [_]RowId{
+        try RowId.init(0), try RowId.init(1), try RowId.init(2),
+        try RowId.init(3), try RowId.init(4), try RowId.init(5),
+        try RowId.init(6), try RowId.init(7), try RowId.init(8),
+    };
+    var storage = [_]f64{ 123.0, -0.0, -8.0, 0.125, -3.0, 11.0, -5.0, 2.0, -7.0, 4.0 };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(9, 1, &starts, &rows, storage[1..]);
+    const range = absoluteRange(matrix).?;
+    try std.testing.expectEqual(@as(f64, 0.0), range.min);
+    try std.testing.expect(!std.math.signbit(range.min));
+    try std.testing.expectEqual(@as(f64, 11.0), range.max);
+    try std.testing.expectEqual(@as(f64, 11.0), maxAbs(matrix));
 }
 
 test "high precision products retain small residual" {

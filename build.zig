@@ -244,6 +244,31 @@ pub fn build(b: *std.Build) void {
     const matrix_layout_audit_step = b.step("audit-matrix-layout", "Print matrix type sizes, alignments, and field offsets");
     matrix_layout_audit_step.dependOn(&run_matrix_layout_audit.step);
 
+    const matrix_vector_experiment = b.addExecutable(.{
+        .name = "matrix-vector-experiment",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/vector_experiment.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_matrix_vector_experiment = b.addRunArtifact(matrix_vector_experiment);
+    const matrix_vector_experiment_step = b.step("experiment-matrix-vector", "Compare scalar and explicit @Vector matrix loops");
+    matrix_vector_experiment_step.dependOn(&run_matrix_vector_experiment.step);
+
+    const matrix_allocator_experiment = b.addExecutable(.{
+        .name = "matrix-allocator-experiment",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/allocator_experiment.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = matrix_bench_module }},
+        }),
+    });
+    const run_matrix_allocator_experiment = b.addRunArtifact(matrix_allocator_experiment);
+    const matrix_allocator_experiment_step = b.step("experiment-matrix-allocator", "Compare matrix scratch and session allocators");
+    matrix_allocator_experiment_step.dependOn(&run_matrix_allocator_experiment.step);
+
     const matrix_dataset_runner = b.addExecutable(.{
         .name = "matrix-dataset-runner",
         .root_module = b.createModule(.{
