@@ -126,6 +126,30 @@ Reusable CSC 构建在同数学语义测试中比 C++ AoS reusable reference 快
 42%；两端 checksum 与 struct hash 均匹配。该结果的 Zig MAD 为 0.33%，
 C++ MAD 为 0.46%，是本轮可信度较高的结果。
 
+### 2026-07-14 CSC transform reusable buffers
+
+`CscTransformBuffers` 为 edit、slice 和 permutation 提供共同的 64-byte aligned
+output/scratch capacity contract。下表使用 50,000 x 50,000、149,998 nnz 的固定
+三对角矩阵，ReleaseFast，每个 kernel 100 次；计时包含 checked API validation，
+owning 路径包含 allocation/deallocation，Into 路径复用同一组已分配 buffers。
+
+| kernel | owning | reusable Into | 改善 |
+|---|---:|---:|---:|
+| extract contiguous 25,000 columns | 447 us | 192 us | 2.32x |
+| reverse row/column permutation | 1,981 us | 1,488 us | 1.33x |
+| append 1,024 CSR rows / 3,072 nnz | 1,171 us | 584 us | 2.01x |
+
+复现命令：`zig build bench-matrix -Doptimize=ReleaseFast`。Into 返回借用
+`CscView`，下一次写入相同 buffers 或 buffers deinit 后失效。容量不足在写 output
+前返回 `error.BufferTooSmall`；row slice/delete 和 checked permutation 的 index
+scratch 同样由 caller 持有。
+
+同日将 `CsrBuffers` 接入真实 `MatrixStore.csr()` revision rebuild：相同 50,000
+x 50,000 数据集上，逐轮修改一个已有 matrix value、使 CSR cache 失效并重建，
+100 次平均为 249 us；直接 `fillCsrFromCscAssumeValid` Into 基线为 245 us。由此确认
+生产路径已经消除旧 owning rebuild 约 721 us 的重复 allocation/deallocation，且
+保留 revision cache 的语义开销仅约 1.6%。较小后续矩阵会保留并复用高水位 storage。
+
 ## 5. 待执行
 
 | 优先级 | 任务 | 需 sudo |

@@ -10,6 +10,8 @@ const product_repeats: usize = 200;
 const quad_repeats: usize = 100;
 const transform_repeats: usize = 100;
 const accumulator_repeats: usize = 200;
+const appended_rows: usize = 1_024;
+const appended_nnz: usize = appended_rows * 3;
 
 fn nowNs() i128 {
     var ts: std.posix.timespec = undefined;
@@ -73,11 +75,17 @@ pub fn main() !void {
     try fillSorted(&builder, allocator);
     var matrix = try builder.freezeSortedAssumeValid(allocator, 0.0);
     defer matrix.deinit(allocator);
+    var store_matrix = try matrix.clone(allocator);
+    var matrix_store = zhighs.matrix.MatrixStore.initAssumeValid(store_matrix);
+    store_matrix = undefined;
+    defer matrix_store.deinit(allocator);
 
     var csr_buffers = try zhighs.matrix.CsrBuffers.init(allocator, dimension, nnz);
     defer csr_buffers.deinit(allocator);
     var transpose_buffers = try zhighs.matrix.TransposeBuffers.init(allocator, dimension, nnz);
     defer transpose_buffers.deinit(allocator);
+    var transform_buffers = try zhighs.matrix.CscTransformBuffers.initCapacity(allocator, dimension, nnz + appended_nnz, dimension);
+    defer transform_buffers.deinit(allocator);
     var csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, csr_buffers.cursor);
     defer csr_cache.deinit(allocator);
     const csr = csr_cache.viewAssumeCurrent();
@@ -100,6 +108,16 @@ pub fn main() !void {
     defer allocator.free(row_scale);
     const col_scale = try allocator.alloc(f64, dimension);
     defer allocator.free(col_scale);
+    const row_permutation = try allocator.alloc(zhighs.RowId, dimension);
+    defer allocator.free(row_permutation);
+    const col_permutation = try allocator.alloc(zhighs.ColId, dimension);
+    defer allocator.free(col_permutation);
+    const appended_row_starts = try allocator.alloc(usize, appended_rows + 1);
+    defer allocator.free(appended_row_starts);
+    const appended_col_indices = try allocator.alloc(zhighs.ColId, appended_nnz);
+    defer allocator.free(appended_col_indices);
+    const appended_values = try allocator.alloc(f64, appended_nnz);
+    defer allocator.free(appended_values);
     @memset(dense_x, 1.0);
     for (sparse_x, 0..) |*value, index| value.* = if (index % 20 == 0) 1.0 else 0.0;
     for (sparse_ids, sparse_values, 0..) |*id, *value, index| {
@@ -109,6 +127,18 @@ pub fn main() !void {
     const sparse_view: zhighs.matrix.SparseVectorView(zhighs.ColId) = .{ .dimension = dimension, .indices = sparse_ids, .values = sparse_values };
     @memset(row_scale, 1.0);
     @memset(col_scale, 1.0);
+    for (row_permutation, col_permutation, 0..) |*row, *col, index| {
+        row.* = try zhighs.RowId.fromUsize(dimension - 1 - index);
+        col.* = try zhighs.ColId.fromUsize(dimension - 1 - index);
+    }
+    for (0..appended_rows) |row| {
+        appended_row_starts[row] = row * 3;
+        for (0..3) |offset| {
+            appended_col_indices[row * 3 + offset] = try zhighs.ColId.fromUsize(row * 3 + offset);
+            appended_values[row * 3 + offset] = @floatFromInt(offset + 1);
+        }
+    }
+    appended_row_starts[appended_rows] = appended_nnz;
 
     std.debug.print("implementation,kernel,dimension,nnz,repeats,total_ns,ns_per_repeat,checksum\n", .{});
 
@@ -244,6 +274,16 @@ pub fn main() !void {
     }
     report("csc_to_csr_into", transform_repeats, start, csr_buffers.values[0]);
 
+    _ = try matrix_store.csr(allocator);
+    start = nowNs();
+    for (0..transform_repeats) |repeat| {
+        const replacement_value: f64 = if (repeat & 1 == 0) 5.0 else 4.0;
+        try matrix_store.updateValuesAtPositionsAssumeValid(allocator, &.{0}, &.{replacement_value});
+        const rebuilt = try matrix_store.csr(allocator);
+        clobberPtr(rebuilt.values.ptr);
+    }
+    report("matrix_store_csr_rebuild", transform_repeats, start, matrix_store.csc().values[0]);
+
     start = nowNs();
     for (0..transform_repeats) |_| {
         var transposed = try zhighs.matrix.transposeAssumeValid(allocator, matrix);
@@ -258,6 +298,51 @@ pub fn main() !void {
         clobberPtr(transpose_buffers.values.ptr);
     }
     report("transpose_into", transform_repeats, start, transpose_buffers.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        var extracted = try zhighs.matrix.extractColumnRange(allocator, matrix, dimension / 4, 3 * dimension / 4);
+        clobberPtr(extracted.values.ptr);
+        extracted.deinit(allocator);
+    }
+    report("extract_column_range", transform_repeats, start, matrix.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        const view = try zhighs.matrix.extractColumnRangeInto(&transform_buffers, matrix, dimension / 4, 3 * dimension / 4);
+        clobberPtr(view.values.ptr);
+    }
+    report("extract_column_range_into", transform_repeats, start, transform_buffers.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        var permuted = try zhighs.matrix.permute(allocator, matrix, row_permutation, col_permutation);
+        clobberPtr(permuted.values.ptr);
+        permuted.deinit(allocator);
+    }
+    report("permute", transform_repeats, start, matrix.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        const view = try zhighs.matrix.permuteInto(&transform_buffers, matrix, row_permutation, col_permutation);
+        clobberPtr(view.values.ptr);
+    }
+    report("permute_into", transform_repeats, start, transform_buffers.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        var appended = try zhighs.matrix.appendRowsFromCsr(allocator, matrix, appended_row_starts, appended_col_indices, appended_values);
+        clobberPtr(appended.values.ptr);
+        appended.deinit(allocator);
+    }
+    report("append_rows_csr", transform_repeats, start, matrix.values[0]);
+
+    start = nowNs();
+    for (0..transform_repeats) |_| {
+        const view = try zhighs.matrix.appendRowsFromCsrInto(&transform_buffers, matrix, appended_row_starts, appended_col_indices, appended_values);
+        clobberPtr(view.values.ptr);
+    }
+    report("append_rows_csr_into", transform_repeats, start, transform_buffers.values[0]);
 
     builder.clearRetainingCapacity();
     try fillSorted(&builder, allocator);

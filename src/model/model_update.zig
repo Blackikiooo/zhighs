@@ -14,6 +14,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Model = @import("model.zig").Model;
 const genconstr = @import("model_genconstr.zig");
+const edit_plan_module = @import("model_edit_plan.zig");
 const foundation = @import("foundation");
 const matrix = @import("matrix");
 
@@ -24,19 +25,7 @@ const GenConstrType = types.GenConstrType;
 const RowId = foundation.RowId;
 const CscMatrix = matrix.CscMatrix;
 const MatrixStore = matrix.MatrixStore;
-
-const CoefficientDelta = struct {
-    row: usize,
-    col: usize,
-    value: f64,
-    sequence: usize,
-
-    fn lessThan(_: void, lhs: CoefficientDelta, rhs: CoefficientDelta) bool {
-        if (lhs.col != rhs.col) return lhs.col < rhs.col;
-        if (lhs.row != rhs.row) return lhs.row < rhs.row;
-        return lhs.sequence < rhs.sequence;
-    }
-};
+const ModelEditPlan = edit_plan_module.ModelEditPlan;
 
 /// Apply all queued modifications.
 ///
@@ -50,16 +39,15 @@ pub fn updateModel(self: *Model) ModelError!void {
 pub fn applyPending(self: *Model) ModelError!void {
     const alloc = self.allocator;
 
-    var structure_changed = false;
-    var matrix_values_changed = false;
-    var bounds_changed = false;
-    var objective_changed = false;
-    for (self.pending.items) |change| switch (change) {
-        .add_var, .add_constr, .del_vars, .del_constrs, .chg_type => structure_changed = true,
-        .chg_coeff => matrix_values_changed = true,
-        .chg_bounds, .chg_rhs, .chg_sense => bounds_changed = true,
-        .chg_obj => objective_changed = true,
-    };
+    if (edit_plan_module.isDirectScalarSegment(self.pending.items))
+        return applyDirectScalarSegment(self);
+
+    var edit_plan = ModelEditPlan.build(alloc, self.pending.items) catch return error.OutOfMemory;
+    defer edit_plan.deinit(alloc);
+    const structure_changed = edit_plan.has_structure;
+    const matrix_values_changed = edit_plan.coefficients.len != 0;
+    const bounds_changed = edit_plan.bounds.len != 0 or edit_plan.rhs.len != 0 or edit_plan.senses.len != 0;
+    const objective_changed = edit_plan.objective.len != 0;
 
     // Count how many vars and constrs will be added.
     var new_vars: usize = 0;
@@ -151,26 +139,35 @@ pub fn applyPending(self: *Model) ModelError!void {
     // Build the constraint matrix by collecting all column data
     // from pending add_var entries.
     if (new_vars > 0 or new_constrs > 0) {
-        // Count column non-zero entries from pending add_var changes.
+        // Count both appended CSC columns and appended CSR rows. The latter
+        // must be scattered into existing/new columns during the same packed
+        // rebuild; previously add_constr coefficient payloads were ignored.
         var col_nnz: usize = 0;
-        var col_nz_counts: std.ArrayListUnmanaged(usize) = .empty;
-        // Initialise with existing columns.
         const existing_csc = self.matrix.csc();
         for (0..self.num_vars) |col| {
             const cnt = existing_csc.col_starts[col + 1] - existing_csc.col_starts[col];
-            col_nz_counts.append(alloc, cnt) catch return error.OutOfMemory;
             col_nnz += cnt;
         }
-        // Add pending columns.
         for (self.pending.items) |chg| {
             switch (chg) {
                 .add_var => |v| {
-                    col_nz_counts.append(alloc, v.num_nz) catch return error.OutOfMemory;
                     col_nnz += v.num_nz;
                 },
                 else => {},
             }
         }
+        var counted_added_row: usize = 0;
+        for (self.pending.items) |chg| switch (chg) {
+            .add_constr => |c| {
+                const target_row = self.num_constrs + counted_added_row;
+                for (c.cind[0..c.num_nz]) |target_col| {
+                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, target_row) == null)
+                        col_nnz = std.math.add(usize, col_nnz, 1) catch return error.InvalidArgument;
+                }
+                counted_added_row += 1;
+            },
+            else => {},
+        };
 
         // Build the new CSC matrix.
         const num_cols = total_vars;
@@ -180,36 +177,83 @@ pub fn applyPending(self: *Model) ModelError!void {
         var new_row_indices = try alloc.alloc(RowId, col_nnz);
         var new_values = try alloc.alloc(f64, col_nnz);
 
-        new_col_starts[0] = 0;
-        var pos: usize = 0;
-
-        // Copy existing columns.
-        var col: usize = 0;
-        while (col < self.num_vars) : (col += 1) {
-            const begin = existing_csc.col_starts[col];
-            const end = existing_csc.col_starts[col + 1];
-            const len = end - begin;
-            @memcpy(new_row_indices[pos .. pos + len], existing_csc.row_indices[begin..end]);
-            @memcpy(new_values[pos .. pos + len], existing_csc.values[begin..end]);
-            pos += len;
-            new_col_starts[col + 1] = pos;
-        }
-
-        // Add pending columns.
+        @memset(new_col_starts, 0);
+        for (0..self.num_vars) |col|
+            new_col_starts[col + 1] = existing_csc.col_starts[col + 1] - existing_csc.col_starts[col];
+        var col = self.num_vars;
         for (self.pending.items) |chg| {
             switch (chg) {
                 .add_var => |v| {
-                    for (v.vind[0..v.num_nz], 0..) |ci, j| {
-                        new_row_indices[pos + j] = RowId.fromUsizeAssumeValid(ci);
-                    }
-                    @memcpy(new_values[pos .. pos + v.num_nz], v.vval);
-                    pos += v.num_nz;
-                    new_col_starts[col + 1] = pos;
+                    new_col_starts[col + 1] = v.num_nz;
                     col += 1;
                 },
                 else => {},
             }
         }
+        var offset_counted_row: usize = 0;
+        for (self.pending.items) |chg| switch (chg) {
+            .add_constr => |c| {
+                const target_row = self.num_constrs + offset_counted_row;
+                for (c.cind[0..c.num_nz]) |target_col| {
+                    if (target_col >= num_cols) return error.InvalidArgument;
+                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, target_row) == null)
+                        new_col_starts[target_col + 1] += 1;
+                }
+                offset_counted_row += 1;
+            },
+            else => {},
+        };
+        for (0..num_cols) |column| new_col_starts[column + 1] += new_col_starts[column];
+        const column_begins = try alloc.dupe(usize, new_col_starts[0..num_cols]);
+        defer alloc.free(column_begins);
+
+        // Use starts as per-column cursors. Existing entries precede appended
+        // rows; added constraints are visited in increasing new row order.
+        for (0..self.num_vars) |column| {
+            const begin = existing_csc.col_starts[column];
+            const end = existing_csc.col_starts[column + 1];
+            const count = end - begin;
+            const destination = new_col_starts[column];
+            @memcpy(new_row_indices[destination..][0..count], existing_csc.row_indices[begin..end]);
+            @memcpy(new_values[destination..][0..count], existing_csc.values[begin..end]);
+            new_col_starts[column] += count;
+        }
+        col = self.num_vars;
+        for (self.pending.items) |chg| switch (chg) {
+            .add_var => |v| {
+                const destination = new_col_starts[col];
+                for (v.vind[0..v.num_nz], 0..) |row, index|
+                    new_row_indices[destination + index] = RowId.fromUsizeAssumeValid(row);
+                @memcpy(new_values[destination..][0..v.num_nz], v.vval);
+                new_col_starts[col] += v.num_nz;
+                col += 1;
+            },
+            else => {},
+        };
+        var added_row: usize = 0;
+        for (self.pending.items) |chg| switch (chg) {
+            .add_constr => |c| {
+                const row_id = RowId.fromUsizeAssumeValid(self.num_constrs + added_row);
+                for (c.cind[0..c.num_nz], c.cval[0..c.num_nz]) |target_col, value| {
+                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, row_id.toUsize())) |offset| {
+                        new_values[column_begins[target_col] + offset] = value;
+                        continue;
+                    }
+                    const destination = new_col_starts[target_col];
+                    new_row_indices[destination] = row_id;
+                    new_values[destination] = value;
+                    new_col_starts[target_col] += 1;
+                }
+                added_row += 1;
+            },
+            else => {},
+        };
+        col = num_cols;
+        while (col > 0) {
+            new_col_starts[col] = new_col_starts[col - 1];
+            col -= 1;
+        }
+        new_col_starts[0] = 0;
 
         // Validate row indices are within the total constraint count.
         for (new_row_indices) |ri| {
@@ -217,7 +261,6 @@ pub fn applyPending(self: *Model) ModelError!void {
                 alloc.free(new_col_starts);
                 alloc.free(new_row_indices);
                 alloc.free(new_values);
-                col_nz_counts.deinit(alloc);
                 return error.InvalidArgument;
             }
         }
@@ -229,55 +272,54 @@ pub fn applyPending(self: *Model) ModelError!void {
             alloc.free(new_col_starts);
             alloc.free(new_row_indices);
             alloc.free(new_values);
-            col_nz_counts.deinit(alloc);
             return error.InvalidArgument;
         };
         self.matrix.replaceMatrixAssumeValid(alloc, new_csc) catch {
             alloc.free(new_col_starts);
             alloc.free(new_row_indices);
             alloc.free(new_values);
-            col_nz_counts.deinit(alloc);
             return error.RevisionOverflow;
         };
-        col_nz_counts.deinit(alloc);
     }
 
     // Apply every coefficient delta in one canonical merge. This avoids one
     // complete CSC copy and one cache invalidation per queued change.
     if (matrix_values_changed)
-        try applyCoefficientChanges(self, total_vars, total_constrs);
+        try applyCoefficientChanges(self, &edit_plan, total_vars, total_constrs);
 
-    // Apply non-matrix changes. Deletions are handled as one remapping batch
+    // Apply normalized scalar streams once per target. Deletions are handled
     // below after scalar attributes have been committed.
-    for (self.pending.items) |chg| {
-        switch (chg) {
-            .chg_bounds => |b| {
-                if (b.var_idx < self.var_lb.len) {
-                    self.var_lb[b.var_idx] = b.lb;
-                    self.var_ub[b.var_idx] = b.ub;
-                }
-            },
-            .chg_obj => |o| {
-                if (o.var_idx < self.var_obj.len) {
-                    self.var_obj[o.var_idx] = o.obj;
-                }
-            },
-            .chg_rhs => |r| {
-                if (r.constr_idx < self.constr_rhs.len) {
-                    self.constr_rhs[r.constr_idx] = r.rhs;
-                }
-            },
-            .chg_sense => |s| {
-                if (s.constr_idx < self.constr_sense.len) {
-                    self.constr_sense[s.constr_idx] = s.sense;
-                }
-            },
-            .chg_type => |t| {
-                if (t.var_idx < self.var_type.len) {
-                    self.var_type[t.var_idx] = t.vtype;
-                }
-            },
-            else => {},
+    {
+        const fields = edit_plan.bounds.slice();
+        for (fields.items(.index), fields.items(.lower), fields.items(.upper)) |index, lower, upper| {
+            if (index < self.var_lb.len) {
+                self.var_lb[index] = lower;
+                self.var_ub[index] = upper;
+            }
+        }
+    }
+    {
+        const fields = edit_plan.objective.slice();
+        for (fields.items(.index), fields.items(.value)) |index, value| {
+            if (index < self.var_obj.len) self.var_obj[index] = value;
+        }
+    }
+    {
+        const fields = edit_plan.rhs.slice();
+        for (fields.items(.index), fields.items(.value)) |index, value| {
+            if (index < self.constr_rhs.len) self.constr_rhs[index] = value;
+        }
+    }
+    {
+        const fields = edit_plan.senses.slice();
+        for (fields.items(.index), fields.items(.value)) |index, value| {
+            if (index < self.constr_sense.len) self.constr_sense[index] = value;
+        }
+    }
+    {
+        const fields = edit_plan.types.slice();
+        for (fields.items(.index), fields.items(.value)) |index, value| {
+            if (index < self.var_type.len) self.var_type[index] = value;
         }
     }
 
@@ -285,13 +327,8 @@ pub fn applyPending(self: *Model) ModelError!void {
     // references variables (quadratic objective/constraints, PWL and SOS).
     // General constraints still require a dedicated remapping pass; refusing
     // that mixed case is safer than leaving stale indices.
-    var delete_var_count: usize = 0;
-    var delete_constr_count: usize = 0;
-    for (self.pending.items) |chg| switch (chg) {
-        .del_vars => |d| delete_var_count += d.indices.len,
-        .del_constrs => |d| delete_constr_count += d.indices.len,
-        else => {},
-    };
+    const delete_var_count = edit_plan.deleted_vars.items.len;
+    const delete_constr_count = edit_plan.deleted_constraints.items.len;
     if (delete_var_count > 0 or delete_constr_count > 0) {
         var deleted_vars = try alloc.alloc(bool, total_vars);
         defer alloc.free(deleted_vars);
@@ -300,17 +337,14 @@ pub fn applyPending(self: *Model) ModelError!void {
         @memset(deleted_vars, false);
         @memset(deleted_constrs, false);
 
-        for (self.pending.items) |chg| switch (chg) {
-            .del_vars => |d| for (d.indices) |idx| {
-                if (idx >= total_vars) return error.InvalidArgument;
-                deleted_vars[idx] = true;
-            },
-            .del_constrs => |d| for (d.indices) |idx| {
-                if (idx >= total_constrs) return error.InvalidArgument;
-                deleted_constrs[idx] = true;
-            },
-            else => {},
-        };
+        for (edit_plan.deleted_vars.items) |idx| {
+            if (idx >= total_vars) return error.InvalidArgument;
+            deleted_vars[idx] = true;
+        }
+        for (edit_plan.deleted_constraints.items) |idx| {
+            if (idx >= total_constrs) return error.InvalidArgument;
+            deleted_constrs[idx] = true;
+        }
 
         while (self.var_handles.liveLen() < total_vars) {
             const id = self.var_handles.allocate(alloc) catch return error.OutOfMemory;
@@ -420,17 +454,6 @@ pub fn applyPending(self: *Model) ModelError!void {
             self.genconstr_count = self.genconstr_types.len;
             const gen_remap = self.genconstr_handles.compact(alloc, gen_deleted) catch return error.OutOfMemory;
             alloc.free(gen_remap);
-        }
-
-        // Count unique deletions, not command entries: callers may submit the
-        // same index more than once in one batch.
-        delete_var_count = 0;
-        for (deleted_vars) |marked| {
-            if (marked) delete_var_count += 1;
-        }
-        delete_constr_count = 0;
-        for (deleted_constrs) |marked| {
-            if (marked) delete_constr_count += 1;
         }
 
         // Ensure handle tables contain every pre-compaction dense entry.
@@ -722,60 +745,91 @@ pub fn applyPending(self: *Model) ModelError!void {
     if (objective_changed) try self.markRevision(.objective);
 }
 
+fn addedColumnRowOffset(pending: []const @import("model_pending.zig").PendingChange, existing_cols: usize, target_col: usize, target_row: usize) ?usize {
+    if (target_col < existing_cols) return null;
+    const added_col = target_col - existing_cols;
+    var ordinal: usize = 0;
+    for (pending) |change| switch (change) {
+        .add_var => |column| {
+            if (ordinal == added_col) {
+                for (column.vind[0..column.num_nz], 0..) |row, offset| {
+                    if (row == target_row) return offset;
+                }
+                return null;
+            }
+            ordinal += 1;
+        },
+        else => {},
+    };
+    return null;
+}
+
+fn applyDirectScalarSegment(self: *Model) ModelError!void {
+    var structure_changed = false;
+    var bounds_changed = false;
+    var objective_changed = false;
+    for (self.pending.items) |change| switch (change) {
+        .chg_bounds => |edit| {
+            bounds_changed = true;
+            if (edit.var_idx < self.var_lb.len) {
+                self.var_lb[edit.var_idx] = edit.lb;
+                self.var_ub[edit.var_idx] = edit.ub;
+            }
+        },
+        .chg_obj => |edit| {
+            objective_changed = true;
+            if (edit.var_idx < self.var_obj.len) self.var_obj[edit.var_idx] = edit.obj;
+        },
+        .chg_rhs => |edit| {
+            bounds_changed = true;
+            if (edit.constr_idx < self.constr_rhs.len) self.constr_rhs[edit.constr_idx] = edit.rhs;
+        },
+        .chg_sense => |edit| {
+            bounds_changed = true;
+            if (edit.constr_idx < self.constr_sense.len) self.constr_sense[edit.constr_idx] = edit.sense;
+        },
+        .chg_type => |edit| {
+            structure_changed = true;
+            if (edit.var_idx < self.var_type.len) self.var_type[edit.var_idx] = edit.vtype;
+        },
+        else => unreachable,
+    };
+    self.pending.clearRetainingCapacity();
+    self.has_pending = false;
+    self.revision += 1;
+    if (structure_changed) try self.markRevision(.structure);
+    if (bounds_changed) try self.markRevision(.bounds);
+    if (objective_changed) try self.markRevision(.objective);
+}
+
 /// Sorts and coalesces queued coefficient sets, then merges them with the
 /// canonical CSC matrix in two linear passes. Repeated coordinates use
 /// last-write-wins semantics. A zero delta removes an existing nonzero; a
 /// nonzero delta inserts a previously absent coordinate.
-fn applyCoefficientChanges(self: *Model, num_cols: usize, num_rows: usize) ModelError!void {
+fn applyCoefficientChanges(self: *Model, plan: *ModelEditPlan, num_cols: usize, num_rows: usize) ModelError!void {
     const allocator = self.allocator;
-    var delta_count: usize = 0;
-    for (self.pending.items) |change| switch (change) {
-        .chg_coeff => |delta| {
-            if (delta.var_idx < num_cols and delta.constr_idx < num_rows) delta_count += 1;
-        },
-        else => {},
-    };
-    if (delta_count == 0) return;
-
-    const deltas = try allocator.alloc(CoefficientDelta, delta_count);
-    defer allocator.free(deltas);
+    var fields = plan.coefficients.slice();
+    const input_rows = fields.items(.row);
+    const input_cols = fields.items(.col);
     var write: usize = 0;
-    for (self.pending.items, 0..) |change, sequence| switch (change) {
-        .chg_coeff => |delta| {
-            if (delta.var_idx >= num_cols or delta.constr_idx >= num_rows) continue;
-            if (!std.math.isFinite(delta.new_val)) return error.InvalidArgument;
-            deltas[write] = .{
-                .row = delta.constr_idx,
-                .col = delta.var_idx,
-                .value = delta.new_val,
-                .sequence = sequence,
-            };
-            write += 1;
-        },
-        else => {},
-    };
-    std.debug.assert(write == delta_count);
-    std.sort.pdq(CoefficientDelta, deltas, {}, CoefficientDelta.lessThan);
-
-    // Compact equal coordinates in place. Sorting by sequence makes the final
-    // member of each group the last user-visible set operation.
-    var read: usize = 0;
-    write = 0;
-    while (read < deltas.len) {
-        var last = read;
-        read += 1;
-        while (read < deltas.len and deltas[read].col == deltas[last].col and deltas[read].row == deltas[last].row) : (read += 1)
-            last = read;
-        deltas[write] = deltas[last];
+    for (0..plan.coefficients.len) |read| {
+        if (input_cols[read] >= num_cols or input_rows[read] >= num_rows) continue;
+        fields.set(write, fields.get(read));
         write += 1;
     }
-    const unique = deltas[0..write];
+    plan.coefficients.shrinkRetainingCapacity(write);
+    if (write == 0) return;
+    fields = plan.coefficients.slice();
+    const rows = fields.items(.row);
+    const cols = fields.items(.col);
+    const values = fields.items(.value);
+    for (values) |value| if (!std.math.isFinite(value)) return error.InvalidArgument;
     const current = self.matrix.csc();
 
     // The overwhelmingly common case changes values at coordinates that
     // already exist. Validate every position first, then mutate only the value
     // stream in place: no O(nnz) copy and no structural allocation.
-    if (try applyExistingCoefficientValuesFast(self, current.*, unique)) return;
+    if (try applyExistingCoefficientValuesFast(self, current.*, rows, cols, values)) return;
 
     var changed = false;
     var delta_pos: usize = 0;
@@ -787,22 +841,22 @@ fn applyCoefficientChanges(self: *Model, num_cols: usize, num_rows: usize) Model
         var old_pos = current.col_starts[col];
         const old_end = current.col_starts[col + 1];
         var count: usize = 0;
-        while (old_pos < old_end or (delta_pos < unique.len and unique[delta_pos].col == col)) {
+        while (old_pos < old_end or (delta_pos < values.len and cols[delta_pos] == col)) {
             const old_row = if (old_pos < old_end) current.row_indices[old_pos].toUsize() else std.math.maxInt(usize);
-            const delta_row = if (delta_pos < unique.len and unique[delta_pos].col == col) unique[delta_pos].row else std.math.maxInt(usize);
+            const delta_row = if (delta_pos < values.len and cols[delta_pos] == col) rows[delta_pos] else std.math.maxInt(usize);
             if (old_row < delta_row) {
                 count += 1;
                 old_pos += 1;
             } else if (delta_row < old_row) {
-                if (unique[delta_pos].value != 0.0) {
+                if (values[delta_pos] != 0.0) {
                     count += 1;
                     changed = true;
                 }
                 delta_pos += 1;
             } else {
-                if (unique[delta_pos].value != 0.0) {
+                if (values[delta_pos] != 0.0) {
                     count += 1;
-                    if (unique[delta_pos].value != current.values[old_pos]) changed = true;
+                    if (values[delta_pos] != current.values[old_pos]) changed = true;
                 } else {
                     changed = true;
                 }
@@ -827,27 +881,25 @@ fn applyCoefficientChanges(self: *Model, num_cols: usize, num_rows: usize) Model
         replacement.col_starts[col] = output_pos;
         var old_pos = current.col_starts[col];
         const old_end = current.col_starts[col + 1];
-        while (old_pos < old_end or (delta_pos < unique.len and unique[delta_pos].col == col)) {
+        while (old_pos < old_end or (delta_pos < values.len and cols[delta_pos] == col)) {
             const old_row = if (old_pos < old_end) current.row_indices[old_pos].toUsize() else std.math.maxInt(usize);
-            const delta_row = if (delta_pos < unique.len and unique[delta_pos].col == col) unique[delta_pos].row else std.math.maxInt(usize);
+            const delta_row = if (delta_pos < values.len and cols[delta_pos] == col) rows[delta_pos] else std.math.maxInt(usize);
             if (old_row < delta_row) {
                 replacement.row_indices[output_pos] = current.row_indices[old_pos];
                 replacement.values[output_pos] = current.values[old_pos];
                 output_pos += 1;
                 old_pos += 1;
             } else if (delta_row < old_row) {
-                const delta = unique[delta_pos];
-                if (delta.value != 0.0) {
-                    replacement.row_indices[output_pos] = RowId.fromUsizeAssumeValid(delta.row);
-                    replacement.values[output_pos] = delta.value;
+                if (values[delta_pos] != 0.0) {
+                    replacement.row_indices[output_pos] = RowId.fromUsizeAssumeValid(rows[delta_pos]);
+                    replacement.values[output_pos] = values[delta_pos];
                     output_pos += 1;
                 }
                 delta_pos += 1;
             } else {
-                const delta = unique[delta_pos];
-                if (delta.value != 0.0) {
+                if (values[delta_pos] != 0.0) {
                     replacement.row_indices[output_pos] = current.row_indices[old_pos];
-                    replacement.values[output_pos] = delta.value;
+                    replacement.values[output_pos] = values[delta_pos];
                     output_pos += 1;
                 }
                 old_pos += 1;
@@ -857,24 +909,24 @@ fn applyCoefficientChanges(self: *Model, num_cols: usize, num_rows: usize) Model
     }
     replacement.col_starts[num_cols] = output_pos;
     std.debug.assert(output_pos == output_nnz);
-    std.debug.assert(delta_pos == unique.len);
+    std.debug.assert(delta_pos == values.len);
     self.matrix.replaceMatrixAssumeValid(allocator, replacement) catch return error.RevisionOverflow;
 }
 
-fn applyExistingCoefficientValuesFast(self: *Model, current: CscMatrix, deltas: []const CoefficientDelta) ModelError!bool {
+fn applyExistingCoefficientValuesFast(self: *Model, current: CscMatrix, rows: []const usize, cols: []const usize, new_values: []const f64) ModelError!bool {
     const allocator = self.allocator;
-    const positions = try allocator.alloc(usize, deltas.len);
+    const positions = try allocator.alloc(usize, new_values.len);
     defer allocator.free(positions);
-    const values = try allocator.alloc(f64, deltas.len);
+    const values = try allocator.alloc(f64, new_values.len);
     defer allocator.free(values);
 
     var changed = false;
-    for (deltas, 0..) |delta, index| {
-        if (delta.value == 0.0) return false;
-        const position = findRowPosition(current, delta.col, delta.row) orelse return false;
+    for (rows, cols, new_values, 0..) |row, col, value, index| {
+        if (value == 0.0) return false;
+        const position = findRowPosition(current, col, row) orelse return false;
         positions[index] = position;
-        values[index] = delta.value;
-        if (current.values[position] != delta.value) changed = true;
+        values[index] = value;
+        if (current.values[position] != value) changed = true;
     }
     if (!changed) return true;
     self.matrix.updateValuesAtPositionsAssumeValid(allocator, positions, values) catch return error.RevisionOverflow;

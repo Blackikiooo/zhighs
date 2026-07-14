@@ -1357,7 +1357,7 @@ test "Model batches coefficient replacement insertion and deletion into one revi
     try std.testing.expectEqual(old_starts_ptr, model.matrix.csc().col_starts.ptr);
     try std.testing.expectEqual(old_rows_ptr, model.matrix.csc().row_indices.ptr);
     try std.testing.expectEqual(old_values_ptr, model.matrix.csc().values.ptr);
-    try std.testing.expect(model.matrix.csr_cache == null);
+    try std.testing.expect(model.matrix.csr_cache_revision == null);
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), try model.getCoeff(0, 0), 1e-12);
 
     // A structural delta batch is still materialized and committed only once.
@@ -1368,10 +1368,107 @@ test "Model batches coefficient replacement insertion and deletion into one revi
     try model.updateModel();
 
     try std.testing.expectEqual(structural_revision + 1, model.matrix.matrixRevision());
-    try std.testing.expect(model.matrix.csr_cache == null);
+    try std.testing.expect(model.matrix.csr_cache_revision == null);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), try model.getCoeff(1, 0), 1e-12);
     try std.testing.expectEqual(@as(f64, 0.0), try model.getCoeff(1, 1));
     try std.testing.expectEqual(@as(usize, 2), model.matrix.csc().nnz());
+    try model.matrix.csc().validate();
+}
+
+test "Model coefficient batches match a dense last-write-wins oracle" {
+    const num_rows: usize = 13;
+    const num_cols: usize = 11;
+    const batch_count: usize = 40;
+    const changes_per_batch: usize = 80;
+
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "coefficient_batch_differential");
+    defer model.deinit();
+
+    for (0..num_rows) |_|
+        try model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    for (0..num_cols) |col| {
+        const row = col % num_rows;
+        try model.addVar(1, &.{row}, &.{1.0}, 0.0, 0.0, 1.0, .continuous, null);
+    }
+    try model.updateModel();
+
+    var expected = [_]f64{0.0} ** (num_rows * num_cols);
+    for (0..num_cols) |col| expected[col * num_rows + col % num_rows] = 1.0;
+
+    var prng = std.Random.DefaultPrng.init(0xc0ef_f1c1_e17d_2026);
+    const random = prng.random();
+    for (0..batch_count) |_| {
+        const revision_before = model.matrix.matrixRevision();
+        for (0..changes_per_batch) |_| {
+            const row = random.intRangeLessThan(usize, 0, num_rows);
+            const col = random.intRangeLessThan(usize, 0, num_cols);
+            // Zero exercises deletion and absent-zero no-ops; revisiting a
+            // coordinate in the same batch exercises last-write-wins.
+            const value: f64 = @floatFromInt(random.intRangeAtMost(i8, -3, 3));
+            try model.chgCoeff(row, col, value);
+            expected[col * num_rows + row] = value;
+        }
+        try model.updateModel();
+
+        // A batch may be a semantic no-op, but it must never commit the
+        // authoritative matrix more than once.
+        try std.testing.expect(model.matrix.matrixRevision() <= revision_before + 1);
+        try model.matrix.csc().validate();
+        for (0..num_cols) |col| {
+            for (0..num_rows) |row| {
+                try std.testing.expectEqual(expected[col * num_rows + row], try model.getCoeff(row, col));
+            }
+        }
+    }
+}
+
+test "Model edit plan coalesces repeated scalar targets into one committed value" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "scalar_edit_plan");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 1.0, null);
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 10.0, .continuous, null);
+    try model.updateModel();
+    const revision_before = model.revision;
+    const bounds_revision_before = model.revisions.bounds;
+    const objective_revision_before = model.revisions.objective;
+
+    try model.chgBounds(0, 1.0, 9.0);
+    try model.chgBounds(0, 2.0, 8.0);
+    try model.chgObj(0, 3.0);
+    try model.chgObj(0, 4.0);
+    try model.chgRHS(0, 5.0);
+    try model.chgRHS(0, 6.0);
+    try model.updateModel();
+
+    try std.testing.expectEqual(@as(f64, 2.0), model.var_lb[0]);
+    try std.testing.expectEqual(@as(f64, 8.0), model.var_ub[0]);
+    try std.testing.expectEqual(@as(f64, 4.0), model.var_obj[0]);
+    try std.testing.expectEqual(@as(f64, 6.0), model.constr_rhs[0]);
+    try std.testing.expectEqual(revision_before + 1, model.revision);
+    try std.testing.expectEqual(bounds_revision_before + 1, model.revisions.bounds);
+    try std.testing.expectEqual(objective_revision_before + 1, model.revisions.objective);
+}
+
+test "Model appends nonempty constraint row payload into existing CSC columns" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "append_constraint_row");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 10.0, .continuous, null);
+    try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 10.0, .continuous, null);
+    try model.updateModel();
+    try model.addConstr(2, &.{ 0, 1 }, &.{ 2.0, -3.0 }, .less_equal, 4.0, null);
+    try model.updateModel();
+
+    try std.testing.expectEqual(@as(f64, 2.0), try model.getCoeff(0, 0));
+    try std.testing.expectEqual(@as(f64, -3.0), try model.getCoeff(0, 1));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, model.matrix.csc().col_starts);
     try model.matrix.csc().validate();
 }
 

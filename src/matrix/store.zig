@@ -18,11 +18,10 @@ pub const MatrixStore = struct {
     /// fields are visible: replacing it directly bypasses cache invalidation.
     matrix_storage: csc_module.CscMatrix,
     matrix_revision: u64 = 0,
-    csr_cache: ?csr_module.CsrCache = null,
-    /// High-water-mark workspace reused by CSC-to-CSR rebuilds. Structural
-    /// matrix replacement invalidates the derived cache but retains this
-    /// allocation for the next revision.
-    csr_cursor_scratch: []foundation.HUInt = &.{},
+    /// High-water-mark output and cursor storage retained across revisions.
+    /// `csr_cache_revision == null` means contents must be rebuilt before use.
+    csr_buffers: ?csr_module.CsrBuffers = null,
+    csr_cache_revision: ?u64 = null,
 
     const Self = @This();
 
@@ -39,8 +38,7 @@ pub const MatrixStore = struct {
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        if (self.csr_cache) |*cache| cache.deinit(allocator);
-        allocator.free(self.csr_cursor_scratch);
+        if (self.csr_buffers) |*buffers| buffers.deinit(allocator);
         self.matrix_storage.deinit(allocator);
         self.* = undefined;
     }
@@ -60,30 +58,61 @@ pub const MatrixStore = struct {
     /// operation or deinit. The cache-hit path performs one revision comparison
     /// and no allocation.
     pub fn csr(self: *Self, allocator: std.mem.Allocator) (std.mem.Allocator.Error || MatrixStoreError)!csr_module.CsrView {
-        if (self.csr_cache) |cache| {
-            if (cache.isCurrent(self.matrix_revision))
-                return cache.viewAssumeCurrent();
+        if (self.csr_cache_revision) |revision| {
+            if (revision == self.matrix_revision)
+                return self.csrViewAssumeCurrent();
         }
 
-        // Build first, then release the stale cache. If allocation fails, the
-        // authoritative matrix and any old cache remain fully valid.
-        if (self.csr_cursor_scratch.len < self.matrix_storage.num_rows) {
-            self.csr_cursor_scratch = try allocator.realloc(
-                self.csr_cursor_scratch,
-                self.matrix_storage.num_rows,
+        const rows = self.matrix_storage.num_rows;
+        const nnz = self.matrix_storage.nnz();
+        if (nnz > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
+        const has_capacity = if (self.csr_buffers) |buffers|
+            buffers.row_starts.len >= rows + 1 and
+                buffers.col_indices.len >= nnz and
+                buffers.values.len >= nnz and
+                buffers.cursor.len >= rows
+        else
+            false;
+
+        if (!has_capacity) {
+            // Allocate and fill the replacement before releasing the old
+            // high-water buffers, preserving strong failure safety.
+            var replacement = try csr_module.CsrBuffers.init(allocator, rows, nnz);
+            errdefer replacement.deinit(allocator);
+            try csr_module.fillFromCscAssumeValid(
+                self.matrix_storage,
+                replacement.row_starts,
+                replacement.col_indices,
+                replacement.values,
+                replacement.cursor,
+            );
+            if (self.csr_buffers) |*old| old.deinit(allocator);
+            self.csr_buffers = replacement;
+        } else {
+            const buffers = &self.csr_buffers.?;
+            try csr_module.fillFromCscAssumeValid(
+                self.matrix_storage,
+                buffers.row_starts[0 .. rows + 1],
+                buffers.col_indices[0..nnz],
+                buffers.values[0..nnz],
+                buffers.cursor[0..rows],
             );
         }
-        var replacement = try csr_module.CsrCache.buildWithScratchAssumeValid(
-            allocator,
-            self.matrix_storage,
-            self.matrix_revision,
-            self.csr_cursor_scratch,
-        );
-        errdefer replacement.deinit(allocator);
+        self.csr_cache_revision = self.matrix_revision;
+        return self.csrViewAssumeCurrent();
+    }
 
-        if (self.csr_cache) |*old_cache| old_cache.deinit(allocator);
-        self.csr_cache = replacement;
-        return self.csr_cache.?.viewAssumeCurrent();
+    fn csrViewAssumeCurrent(self: *const Self) csr_module.CsrView {
+        const buffers = self.csr_buffers.?;
+        const rows = self.matrix_storage.num_rows;
+        const nnz = self.matrix_storage.nnz();
+        return csr_module.CsrView.initAssumeValid(
+            rows,
+            self.matrix_storage.num_cols,
+            buffers.row_starts[0 .. rows + 1],
+            buffers.col_indices[0..nnz],
+            buffers.values[0..nnz],
+        );
     }
 
     /// Replaces the authoritative matrix after validation and invalidates CSR.
@@ -97,8 +126,7 @@ pub const MatrixStore = struct {
     pub fn replaceMatrixAssumeValid(self: *Self, allocator: std.mem.Allocator, replacement: csc_module.CscMatrix) MatrixStoreError!void {
         if (self.matrix_revision == std.math.maxInt(u64)) return error.RevisionOverflow;
 
-        if (self.csr_cache) |*cache| cache.deinit(allocator);
-        self.csr_cache = null;
+        self.csr_cache_revision = null;
         self.matrix_storage.deinit(allocator);
         self.matrix_storage = replacement;
         self.matrix_revision += 1;
@@ -109,6 +137,7 @@ pub const MatrixStore = struct {
     /// nonzero values, and unique positions. All fallible work happens before
     /// cache invalidation, so revision overflow leaves the store unchanged.
     pub fn updateValuesAtPositionsAssumeValid(self: *Self, allocator: std.mem.Allocator, positions: []const usize, values: []const f64) MatrixStoreError!void {
+        _ = allocator; // Retained for API symmetry with structural mutations.
         std.debug.assert(positions.len == values.len);
         if (positions.len == 0) return;
         if (self.matrix_revision == std.math.maxInt(u64)) return error.RevisionOverflow;
@@ -117,8 +146,7 @@ pub const MatrixStore = struct {
             std.debug.assert(std.math.isFinite(value) and value != 0.0);
         }
 
-        if (self.csr_cache) |*cache| cache.deinit(allocator);
-        self.csr_cache = null;
+        self.csr_cache_revision = null;
         for (positions, values) |position, value|
             self.matrix_storage.values[position] = value;
         self.matrix_revision += 1;
@@ -132,7 +160,7 @@ test "matrix store builds CSR lazily and reuses the cache" {
     csc = undefined;
     defer model.deinit(std.testing.allocator);
 
-    try std.testing.expect(model.csr_cache == null);
+    try std.testing.expect(model.csr_cache_revision == null);
     const first = try model.csr(std.testing.allocator);
     const second = try model.csr(std.testing.allocator);
     try std.testing.expectEqual(first.row_starts.ptr, second.row_starts.ptr);
@@ -151,20 +179,20 @@ test "matrix replacement increments revision and rebuilds CSR" {
     replacement = undefined;
 
     try std.testing.expectEqual(@as(u64, 1), model.matrixRevision());
-    try std.testing.expect(model.csr_cache == null);
+    try std.testing.expect(model.csr_cache_revision == null);
     const rebuilt = try model.csr(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), rebuilt.num_rows);
     try std.testing.expectEqual(@as(usize, 2), rebuilt.num_cols);
-    try std.testing.expect(model.csr_cache.?.isCurrent(1));
-    try std.testing.expectEqual(@as(usize, 3), model.csr_cursor_scratch.len);
+    try std.testing.expectEqual(@as(?u64, 1), model.csr_cache_revision);
+    try std.testing.expectEqual(@as(usize, 3), model.csr_buffers.?.cursor.len);
 
-    const scratch_ptr = model.csr_cursor_scratch.ptr;
+    const storage_ptr = model.csr_buffers.?.storage.ptr;
     var smaller = try csc_module.CscMatrix.initZero(std.testing.allocator, 1, 1);
     try model.replaceMatrixAssumeValid(std.testing.allocator, smaller);
     smaller = undefined;
     _ = try model.csr(std.testing.allocator);
-    try std.testing.expectEqual(scratch_ptr, model.csr_cursor_scratch.ptr);
-    try std.testing.expectEqual(@as(usize, 3), model.csr_cursor_scratch.len);
+    try std.testing.expectEqual(storage_ptr, model.csr_buffers.?.storage.ptr);
+    try std.testing.expectEqual(@as(usize, 3), model.csr_buffers.?.cursor.len);
 }
 
 test "revision overflow rejects replacement without changing ownership" {

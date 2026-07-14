@@ -175,6 +175,19 @@ pub fn build(b: *std.Build) void {
     const build_dense_lu_bench_step = b.step("build-bench-dense-lu", "Build the DenseLU benchmark for perf stat");
     build_dense_lu_bench_step.dependOn(&install_dense_lu_bench.step);
 
+    const coefficient_edit_bench = b.addExecutable(.{
+        .name = "coefficient-edit-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/coefficient_edit_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_coefficient_edit_bench = b.addRunArtifact(coefficient_edit_bench);
+    const coefficient_edit_bench_step = b.step("bench-coefficient-edits", "Run batched coefficient-edit throughput benchmarks");
+    coefficient_edit_bench_step.dependOn(&run_coefficient_edit_bench.step);
+
     const perf_profile = b.addExecutable(.{
         .name = "perf-profile",
         .root_module = b.createModule(.{
@@ -209,6 +222,20 @@ pub fn build(b: *std.Build) void {
     const run_matrix_tests = b.addRunArtifact(matrix_tests);
     const matrix_test_step = b.step("test-matrix", "Run matrix-only tests (no model/API)");
     matrix_test_step.dependOn(&run_matrix_tests.step);
+
+    const matrix_acceptance_root = b.createModule(.{
+        .root_source_file = b.path("test/matrix/acceptance.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "foundation", .module = foundation.module },
+        },
+    });
+    const matrix_acceptance_tests = b.addTest(.{ .root_module = matrix_acceptance_root });
+    const run_matrix_acceptance_tests = b.addRunArtifact(matrix_acceptance_tests);
+    const matrix_acceptance_step = b.step("test-matrix-acceptance", "Run matrix structural property and failing-allocator gates");
+    matrix_acceptance_step.dependOn(&run_matrix_acceptance_tests.step);
 
     // ── Model core test (no API/solver/presolve dependency) ─────
     // Tests the solver-internal model IR layer independently of the

@@ -8,6 +8,9 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const csc = @import("csc.zig");
+const transform_buffers = @import("transform_buffers.zig");
+
+const CscTransformBuffers = transform_buffers.CscTransformBuffers;
 
 pub fn permute(
     allocator: std.mem.Allocator,
@@ -56,6 +59,52 @@ pub fn permuteAssumeValid(
     return result;
 }
 
+pub fn permuteInto(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    row_old_to_new: []const foundation.RowId,
+    col_old_to_new: []const foundation.ColId,
+) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    try buffers.requireCapacity(matrix.num_cols, matrix.nnz(), @max(matrix.num_rows, matrix.num_cols));
+    try validatePermutationWithScratch(foundation.RowId, row_old_to_new, matrix.num_rows, buffers.index_scratch);
+    try validatePermutationWithScratch(foundation.ColId, col_old_to_new, matrix.num_cols, buffers.index_scratch);
+    return permuteIntoAssumeValid(buffers, matrix, row_old_to_new, col_old_to_new);
+}
+
+pub fn permuteIntoAssumeValid(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    row_old_to_new: []const foundation.RowId,
+    col_old_to_new: []const foundation.ColId,
+) csc.MatrixError!csc.CscView {
+    try buffers.requireCapacity(matrix.num_cols, matrix.nnz(), 0);
+    const starts = buffers.col_starts[0 .. matrix.num_cols + 1];
+    const rows = buffers.row_indices[0..matrix.nnz()];
+    const values = buffers.values[0..matrix.nnz()];
+    @memset(starts, 0);
+    for (0..matrix.num_cols) |old_col| {
+        const new_col = col_old_to_new[old_col].toUsize();
+        starts[new_col + 1] = matrix.col_starts[old_col + 1] - matrix.col_starts[old_col];
+    }
+    for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
+
+    for (0..matrix.num_cols) |old_col| {
+        const new_col = col_old_to_new[old_col].toUsize();
+        var destination = starts[new_col];
+        for (matrix.col_starts[old_col]..matrix.col_starts[old_col + 1]) |position| {
+            rows[destination] = row_old_to_new[matrix.row_indices[position].toUsize()];
+            values[destination] = matrix.values[position];
+            destination += 1;
+        }
+    }
+
+    const context: EntrySortContext = .{ .rows = rows, .values = values };
+    for (0..matrix.num_cols) |col|
+        std.sort.pdqContext(starts[col], starts[col + 1], context);
+    return buffers.viewAssumeValid(matrix.num_rows, matrix.num_cols, matrix.nnz());
+}
+
 fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_new: []const Id, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {
     if (old_to_new.len != dimension) return error.InvalidPermutation;
     const seen = try allocator.alloc(bool, dimension);
@@ -65,6 +114,18 @@ fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_n
         const new_index = new_id.toUsize();
         if (new_index >= dimension or seen[new_index]) return error.InvalidPermutation;
         seen[new_index] = true;
+    }
+}
+
+fn validatePermutationWithScratch(comptime Id: type, old_to_new: []const Id, dimension: usize, scratch: []usize) csc.MatrixError!void {
+    if (old_to_new.len != dimension) return error.InvalidPermutation;
+    if (scratch.len < dimension) return error.BufferTooSmall;
+    const seen = scratch[0..dimension];
+    @memset(seen, 0);
+    for (old_to_new) |new_id| {
+        const new_index = new_id.toUsize();
+        if (new_index >= dimension or seen[new_index] != 0) return error.InvalidPermutation;
+        seen[new_index] = 1;
     }
 }
 
@@ -129,4 +190,22 @@ test "permutation followed by inverse reproduces matrix" {
     try std.testing.expectEqualSlices(usize, original.col_starts, restored.col_starts);
     try std.testing.expectEqualSlices(foundation.RowId, original.row_indices, restored.row_indices);
     try std.testing.expectEqualSlices(f64, original.values, restored.values);
+}
+
+test "permutation Into reuses aligned output and validation scratch" {
+    var starts = [_]usize{ 0, 2, 3, 5 };
+    var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(2), try foundation.RowId.init(1), try foundation.RowId.init(0), try foundation.RowId.init(2) };
+    var values = [_]f64{ 2.0, 3.0, 4.0, -1.0, 5.0 };
+    const matrix = csc.CscMatrix.initBorrowedAssumeValid(3, 3, &starts, &rows, &values);
+    const row_map = [_]foundation.RowId{ try foundation.RowId.init(2), try foundation.RowId.init(0), try foundation.RowId.init(1) };
+    const col_map = [_]foundation.ColId{ try foundation.ColId.init(1), try foundation.ColId.init(2), try foundation.ColId.init(0) };
+    var buffers = try CscTransformBuffers.initCapacity(std.testing.allocator, 3, 5, 3);
+    defer buffers.deinit(std.testing.allocator);
+    const view = try permuteInto(&buffers, matrix, &row_map, &col_map);
+    try view.validate();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 4, 5 }, view.col_starts);
+    try std.testing.expectEqualSlices(f64, &.{ 5.0, -1.0, 3.0, 2.0, 4.0 }, view.values);
+
+    const duplicate_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(0), try foundation.ColId.init(2) };
+    try std.testing.expectError(error.InvalidPermutation, permuteInto(&buffers, matrix, &row_map, &duplicate_cols));
 }

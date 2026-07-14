@@ -9,6 +9,9 @@ const foundation = @import("foundation");
 const sparse_vector = @import("sparse_vector.zig");
 const slice = @import("slice.zig");
 const csc = @import("csc.zig");
+const transform_buffers = @import("transform_buffers.zig");
+
+const CscTransformBuffers = transform_buffers.CscTransformBuffers;
 
 pub fn appendColumns(
     allocator: std.mem.Allocator,
@@ -46,6 +49,44 @@ pub fn appendColumns(
         destination += column.nnz();
     }
     return result;
+}
+
+pub fn appendColumnsInto(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    columns: []const sparse_vector.SparseVectorView(foundation.RowId),
+) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    for (columns) |column| {
+        if (column.dimension != matrix.num_rows) return error.DimensionMismatch;
+        try column.validate();
+    }
+    return appendColumnsIntoAssumeValid(buffers, matrix, columns);
+}
+
+pub fn appendColumnsIntoAssumeValid(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    columns: []const sparse_vector.SparseVectorView(foundation.RowId),
+) csc.MatrixError!csc.CscView {
+    const new_num_cols = std.math.add(usize, matrix.num_cols, columns.len) catch return error.DimensionTooLarge;
+    try csc.validateDimensions(matrix.num_rows, new_num_cols);
+    var total_nnz = matrix.nnz();
+    for (columns) |column|
+        total_nnz = std.math.add(usize, total_nnz, column.nnz()) catch return error.DimensionTooLarge;
+    try buffers.requireCapacity(new_num_cols, total_nnz, 0);
+
+    @memcpy(buffers.col_starts[0 .. matrix.num_cols + 1], matrix.col_starts);
+    @memcpy(buffers.row_indices[0..matrix.nnz()], matrix.row_indices);
+    @memcpy(buffers.values[0..matrix.nnz()], matrix.values);
+    var destination = matrix.nnz();
+    for (columns, 0..) |column, offset| {
+        @memcpy(buffers.row_indices[destination..][0..column.nnz()], column.indices);
+        @memcpy(buffers.values[destination..][0..column.nnz()], column.values);
+        destination += column.nnz();
+        buffers.col_starts[matrix.num_cols + offset + 1] = destination;
+    }
+    return buffers.viewAssumeValid(matrix.num_rows, new_num_cols, total_nnz);
 }
 
 pub fn appendRows(
@@ -108,6 +149,63 @@ pub fn appendRows(
     return result;
 }
 
+pub fn appendRowsInto(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    rows_to_add: []const sparse_vector.SparseVectorView(foundation.ColId),
+) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    for (rows_to_add) |row| {
+        if (row.dimension != matrix.num_cols) return error.DimensionMismatch;
+        try row.validate();
+    }
+    return appendRowsIntoAssumeValid(buffers, matrix, rows_to_add);
+}
+
+pub fn appendRowsIntoAssumeValid(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    rows_to_add: []const sparse_vector.SparseVectorView(foundation.ColId),
+) csc.MatrixError!csc.CscView {
+    const new_num_rows = std.math.add(usize, matrix.num_rows, rows_to_add.len) catch return error.DimensionTooLarge;
+    try csc.validateDimensions(new_num_rows, matrix.num_cols);
+    var total_nnz = matrix.nnz();
+    for (rows_to_add) |row|
+        total_nnz = std.math.add(usize, total_nnz, row.nnz()) catch return error.DimensionTooLarge;
+    try buffers.requireCapacity(matrix.num_cols, total_nnz, 0);
+
+    const starts = buffers.col_starts[0 .. matrix.num_cols + 1];
+    @memset(starts, 0);
+    for (0..matrix.num_cols) |col|
+        starts[col + 1] = matrix.col_starts[col + 1] - matrix.col_starts[col];
+    for (rows_to_add) |row| for (row.indices) |col_id| {
+        starts[col_id.toUsize() + 1] += 1;
+    };
+    for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
+
+    for (0..matrix.num_cols) |col| {
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        const count = end - begin;
+        const destination = starts[col];
+        @memcpy(buffers.row_indices[destination..][0..count], matrix.row_indices[begin..end]);
+        @memcpy(buffers.values[destination..][0..count], matrix.values[begin..end]);
+        starts[col] += count;
+    }
+    for (rows_to_add, 0..) |row, added_row| {
+        const row_id = foundation.RowId.fromUsizeAssumeValid(matrix.num_rows + added_row);
+        for (row.indices, row.values) |col_id, value| {
+            const col = col_id.toUsize();
+            const destination = starts[col];
+            buffers.row_indices[destination] = row_id;
+            buffers.values[destination] = value;
+            starts[col] += 1;
+        }
+    }
+    restoreStartsAfterCursorUse(starts);
+    return buffers.viewAssumeValid(new_num_rows, matrix.num_cols, total_nnz);
+}
+
 /// Appends canonical CSR-like row streams beneath a CSC matrix without first
 /// materializing an array of per-row SparseVectorView descriptors.
 pub fn appendRowsFromCsr(
@@ -120,6 +218,61 @@ pub fn appendRowsFromCsr(
     try matrix.validate();
     try validateCsrRowStreams(matrix.num_cols, row_starts, col_indices, stream_values);
     return appendRowsFromCsrAssumeValid(allocator, matrix, row_starts, col_indices, stream_values);
+}
+
+pub fn appendRowsFromCsrInto(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    row_starts: []const usize,
+    col_indices: []const foundation.ColId,
+    stream_values: []const f64,
+) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    try validateCsrRowStreams(matrix.num_cols, row_starts, col_indices, stream_values);
+    return appendRowsFromCsrIntoAssumeValid(buffers, matrix, row_starts, col_indices, stream_values);
+}
+
+pub fn appendRowsFromCsrIntoAssumeValid(
+    buffers: *CscTransformBuffers,
+    matrix: csc.CscMatrix,
+    row_starts: []const usize,
+    col_indices: []const foundation.ColId,
+    stream_values: []const f64,
+) csc.MatrixError!csc.CscView {
+    const added_rows = row_starts.len - 1;
+    const new_num_rows = std.math.add(usize, matrix.num_rows, added_rows) catch return error.DimensionTooLarge;
+    try csc.validateDimensions(new_num_rows, matrix.num_cols);
+    const total_nnz = std.math.add(usize, matrix.nnz(), stream_values.len) catch return error.DimensionTooLarge;
+    try buffers.requireCapacity(matrix.num_cols, total_nnz, 0);
+
+    const starts = buffers.col_starts[0 .. matrix.num_cols + 1];
+    @memset(starts, 0);
+    for (0..matrix.num_cols) |col|
+        starts[col + 1] = matrix.col_starts[col + 1] - matrix.col_starts[col];
+    for (col_indices) |col_id| starts[col_id.toUsize() + 1] += 1;
+    for (0..matrix.num_cols) |col| starts[col + 1] += starts[col];
+
+    for (0..matrix.num_cols) |col| {
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        const count = end - begin;
+        const destination = starts[col];
+        @memcpy(buffers.row_indices[destination..][0..count], matrix.row_indices[begin..end]);
+        @memcpy(buffers.values[destination..][0..count], matrix.values[begin..end]);
+        starts[col] += count;
+    }
+    for (0..added_rows) |added_row| {
+        const row_id = foundation.RowId.fromUsizeAssumeValid(matrix.num_rows + added_row);
+        for (row_starts[added_row]..row_starts[added_row + 1]) |position| {
+            const col = col_indices[position].toUsize();
+            const destination = starts[col];
+            buffers.row_indices[destination] = row_id;
+            buffers.values[destination] = stream_values[position];
+            starts[col] += 1;
+        }
+    }
+    restoreStartsAfterCursorUse(starts);
+    return buffers.viewAssumeValid(new_num_rows, matrix.num_cols, total_nnz);
 }
 
 /// Trusted allocation path for validated canonical CSR-like row streams.
@@ -230,6 +383,38 @@ pub fn deleteColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, delete
     return slice.extractColumnsAssumeValid(allocator, matrix, kept);
 }
 
+pub fn deleteColumnsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, deleted: []const foundation.ColId) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    try validateDeleted(foundation.ColId, deleted, matrix.num_cols);
+    const output_cols = matrix.num_cols - deleted.len;
+    var output_nnz = matrix.nnz();
+    for (deleted) |col_id| {
+        const col = col_id.toUsize();
+        output_nnz -= matrix.col_starts[col + 1] - matrix.col_starts[col];
+    }
+    try buffers.requireCapacity(output_cols, output_nnz, 0);
+
+    var deleted_pos: usize = 0;
+    var output_col: usize = 0;
+    var destination: usize = 0;
+    buffers.col_starts[0] = 0;
+    for (0..matrix.num_cols) |col| {
+        if (deleted_pos < deleted.len and deleted[deleted_pos].toUsize() == col) {
+            deleted_pos += 1;
+            continue;
+        }
+        const begin = matrix.col_starts[col];
+        const end = matrix.col_starts[col + 1];
+        const count = end - begin;
+        @memcpy(buffers.row_indices[destination..][0..count], matrix.row_indices[begin..end]);
+        @memcpy(buffers.values[destination..][0..count], matrix.values[begin..end]);
+        destination += count;
+        output_col += 1;
+        buffers.col_starts[output_col] = destination;
+    }
+    return buffers.viewAssumeValid(matrix.num_rows, output_cols, output_nnz);
+}
+
 pub fn deleteRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: []const foundation.RowId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     try matrix.validate();
     try validateDeleted(foundation.RowId, deleted, matrix.num_rows);
@@ -246,6 +431,53 @@ pub fn deleteRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: 
         }
     }
     return slice.extractRowsAssumeValid(allocator, matrix, kept);
+}
+
+pub fn deleteRowsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, deleted: []const foundation.RowId) csc.MatrixError!csc.CscView {
+    try matrix.validate();
+    try validateDeleted(foundation.RowId, deleted, matrix.num_rows);
+    try buffers.requireCapacity(matrix.num_cols, 0, matrix.num_rows);
+    const missing = std.math.maxInt(usize);
+    const row_map = buffers.index_scratch[0..matrix.num_rows];
+    var deleted_pos: usize = 0;
+    var next_row: usize = 0;
+    for (0..matrix.num_rows) |row| {
+        if (deleted_pos < deleted.len and deleted[deleted_pos].toUsize() == row) {
+            row_map[row] = missing;
+            deleted_pos += 1;
+        } else {
+            row_map[row] = next_row;
+            next_row += 1;
+        }
+    }
+    var output_nnz: usize = 0;
+    for (matrix.row_indices) |row| if (row_map[row.toUsize()] != missing) {
+        output_nnz += 1;
+    };
+    try buffers.requireCapacity(matrix.num_cols, output_nnz, matrix.num_rows);
+
+    var destination: usize = 0;
+    for (0..matrix.num_cols) |col| {
+        buffers.col_starts[col] = destination;
+        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
+            const new_row = row_map[matrix.row_indices[position].toUsize()];
+            if (new_row == missing) continue;
+            buffers.row_indices[destination] = foundation.RowId.fromUsizeAssumeValid(new_row);
+            buffers.values[destination] = matrix.values[position];
+            destination += 1;
+        }
+    }
+    buffers.col_starts[matrix.num_cols] = destination;
+    return buffers.viewAssumeValid(next_row, matrix.num_cols, output_nnz);
+}
+
+fn restoreStartsAfterCursorUse(starts: []usize) void {
+    var col = starts.len - 1;
+    while (col > 0) {
+        starts[col] = starts[col - 1];
+        col -= 1;
+    }
+    starts[0] = 0;
 }
 
 fn validateDeleted(comptime Id: type, deleted: []const Id, dimension: usize) csc.MatrixError!void {
@@ -317,6 +549,54 @@ test "append CSR row streams rejects malformed canonical data" {
         error.InvalidRowStarts,
         appendRowsFromCsr(std.testing.allocator, base, &.{ 1, 1 }, &.{}, &.{}),
     );
+}
+
+test "edit Into APIs append and delete with reusable capacity" {
+    const builder_module = @import("builder.zig");
+    var builder = try builder_module.MatrixBuilder.init(2, 2);
+    defer builder.deinit(std.testing.allocator);
+    try builder.append(std.testing.allocator, try foundation.RowId.init(0), try foundation.ColId.init(0), 1.0);
+    try builder.append(std.testing.allocator, try foundation.RowId.init(1), try foundation.ColId.init(1), 2.0);
+    var base = try builder.freezeSortedLeanAssumeValid(std.testing.allocator, 0.0);
+    defer base.deinit(std.testing.allocator);
+    var buffers = try CscTransformBuffers.initCapacity(std.testing.allocator, 4, 8, 4);
+    defer buffers.deinit(std.testing.allocator);
+
+    const column_rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
+    const column_values = [_]f64{ 3.0, 4.0 };
+    const columns = [_]sparse_vector.SparseVectorView(foundation.RowId){
+        sparse_vector.SparseVectorView(foundation.RowId).initAssumeValid(2, &column_rows, &column_values),
+    };
+    const with_column = try appendColumnsInto(&buffers, base, &columns);
+    try with_column.validate();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 4 }, with_column.col_starts);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0, 3.0, 4.0 }, with_column.values);
+
+    // The previous view is invalid after this call; use the owning base again.
+    const row_starts = [_]usize{ 0, 2 };
+    const row_cols = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(1) };
+    const row_values = [_]f64{ 5.0, 6.0 };
+    const with_row = try appendRowsFromCsrInto(&buffers, base, &row_starts, &row_cols, &row_values);
+    try with_row.validate();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 4 }, with_row.col_starts);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 5.0, 2.0, 6.0 }, with_row.values);
+
+    const deleted_cols = [_]foundation.ColId{try foundation.ColId.init(0)};
+    const without_column = try deleteColumnsInto(&buffers, base, &deleted_cols);
+    try without_column.validate();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, without_column.col_starts);
+    try std.testing.expectEqualSlices(f64, &.{2.0}, without_column.values);
+
+    const deleted_rows = [_]foundation.RowId{try foundation.RowId.init(0)};
+    const without_row = try deleteRowsInto(&buffers, base, &deleted_rows);
+    try without_row.validate();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 1 }, without_row.col_starts);
+    try std.testing.expectEqual(@as(usize, 0), without_row.row_indices[0].toUsize());
+
+    var too_small = try CscTransformBuffers.initCapacity(std.testing.allocator, 1, 1, 1);
+    defer too_small.deinit(std.testing.allocator);
+    try std.testing.expectError(error.BufferTooSmall, appendColumnsInto(&too_small, base, &columns));
+    try std.testing.expectError(error.BufferTooSmall, deleteRowsInto(&too_small, base, &deleted_rows));
 }
 
 test "delete rows and columns remaps dimensions canonically" {
