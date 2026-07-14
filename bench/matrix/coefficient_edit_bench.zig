@@ -133,4 +133,20 @@ pub fn main() !void {
         }
         report(name, batch_size, small_scalar_repeats, start, model.var_obj[0]);
     }
+
+    // Measure only the structural flush: queue construction is outside the
+    // timer so this tracks plan flattening plus the single packed CSC rebuild.
+    var append_model = try zhighs.model.Model.init(allocator, &env, "structural_append_bench");
+    defer append_model.deinit();
+    for (0..dimension) |_|
+        try append_model.addConstr(0, &.{}, &.{}, .less_equal, 10.0, null);
+    for (0..dimension) |col| {
+        const row = [_]usize{col};
+        const value = [_]f64{4.0};
+        try append_model.addVar(1, &row, &value, 0.0, 0.0, 1.0, .continuous, null);
+        try append_model.chgObj(col, 2.0);
+    }
+    start = nowNs();
+    try append_model.updateModel();
+    report("append_rows_columns_folded_scalars", dimension * 3, 1, start, append_model.var_obj[0]);
 }

@@ -42,23 +42,15 @@ pub fn applyPending(self: *Model) ModelError!void {
     if (edit_plan_module.isDirectScalarSegment(self.pending.items))
         return applyDirectScalarSegment(self);
 
-    var edit_plan = ModelEditPlan.build(alloc, self.pending.items) catch return error.OutOfMemory;
+    var edit_plan = ModelEditPlan.build(alloc, self.pending.items, self.num_vars, self.num_constrs) catch return error.OutOfMemory;
     defer edit_plan.deinit(alloc);
     const structure_changed = edit_plan.has_structure;
-    const matrix_values_changed = edit_plan.coefficients.len != 0;
-    const bounds_changed = edit_plan.bounds.len != 0 or edit_plan.rhs.len != 0 or edit_plan.senses.len != 0;
-    const objective_changed = edit_plan.objective.len != 0;
+    const matrix_values_changed = edit_plan.changes_matrix_values;
+    const bounds_changed = edit_plan.changes_bounds;
+    const objective_changed = edit_plan.changes_objective;
 
-    // Count how many vars and constrs will be added.
-    var new_vars: usize = 0;
-    var new_constrs: usize = 0;
-    for (self.pending.items) |chg| {
-        switch (chg) {
-            .add_var => new_vars += 1,
-            .add_constr => new_constrs += 1,
-            else => {},
-        }
-    }
+    const new_vars = edit_plan.added_columns.len;
+    const new_constrs = edit_plan.added_rows.len;
 
     // Allocate space for the expanded arrays.
     var total_vars = self.num_vars + new_vars;
@@ -78,19 +70,14 @@ pub fn applyPending(self: *Model) ModelError!void {
         @memcpy(vtype[0..self.num_vars], self.var_type);
         @memcpy(vnames[0..self.num_vars], self.var_names);
 
-        var idx = self.num_vars;
-        for (self.pending.items) |chg| {
-            switch (chg) {
-                .add_var => |v| {
-                    lb[idx] = v.lb;
-                    ub[idx] = v.ub;
-                    obj[idx] = v.obj;
-                    vtype[idx] = v.vtype;
-                    vnames[idx] = v.name;
-                    idx += 1;
-                },
-                else => {},
-            }
+        const added = edit_plan.added_columns.slice();
+        for (0..new_vars) |offset| {
+            const idx = self.num_vars + offset;
+            lb[idx] = added.items(.lower)[offset];
+            ub[idx] = added.items(.upper)[offset];
+            obj[idx] = added.items(.objective)[offset];
+            vtype[idx] = added.items(.var_type)[offset];
+            vnames[idx] = added.items(.name)[offset];
         }
 
         alloc.free(self.var_lb);
@@ -115,17 +102,12 @@ pub fn applyPending(self: *Model) ModelError!void {
         @memcpy(rhs[0..self.num_constrs], self.constr_rhs);
         @memcpy(cnames[0..self.num_constrs], self.constr_names);
 
-        var idx = self.num_constrs;
-        for (self.pending.items) |chg| {
-            switch (chg) {
-                .add_constr => |c| {
-                    sense[idx] = c.sense;
-                    rhs[idx] = c.rhs;
-                    cnames[idx] = c.name;
-                    idx += 1;
-                },
-                else => {},
-            }
+        const added = edit_plan.added_rows.slice();
+        for (0..new_constrs) |offset| {
+            const idx = self.num_constrs + offset;
+            sense[idx] = added.items(.sense)[offset];
+            rhs[idx] = added.items(.rhs)[offset];
+            cnames[idx] = added.items(.name)[offset];
         }
 
         alloc.free(self.constr_sense);
@@ -136,8 +118,8 @@ pub fn applyPending(self: *Model) ModelError!void {
         self.constr_names = cnames;
     }
 
-    // Build the constraint matrix by collecting all column data
-    // from pending add_var entries.
+    // Build the constraint matrix from the plan's flattened column and row
+    // streams. Both directions are scattered during one packed CSC rebuild.
     if (new_vars > 0 or new_constrs > 0) {
         // Count both appended CSC columns and appended CSR rows. The latter
         // must be scattered into existing/new columns during the same packed
@@ -148,26 +130,16 @@ pub fn applyPending(self: *Model) ModelError!void {
             const cnt = existing_csc.col_starts[col + 1] - existing_csc.col_starts[col];
             col_nnz += cnt;
         }
-        for (self.pending.items) |chg| {
-            switch (chg) {
-                .add_var => |v| {
-                    col_nnz += v.num_nz;
-                },
-                else => {},
+        col_nnz = std.math.add(usize, col_nnz, edit_plan.added_column_values.items.len) catch return error.InvalidArgument;
+        for (0..new_constrs) |added_row| {
+            const begin = edit_plan.added_row_starts.items[added_row];
+            const end = edit_plan.added_row_starts.items[added_row + 1];
+            const target_row = self.num_constrs + added_row;
+            for (edit_plan.added_row_columns.items[begin..end]) |target_col| {
+                if (addedColumnRowOffset(&edit_plan, self.num_vars, target_col, target_row) == null)
+                    col_nnz = std.math.add(usize, col_nnz, 1) catch return error.InvalidArgument;
             }
         }
-        var counted_added_row: usize = 0;
-        for (self.pending.items) |chg| switch (chg) {
-            .add_constr => |c| {
-                const target_row = self.num_constrs + counted_added_row;
-                for (c.cind[0..c.num_nz]) |target_col| {
-                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, target_row) == null)
-                        col_nnz = std.math.add(usize, col_nnz, 1) catch return error.InvalidArgument;
-                }
-                counted_added_row += 1;
-            },
-            else => {},
-        };
 
         // Build the new CSC matrix.
         const num_cols = total_vars;
@@ -180,29 +152,21 @@ pub fn applyPending(self: *Model) ModelError!void {
         @memset(new_col_starts, 0);
         for (0..self.num_vars) |col|
             new_col_starts[col + 1] = existing_csc.col_starts[col + 1] - existing_csc.col_starts[col];
-        var col = self.num_vars;
-        for (self.pending.items) |chg| {
-            switch (chg) {
-                .add_var => |v| {
-                    new_col_starts[col + 1] = v.num_nz;
-                    col += 1;
-                },
-                else => {},
+        for (0..new_vars) |added_col| {
+            const begin = edit_plan.added_column_starts.items[added_col];
+            const end = edit_plan.added_column_starts.items[added_col + 1];
+            new_col_starts[self.num_vars + added_col + 1] = end - begin;
+        }
+        for (0..new_constrs) |added_row| {
+            const begin = edit_plan.added_row_starts.items[added_row];
+            const end = edit_plan.added_row_starts.items[added_row + 1];
+            const target_row = self.num_constrs + added_row;
+            for (edit_plan.added_row_columns.items[begin..end]) |target_col| {
+                if (target_col >= num_cols) return error.InvalidArgument;
+                if (addedColumnRowOffset(&edit_plan, self.num_vars, target_col, target_row) == null)
+                    new_col_starts[target_col + 1] += 1;
             }
         }
-        var offset_counted_row: usize = 0;
-        for (self.pending.items) |chg| switch (chg) {
-            .add_constr => |c| {
-                const target_row = self.num_constrs + offset_counted_row;
-                for (c.cind[0..c.num_nz]) |target_col| {
-                    if (target_col >= num_cols) return error.InvalidArgument;
-                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, target_row) == null)
-                        new_col_starts[target_col + 1] += 1;
-                }
-                offset_counted_row += 1;
-            },
-            else => {},
-        };
         for (0..num_cols) |column| new_col_starts[column + 1] += new_col_starts[column];
         const column_begins = try alloc.dupe(usize, new_col_starts[0..num_cols]);
         defer alloc.free(column_begins);
@@ -218,37 +182,33 @@ pub fn applyPending(self: *Model) ModelError!void {
             @memcpy(new_values[destination..][0..count], existing_csc.values[begin..end]);
             new_col_starts[column] += count;
         }
-        col = self.num_vars;
-        for (self.pending.items) |chg| switch (chg) {
-            .add_var => |v| {
-                const destination = new_col_starts[col];
-                for (v.vind[0..v.num_nz], 0..) |row, index|
-                    new_row_indices[destination + index] = RowId.fromUsizeAssumeValid(row);
-                @memcpy(new_values[destination..][0..v.num_nz], v.vval);
-                new_col_starts[col] += v.num_nz;
-                col += 1;
-            },
-            else => {},
-        };
-        var added_row: usize = 0;
-        for (self.pending.items) |chg| switch (chg) {
-            .add_constr => |c| {
-                const row_id = RowId.fromUsizeAssumeValid(self.num_constrs + added_row);
-                for (c.cind[0..c.num_nz], c.cval[0..c.num_nz]) |target_col, value| {
-                    if (addedColumnRowOffset(self.pending.items, self.num_vars, target_col, row_id.toUsize())) |offset| {
-                        new_values[column_begins[target_col] + offset] = value;
-                        continue;
-                    }
-                    const destination = new_col_starts[target_col];
-                    new_row_indices[destination] = row_id;
-                    new_values[destination] = value;
-                    new_col_starts[target_col] += 1;
+        for (0..new_vars) |added_col| {
+            const col = self.num_vars + added_col;
+            const source_begin = edit_plan.added_column_starts.items[added_col];
+            const source_end = edit_plan.added_column_starts.items[added_col + 1];
+            const count = source_end - source_begin;
+            const destination = new_col_starts[col];
+            for (edit_plan.added_column_rows.items[source_begin..source_end], 0..) |row, index|
+                new_row_indices[destination + index] = RowId.fromUsizeAssumeValid(row);
+            @memcpy(new_values[destination..][0..count], edit_plan.added_column_values.items[source_begin..source_end]);
+            new_col_starts[col] += count;
+        }
+        for (0..new_constrs) |added_row| {
+            const source_begin = edit_plan.added_row_starts.items[added_row];
+            const source_end = edit_plan.added_row_starts.items[added_row + 1];
+            const row_id = RowId.fromUsizeAssumeValid(self.num_constrs + added_row);
+            for (edit_plan.added_row_columns.items[source_begin..source_end], edit_plan.added_row_values.items[source_begin..source_end]) |target_col, value| {
+                if (addedColumnRowOffset(&edit_plan, self.num_vars, target_col, row_id.toUsize())) |offset| {
+                    new_values[column_begins[target_col] + offset] = value;
+                    continue;
                 }
-                added_row += 1;
-            },
-            else => {},
-        };
-        col = num_cols;
+                const destination = new_col_starts[target_col];
+                new_row_indices[destination] = row_id;
+                new_values[destination] = value;
+                new_col_starts[target_col] += 1;
+            }
+        }
+        var col = num_cols;
         while (col > 0) {
             new_col_starts[col] = new_col_starts[col - 1];
             col -= 1;
@@ -745,22 +705,15 @@ pub fn applyPending(self: *Model) ModelError!void {
     if (objective_changed) try self.markRevision(.objective);
 }
 
-fn addedColumnRowOffset(pending: []const @import("model_pending.zig").PendingChange, existing_cols: usize, target_col: usize, target_row: usize) ?usize {
+fn addedColumnRowOffset(plan: *const ModelEditPlan, existing_cols: usize, target_col: usize, target_row: usize) ?usize {
     if (target_col < existing_cols) return null;
     const added_col = target_col - existing_cols;
-    var ordinal: usize = 0;
-    for (pending) |change| switch (change) {
-        .add_var => |column| {
-            if (ordinal == added_col) {
-                for (column.vind[0..column.num_nz], 0..) |row, offset| {
-                    if (row == target_row) return offset;
-                }
-                return null;
-            }
-            ordinal += 1;
-        },
-        else => {},
-    };
+    if (added_col >= plan.added_columns.len) return null;
+    const begin = plan.added_column_starts.items[added_col];
+    const end = plan.added_column_starts.items[added_col + 1];
+    for (plan.added_column_rows.items[begin..end], 0..) |row, offset| {
+        if (row == target_row) return offset;
+    }
     return null;
 }
 
