@@ -203,6 +203,32 @@ pub fn build(b: *std.Build) void {
     const build_perf_profile_step = b.step("build-perf-profile", "Build the perf profiling binary");
     build_perf_profile_step.dependOn(&install_perf_profile.step);
 
+    const matrix_layout_audit = b.addExecutable(.{
+        .name = "matrix-layout-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/layout_audit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = matrix_bench_module }},
+        }),
+    });
+    const run_matrix_layout_audit = b.addRunArtifact(matrix_layout_audit);
+    const matrix_layout_audit_step = b.step("audit-matrix-layout", "Print matrix type sizes, alignments, and field offsets");
+    matrix_layout_audit_step.dependOn(&run_matrix_layout_audit.step);
+
+    const matrix_dataset_runner = b.addExecutable(.{
+        .name = "matrix-dataset-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/matrix/dataset_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = matrix_bench_module }},
+        }),
+    });
+    const install_matrix_dataset_runner = b.addInstallArtifact(matrix_dataset_runner, .{});
+    const build_matrix_dataset_runner_step = b.step("build-matrix-dataset-runner", "Build the real Matrix Market validator and benchmark");
+    build_matrix_dataset_runner_step.dependOn(&install_matrix_dataset_runner.step);
+
     // ── Matrix-only test (no model/API dependency) ──────────────
     // Used during matrix performance work so tests stay green while
     // higher layers (model, API) are being edited independently.

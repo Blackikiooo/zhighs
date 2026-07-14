@@ -90,7 +90,7 @@ pub const CsrView = struct {
         self.multiplyAssumeValid(x, y);
     }
 
-    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub noinline fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
         const ci = self.col_indices;
@@ -101,7 +101,7 @@ pub const CsrView = struct {
             var pos: usize = @intCast(rs[row_idx]);
             const end: usize = @intCast(rs[row_idx + 1]);
             while (pos < end) : (pos += 1)
-                sum += vs[pos] * x[ci[pos].toUsize()];
+                sum = @mulAdd(f64, vs[pos], x[ci[pos].toUsize()], sum);
             y[row_idx] = sum;
         }
     }

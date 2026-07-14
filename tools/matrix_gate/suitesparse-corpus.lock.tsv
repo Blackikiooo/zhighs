@@ -1,0 +1,4 @@
+dataset	source_url	archive_sha256	matrix_sha256	rows	cols	nnz	kind
+cage12	https://sparse.tamu.edu/MM/vanHeukelum/cage12.tar.gz	43c457b54e7f3a431099911bf64f3dd108df9e9936e4f7d887e0f85e8a2bd012	c2b12b85cfcbab5d4dd91a08b10015bac4d3b3b0589316b7b4b9058f50caec77	130228	130228	2032536	directed-weighted-graph
+thermal1	https://sparse.tamu.edu/MM/Schmid/thermal1.tar.gz	4ebbb19456524192a32195108954a4442db45833088e1c016a5ebc05b7d0a444	260f4a65c7dd22ce6e87b1035169c14d53fbe44639f0005e46207e057fce70ee	82654	82654	574458	symmetric-thermal-fem
+webbase-1M	https://sparse.tamu.edu/MM/Williams/webbase-1M.tar.gz	17a0391cdd966350b2b41f32aaf8e6684f3c55f25eb68c4be088f44f728a3ed4	2193ec714a68f5b8b036906001beaa77ec46adc7c39b19a626ad107d8989d264	1000005	1000005	3105536	weighted-directed-web-graph

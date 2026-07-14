@@ -290,16 +290,22 @@ skip-success。日常使用 `tools/matrix_acceptance.sh quick`，其成功不代
 
 2026-07-14 当前 gate 状态：
 
-- [ ] HiGHS differential：provider 和 checksum/struct-hash 校验已接入；当前缺少
-  `HIGHS_SOURCE` pinned checkout，因此 full gate 正确失败。
+- [x] HiGHS differential：使用本地 pinned checkout
+  `/home/godv/codefiles/cppfiles/HiGHS`，commit
+  `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`；21 个 matrix kernels 的 checksum 与
+  structural hash 全部匹配。
 - [x] Structural property/fuzz/OOM：100 组确定性随机结构变换和 owning 路径 exhaustive
   failing-allocator 已通过 w32/w64。
-- [ ] Large real datasets：已定义严格 runner/report contract；当前缺少 pinned Matrix
-  Market corpus 与 runner，因此 full gate 正确失败。
+- [x] Large real datasets：SuiteSparse `thermal1`、`cage12`、`webbase-1M` 已固定来源和
+  SHA-256；in-tree ReleaseFast runner 验证 canonical CSC、CSC/CSR/transpose 语义、
+  scaling、slice/permutation、运行时间和 peak RSS，三组均 PASS。完整数据与 HiGHS
+  同机对比见 `bench/matrix/real_dataset_results.md`。
 - [x] Configuration regression：Debug/ReleaseSafe/ReleaseFast x w32/w64 已全部通过。
 
-当前 full verdict：`FAIL (2/4 gates passed)`；在四项全部为 `[x]` 前，不得将 matrix
-标记为 production-ready。
+当前 full verdict：`PASS (4/4 gates passed)`。2026-07-14 的 fail-closed full run 已
+实际验证 HiGHS differential、structural fuzz/OOM、large real datasets 和
+configuration regression 全部 PASS。按约定硬门槛，matrix 当前已达到其已实现功能
+范围内的 production-candidate 终止点；这不等价于完整 solver 已满足商业化要求。
 
 - 所有优化必须通过 `zig build test` 和 w32/w64 配置测试。
 - 性能结论必须使用 ReleaseFast、固定数据集和足够重复次数验证。
@@ -307,3 +313,95 @@ skip-success。日常使用 `tools/matrix_acceptance.sh quick`，其成功不代
 - 新增 owning/view API 必须明确 ownership、借用失效条件和 revision 关系。
 - 结构变更必须保持 canonical CSC：列偏移合法、行索引严格递增、无显式零、无重复项。
 - 每个重大优化同时记录正确性差分、耗时、吞吐量、峰值内存及适用矩阵规模。
+
+## 2026-07-14 矩阵内核专项：布局、公平性、perf 与反汇编
+
+本专项暂时高于 model/solver 集成路线；在下列证据闭环完成前，不根据单次 wall-clock
+结果修改热路径。每项优化必须记录优化前后 `perf stat`、热点符号/指令、正确性回归和
+真实数据集结果。
+
+### A. Zig 内存布局审计
+
+- [x] 建立可重复运行的 layout audit，记录 `@sizeOf`、`@alignOf`、字段 offset、切片/可选
+  切片开销，以及 w32/w64 差异；覆盖 `CscMatrix`、`CsrView`、`CsrBuffers`、builder
+  triplet、transpose buffers 和稀疏向量类型。
+- [ ] 按实际分配而非仅按 struct header 统计 CSC/CSR authoritative bytes、scratch bytes、
+  page-color padding 和 allocator high-water；禁止把完整验收流水线 RSS 当成单矩阵内存。
+- [ ] 复核所有热数据结构的 AoS/SoA、字段宽度和生命周期；结构体仅用于控制块/借用视图，
+  大规模元素优先连续 field streams，并以 cache-line/bytes-per-nnz 证据决定布局。
+- [ ] 消除默认 compact CSC 同时长期保存 `usize` 与 `HUInt` 两套 offsets、但 dense CSC
+  SpMV 只读取 `usize` 的无收益状态；先完成 perf/汇编 A/B，再选择统一 offset 表示。
+- [ ] 将构建期内存与运行期内存分开：审计 Matrix Market 整文件缓冲、24-byte/nnz
+  builder triplet（含 `sequence: usize`）及 freeze 同时存活峰值。
+
+### B. zhighs / HiGHS 公平性审计
+
+- [ ] 固定同一 CPU core、SMT 状态、数据、矩阵顺序、warm-up、重复次数及交错执行顺序；
+  报告 median、MAD 和进程级重复，不以单进程内部均值代替统计稳定性。
+- [x] 核对 Zig `ReleaseFast -Dcpu=native` 与 C++ `-O3 -march=native -DNDEBUG -flto` 的
+  ISA、LTO、链接方式和断言/边界检查；记录编译器版本与二进制哈希。
+- [ ] 确保双方 kernel contract 一致：是否包含 output clear、是否复用输出容量、offset/index
+  宽度、输入稀疏模式、checksum barrier 和 owning/borrowed 转换必须逐项相同。
+- [ ] 将真实数据集 runner 拆成 kernel-only 与 lifecycle/memory 两类；HiGHS 与 zhighs 的
+  CSC-only、CSR-only、CSC+CSR、转换 scratch 和构建峰值必须同口径。
+- [x] 初步代码审计确认：双方 CSC/CSR dense SpMV 算法同阶且循环结构接近；当前验收 RSS
+  不公平，zhighs 同时持有 transpose、values 副本、scaling、slice/permutation 等对象，
+  HiGHS runner 主要持有 CSC+CSR，现有 RSS 不得用于宣称单矩阵内存差距。
+
+### C. perf 与汇编定位
+
+- [x] 对 `csc_ax_dense`、`csr_ax_dense`、`clear_output`、`csc_to_csr_into` 先执行固定核
+  `perf stat -r`，至少记录 cycles、instructions、IPC、branches、branch-misses、
+  cache-references/misses、page-faults 和 context-switches；WSL/PMU 不支持的事件明确标记。
+- [x] 使用 `perf record`/`perf report` 确认采样落在目标 kernel 而非 harness、allocator、
+  checksum 或动态链接层；必要时添加稳定的 noinline profiling boundary。
+- [x] 对存在稳定差距的 kernel，用 `objdump`/`llvm-objdump` 按符号提取双方汇编，比较
+  清零实现、offset 扩展、循环分支、地址生成、load/store 数量和寄存器 spill。
+- [ ] 为 `usize offsets`、`HUInt offsets`、volatile clear、fast clear 建立独立 A/B；每次
+  只改变一个变量，汇编和 perf 同时证明原因后才修改生产默认路径。
+
+### D. 已识别候选修复（等待 perf 证据）
+
+- [x] CSC dense SpMV 当前忽略已存在的 `compact_col_starts`，导致双份 offset 内存没有转化
+  为热循环收益；评估 compact 专用 kernel 或统一 32-bit/64-bit tagged view。
+- [ ] `CsrBuffers` 将 row cursor 与常驻 CSR 输出放在同一 allocation，重复转换有利但
+  常驻多 `4 * num_rows`（w32）；拆分 persistent view 与 reusable workspace 的生命周期。
+- [x] 重新验证 `clearF64` 的 volatile SIMD 默认策略。既有“比 memset 快 12 倍”结论需在
+  同编译器、同输出语义和汇编下复测，排除旧 benchmark 的 memset 类型/优化消除问题。
+- [ ] builder 的 `sequence: usize` 令 w32 triplet field streams 达 24 bytes/nnz；比较稳定
+  sort、32-bit sequence、分块/流式构建，保证重复项浮点合并顺序后再选择。
+
+专项完成标准：公平基准中主要矩阵 kernel 的差距有硬件事件和汇编解释；修复后 quick/full
+gate 通过，真实数据与 synthetic profile 方向一致，且 `todo.md` 保留失败实验而不只记录
+成功结果。
+
+### 2026-07-14 专项实验记录
+
+- Layout audit 已加入 `zig build audit-matrix-layout`。w32 下 `CscMatrix`/`CscView`/
+  `CsrView` 控制块分别为 104/64/64 bytes；slice 与 optional slice 均为 16 bytes。
+  普通 Zig struct 为 auto layout：builder triplet 的实际字段 offset 为 value=0、
+  sequence=8、row=16、col=20，总计 24 bytes；w64 为 32 bytes。控制块大小不是百万级
+  矩阵 RSS 主因，外部 SoA arrays、双 offsets 和 scratch 生命周期才是主因。
+- 已安装并验证 perf 6.8.12；WSL2 用户态 PMU 可用。初始 synthetic 结果：CSC Zig/HiGHS
+  约 363M/318M cycles，CSR 约 355M/284M cycles；branch miss 均极低，cache miss 没有
+  解释差距。CSC->CSR Zig 约 136M cycles，HiGHS 约 175M cycles，证明不是 Zig/ID/SoA
+  的普遍开销。
+- 反汇编确认 HiGHS/GCC 使用 `vfmadd*sd`，原 Zig 使用分离 `vmulsd+vaddsd`；现已在
+  CSC/CSR dense kernels 显式使用 `@mulAdd`，w32/w64 matrix tests 通过，生成 FMA 已核实。
+- 更大的差距来自 benchmark/代码生成边界：Zig kernel 被内联进包含 21 个分支的巨大
+  profiling `main`，导致 values/indices/y bases 在每个 nnz 从栈重载；HiGHS shared-library
+  `product` 是独立 leaf，bases 常驻寄存器。给 CSC/CSR 建立稳定 noinline leaf 后，栈重载
+  消失；synthetic CSR 降到约 222M cycles，优于 HiGHS 约 283M cycles。
+- CSC dense kernel 已按一次性 tag dispatch 使用 `compact_col_starts`，每个 nnz 不增加
+  分支；synthetic CSC 约 282M cycles，HiGHS 约 318M cycles。5 个独立真实数据进程的
+  zhighs median 为 thermal/cage/web CSC 0.561/1.774/4.712 ms，CSR
+  0.526/1.648/4.314 ms；5 个 HiGHS 进程 median 分别为 CSC
+  0.602/1.842/5.162 ms，CSR 0.540/1.845/5.094 ms。当前为分组重复而非逐次交错，最终
+  公平报告仍需完成真实数据 interleaved runner 后固化。
+- `clear_output` perf 中 Zig 约 3.28B cycles/100k，HiGHS 约 3.46B cycles/100k；HiGHS
+  `std::fill` 主要降为 `rep stos`，因此 retired instructions 不可直接比较。清零不是当前
+  CSC/CSR 差距来源，保留 volatile clear 的结论暂时成立。
+- 修复后的 `zig build test`（w32/w64）、quick gate 和 fail-closed full gate 均通过；
+  full report 为 `/tmp/zhighs-matrix-acceptance/20260714T065632Z/summary.tsv`，四项全部 PASS。
+  首次 full 尝试因未传 `MATRIX_DATASET_RUNNER` 而非代码失败，补齐 runner 路径后通过；
+  该环境配置失败保留记录，不计作内核回归。

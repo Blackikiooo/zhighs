@@ -32,3 +32,10 @@ dataset  rows  cols  nnz  elapsed_ms  peak_rss_kb  status
 At least three `PASS` datasets with 10,000 rows, 10,000 columns, 100,000 nnz,
 positive runtime, and positive peak RSS are required. Corpus provenance and
 checksums must be pinned alongside the external dataset directory.
+
+The pinned local corpus used on 2026-07-14 is recorded in
+`tools/matrix_gate/suitesparse-corpus.lock.tsv`. Build the in-tree runner with
+`zig build build-matrix-dataset-runner -Doptimize=ReleaseFast -Dcpu=native` and
+point `MATRIX_DATASET_RUNNER` at `zig-out/bin/matrix-dataset-runner`. The large
+dataset gate verifies every matrix SHA-256 against this lock before executing;
+`MATRIX_DATASET_LOCK` may select a different explicitly pinned corpus.

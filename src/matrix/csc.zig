@@ -220,42 +220,20 @@ pub const CscMatrix = struct {
     }
 
     /// Dense-vector hot path: branchless traversal after clearing y.
-    pub fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
-        const ncol = self.num_cols;
-        const starts = self.col_starts;
-        const ri = self.row_indices;
-        const vs = self.values;
+    pub noinline fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         memory.clearF64(y);
-        var col: usize = 0;
-        while (col < ncol) : (col += 1) {
-            const x_value = x[col];
-            var pos = starts[col];
-            const end = starts[col + 1];
-            while (pos < end) : (pos += 1) {
-                const row = ri[pos].toUsize();
-                y[row] += vs[pos] * x_value;
-            }
-        }
+        if (self.compact_col_starts) |starts|
+            return multiplyDenseKernel(foundation.HUInt, self.num_cols, starts, self.row_indices, self.values, x, y);
+        return multiplyDenseKernel(usize, self.num_cols, self.col_starts, self.row_indices, self.values, x, y);
     }
 
     /// Experimental: like multiplyAssumeValid but uses non-volatile clear so the
     /// compiler can reorder or merge the zero-fill with the subsequent scatter.
     pub fn multiplyAssumeValidFastClear(self: Self, x: []const f64, y: []f64) void {
-        const ncol = self.num_cols;
-        const starts = self.col_starts;
-        const ri = self.row_indices;
-        const vs = self.values;
         memory.clearF64Fast(y);
-        var col: usize = 0;
-        while (col < ncol) : (col += 1) {
-            const x_value = x[col];
-            var pos = starts[col];
-            const end = starts[col + 1];
-            while (pos < end) : (pos += 1) {
-                const row = ri[pos].toUsize();
-                y[row] += vs[pos] * x_value;
-            }
-        }
+        if (self.compact_col_starts) |starts|
+            return multiplyDenseKernel(foundation.HUInt, self.num_cols, starts, self.row_indices, self.values, x, y);
+        return multiplyDenseKernel(usize, self.num_cols, self.col_starts, self.row_indices, self.values, x, y);
     }
 
     pub fn multiplySkippingZeros(self: Self, x: []const f64, y: []f64) MatrixError!void {
@@ -397,6 +375,31 @@ pub const CscView = struct {
         }
     }
 };
+
+/// Stable leaf boundary keeps matrix bases in registers even when a solver
+/// caller has many live values. Offset width is specialized once per call;
+/// there is no per-entry tag branch.
+/// !!!Prevent register overflow.
+noinline fn multiplyDenseKernel(
+    comptime Offset: type,
+    num_cols: usize,
+    starts: []const Offset,
+    row_indices: []const RowId,
+    matrix_values: []const f64,
+    x: []const f64,
+    y: []f64,
+) void {
+    var col: usize = 0;
+    while (col < num_cols) : (col += 1) {
+        const x_value = x[col];
+        var pos: usize = @intCast(starts[col]);
+        const end: usize = @intCast(starts[col + 1]);
+        while (pos < end) : (pos += 1) {
+            const row = row_indices[pos].toUsize();
+            y[row] = @mulAdd(f64, matrix_values[pos], x_value, y[row]);
+        }
+    }
+}
 
 /// Kept as a leaf function to avoid duplicating compact and usize-offset
 /// kernels into every large solver caller. This also keeps the prefetch loop
