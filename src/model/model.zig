@@ -546,6 +546,7 @@ pub const Model = struct {
     pub const resetParams = @import("model_params.zig").resetParams;
 
     pub const writeModel = @import("model_io.zig").writeModel;
+    pub const write = @import("model_io.zig").write;
     pub const readModel = @import("model_io.zig").readModel;
     pub const read = @import("model_io.zig").read;
 };

@@ -35,6 +35,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lp", .module = lp_module },
         },
     });
+    const io_module = b.createModule(.{
+        .root_source_file = b.path("src/io/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+        },
+    });
     const model_module = b.createModule(.{
         .root_source_file = b.path("src/model/root.zig"),
         .target = target,
@@ -43,6 +52,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
             .{ .name = "solver", .module = solver_module },
+            .{ .name = "io", .module = io_module },
         },
     });
 
@@ -56,6 +66,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("model", model_module);
     mod.addImport("lp", lp_module);
     mod.addImport("solver", solver_module);
+    mod.addImport("io", io_module);
 
     const exe = b.addExecutable(.{
         .name = "zhighs",
@@ -188,6 +199,23 @@ pub fn build(b: *std.Build) void {
     const coefficient_edit_bench_step = b.step("bench-coefficient-edits", "Run batched coefficient-edit throughput benchmarks");
     coefficient_edit_bench_step.dependOn(&run_coefficient_edit_bench.step);
 
+    const io_parser_bench = b.addExecutable(.{
+        .name = "io-parser-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/io/parser_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "io", .module = io_module }},
+        }),
+    });
+    const install_io_parser_bench = b.addInstallArtifact(io_parser_bench, .{});
+    const build_io_bench_step = b.step("build-io-bench", "Build the model I/O parser benchmark");
+    build_io_bench_step.dependOn(&install_io_parser_bench.step);
+    const run_io_parser_bench = b.addRunArtifact(io_parser_bench);
+    if (b.args) |args| run_io_parser_bench.addArgs(args);
+    const io_bench_step = b.step("bench-io", "Benchmark model parsing and canonical construction");
+    io_bench_step.dependOn(&run_io_parser_bench.step);
+
     const perf_profile = b.addExecutable(.{
         .name = "perf-profile",
         .root_module = b.createModule(.{
@@ -282,4 +310,10 @@ pub fn build(b: *std.Build) void {
     const run_model_tests = b.addRunArtifact(model_tests);
     const model_test_step = b.step("test-model", "Run model core tests (no API/solver)");
     model_test_step.dependOn(&run_model_tests.step);
+
+    const io_tests = b.addTest(.{ .root_module = io_module });
+    const run_io_tests = b.addRunArtifact(io_tests);
+    const io_test_step = b.step("test-io", "Run model file parser and writer tests");
+    io_test_step.dependOn(&run_io_tests.step);
+    test_step.dependOn(&run_io_tests.step);
 }
