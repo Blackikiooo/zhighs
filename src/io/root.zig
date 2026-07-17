@@ -5,10 +5,12 @@
 //! parsers in this module never mutate solver state.
 
 const std = @import("std");
+const input_source = @import("input.zig");
 
 pub const types = @import("types.zig");
 pub const format = @import("format.zig");
 pub const ModelData = @import("model_data.zig").ModelData;
+pub const StringArena = @import("string_arena.zig").StringArena;
 pub const lp = @import("lp/root.zig");
 pub const mps = @import("mps/root.zig");
 const output = @import("output.zig");
@@ -21,6 +23,7 @@ pub const ObjectiveSense = types.ObjectiveSense;
 pub const RowSense = types.RowSense;
 pub const VariableType = types.VariableType;
 pub const Diagnostic = types.Diagnostic;
+pub const InputMode = types.InputMode;
 pub const ReadOptions = types.ReadOptions;
 pub const WriteOptions = types.WriteOptions;
 pub const ModelView = types.ModelView;
@@ -28,22 +31,18 @@ pub const ModelView = types.ModelView;
 /// Read and parse a model file. The returned model owns canonical numeric data
 /// and is independent of the input buffer.
 pub fn readFile(io_context: std.Io, allocator: std.mem.Allocator, path: []const u8, options: ReadOptions) IoError!ModelData {
+    try options.checkCancelled();
     const kind = try format.detect(path);
     if (kind.compression != .none) return error.UnsupportedCompression;
     const file = std.Io.Dir.cwd().openFile(io_context, path, .{}) catch |err| return mapOpenError(err);
     defer file.close(io_context);
-    var buffer: [128 * 1024]u8 = undefined;
-    var file_reader = file.reader(io_context, &buffer);
-    const input = file_reader.interface.allocRemaining(allocator, .limited(options.max_file_bytes)) catch |err| return switch (err) {
-        error.StreamTooLong => error.FileTooLarge,
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.ReadFailed,
-    };
-    defer allocator.free(input);
+    var input = try input_source.FileInput.load(io_context, allocator, file, options);
+    defer input.deinit(io_context, allocator);
+    try options.checkCancelled();
     const name = modelName(path, kind);
     return switch (kind.format) {
-        .lp, .rlp => lp.parse(allocator, input, name, options),
-        .mps, .rew => mps.parse(allocator, input, name, options),
+        .lp, .rlp => lp.parse(allocator, input.bytes(), name, options),
+        .mps, .rew => mps.parse(allocator, input.bytes(), name, options),
         else => error.UnsupportedFormat,
     };
 }
@@ -119,7 +118,7 @@ test "LP and MPS writers round trip the same canonical linear model" {
     defer std.testing.allocator.free(mps_path);
     try writeFile(std.testing.io, std.testing.allocator, lp_path, original.view(), .{});
     try writeFile(std.testing.io, std.testing.allocator, mps_path, original.view(), .{});
-    var from_lp = try readFile(std.testing.io, std.testing.allocator, lp_path, .{});
+    var from_lp = try readFile(std.testing.io, std.testing.allocator, lp_path, .{ .input_mode = .memory_map });
     defer from_lp.deinit();
     var from_mps = try readFile(std.testing.io, std.testing.allocator, mps_path, .{});
     defer from_mps.deinit();
@@ -136,4 +135,32 @@ test "LP and MPS writers round trip the same canonical linear model" {
     try std.testing.expectEqual(@as(f64, 7.0), from_mps.row_upper[0]);
     try std.testing.expectEqual(@as(f64, 3.0), from_lp.objective_offset);
     try std.testing.expectEqual(@as(f64, 3.0), from_mps.objective_offset);
+}
+
+test "discarded name tables write with deterministic generated names" {
+    const source =
+        \\Minimize
+        \\ obj: 2 alpha + beta
+        \\Subject To
+        \\ capacity: alpha + beta <= 4
+        \\End
+    ;
+    var anonymous = try lp.parse(std.testing.allocator, source, "anonymous", .{ .keep_names = false });
+    defer anonymous.deinit();
+    try std.testing.expectEqual(@as(usize, 0), anonymous.col_names.len);
+    try std.testing.expectEqual(@as(usize, 0), anonymous.row_names.len);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/generated.lp", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    try writeFile(std.testing.io, std.testing.allocator, path, anonymous.view(), .{});
+    var reparsed = try readFile(std.testing.io, std.testing.allocator, path, .{});
+    defer reparsed.deinit();
+
+    try std.testing.expectEqualStrings("x0", reparsed.col_names[0].?);
+    try std.testing.expectEqualStrings("x1", reparsed.col_names[1].?);
+    try std.testing.expectEqualStrings("c0", reparsed.row_names[0].?);
+    try std.testing.expectEqualSlices(f64, anonymous.col_cost, reparsed.col_cost);
+    try std.testing.expectEqualSlices(f64, anonymous.matrix.values, reparsed.matrix.values);
 }

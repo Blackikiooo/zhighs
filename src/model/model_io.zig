@@ -79,7 +79,7 @@ pub fn readModel(self: *Model, filename: []const u8) ModelError!void {
         row_first[row] = replacement.numConstrs();
         const lower = imported.row_lower[row];
         const upper = imported.row_upper[row];
-        const name = if (imported.row_names[row]) |value| value else null;
+        const name = if (imported.row_names.len == 0) null else if (imported.row_names[row]) |value| value else null;
         if (lower == upper) {
             try replacement.addConstr(0, &.{}, &.{}, .equal, lower, name);
         } else if (std.math.isInf(lower)) {
@@ -128,7 +128,7 @@ pub fn readModel(self: *Model, filename: []const u8) ModelError!void {
                 .semi_continuous => .semicont,
                 .semi_integer => .semiint,
             },
-            if (imported.col_names[column]) |name| name else null,
+            if (imported.col_names.len == 0) null else if (imported.col_names[column]) |name| name else null,
         );
     }
     try replacement.updateModel();
@@ -147,7 +147,7 @@ fn maxColumnLength(matrix: @import("matrix").CscMatrix) usize {
 fn mapIoError(err: io.IoError) ModelError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.FileNotFound, error.PermissionDenied, error.ReadFailed, error.WriteFailed, error.FileTooLarge => error.IoError,
+        error.FileNotFound, error.PermissionDenied, error.ReadFailed, error.WriteFailed, error.FileTooLarge, error.ResourceLimitExceeded, error.Cancelled => error.IoError,
         error.UnsupportedFormat, error.UnsupportedCompression, error.UnsupportedFeature => error.FeatureNotAvailable,
         error.DuplicateName => error.DuplicateName,
         else => error.InvalidArgument,

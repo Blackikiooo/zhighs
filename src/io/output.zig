@@ -9,6 +9,8 @@ pub const Names = struct {
     rows: [][]u8,
 
     pub fn init(allocator: std.mem.Allocator, view: types.ModelView) types.IoError!Names {
+        if ((view.col_names.len != 0 and view.col_names.len != view.numCols()) or
+            (view.row_names.len != 0 and view.row_names.len != view.numRows())) return error.InvalidDimensions;
         const columns = allocator.alloc([]u8, view.numCols()) catch return error.OutOfMemory;
         errdefer allocator.free(columns);
         var columns_init: usize = 0;
@@ -16,7 +18,8 @@ pub const Names = struct {
         var seen_columns = std.StringHashMap(void).init(allocator);
         defer seen_columns.deinit();
         for (0..view.numCols()) |index| {
-            columns[index] = if (view.col_names[index]) |name|
+            const retained_name = if (view.col_names.len == 0) null else view.col_names[index];
+            columns[index] = if (retained_name) |name|
                 allocator.dupe(u8, name) catch return error.OutOfMemory
             else
                 std.fmt.allocPrint(allocator, "x{d}", .{index}) catch return error.OutOfMemory;
@@ -32,7 +35,8 @@ pub const Names = struct {
         var seen_rows = std.StringHashMap(void).init(allocator);
         defer seen_rows.deinit();
         for (0..view.numRows()) |index| {
-            rows[index] = if (view.row_names[index]) |name|
+            const retained_name = if (view.row_names.len == 0) null else view.row_names[index];
+            rows[index] = if (retained_name) |name|
                 allocator.dupe(u8, name) catch return error.OutOfMemory
             else
                 std.fmt.allocPrint(allocator, "c{d}", .{index}) catch return error.OutOfMemory;

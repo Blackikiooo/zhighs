@@ -2,8 +2,8 @@
 //!
 //! Both variants are token-compatible for ordinary names and numeric fields,
 //! so the hot path scans whitespace-delimited fields without copying. COLUMNS
-//! records are consumed in their native column order; the shared builder is
-//! currently responsible for canonical duplicate merging.
+//! records are consumed in their native column order; the shared builder
+//! merges duplicates in place and freezes directly into packed CSC storage.
 
 const std = @import("std");
 const types = @import("../types.zig");
@@ -23,15 +23,18 @@ const Parser = struct {
     rhs_set: ?[]const u8 = null,
     ranges_set: ?[]const u8 = null,
     bounds_set: ?[]const u8 = null,
+    control: types.ParseControl,
 
-    fn init(allocator: std.mem.Allocator, fallback_name: []const u8) Parser {
+    fn init(allocator: std.mem.Allocator, fallback_name: []const u8, options: types.ReadOptions) Parser {
         var builder = Builder.init(allocator);
+        builder.configureLimits(options);
         builder.name = fallback_name;
         return .{
             .allocator = allocator,
             .builder = builder,
             .row_by_name = std.StringHashMap(usize).init(allocator),
             .col_by_name = std.StringHashMap(usize).init(allocator),
+            .control = types.ParseControl.init(options),
         };
     }
 
@@ -39,6 +42,15 @@ const Parser = struct {
         self.row_by_name.deinit();
         self.col_by_name.deinit();
         self.builder.deinit();
+    }
+
+    /// ROWS/COLUMNS/RHS/RANGES/BOUNDS have all resolved their symbolic names
+    /// before finalization, so neither hash table needs to overlap final CSC.
+    fn releaseNameIndexes(self: *Parser) void {
+        self.row_by_name.deinit();
+        self.row_by_name = std.StringHashMap(usize).init(self.allocator);
+        self.col_by_name.deinit();
+        self.col_by_name = std.StringHashMap(usize).init(self.allocator);
     }
 
     fn column(self: *Parser, name: []const u8) types.IoError!usize {
@@ -50,7 +62,9 @@ const Parser = struct {
 };
 
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []const u8, options: types.ReadOptions) types.IoError!ModelData {
-    var parser = Parser.init(allocator, fallback_name);
+    if (input.len > options.max_file_bytes) return error.FileTooLarge;
+    try options.checkCancelled();
+    var parser = Parser.init(allocator, fallback_name, options);
     defer parser.deinit();
     var section: Section = .none;
     var saw_rows = false;
@@ -58,6 +72,8 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
     var saw_end = false;
     var lines = std.mem.tokenizeScalar(u8, input, '\n');
     while (lines.next()) |raw| {
+        try parser.control.tick();
+        if (raw.len > options.max_line_bytes) return error.ResourceLimitExceeded;
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '*') continue;
         var fields = try tokenize(allocator, line);
@@ -87,6 +103,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
         }
     }
     if (!saw_rows or !saw_columns or !saw_end) return error.InvalidSyntax;
+    parser.releaseNameIndexes();
     return parser.builder.finishColumnOrdered(options);
 }
 
@@ -310,6 +327,41 @@ fn setRangePair(parser: *Parser, row_name: []const u8, number: []const u8) types
     } else {
         return error.InvalidSyntax;
     }
+}
+
+test "MPS name indexes release all hash capacity before finalization" {
+    var parser = Parser.init(std.testing.allocator, "names", .{});
+    defer parser.deinit();
+    parser.row_by_name.put("row", 0) catch return error.OutOfMemory;
+    _ = try parser.column("column");
+    try std.testing.expect(parser.row_by_name.capacity() > 0);
+    try std.testing.expect(parser.col_by_name.capacity() > 0);
+
+    parser.releaseNameIndexes();
+    try std.testing.expectEqual(@as(u32, 0), parser.row_by_name.count());
+    try std.testing.expectEqual(@as(u32, 0), parser.row_by_name.capacity());
+    try std.testing.expectEqual(@as(u32, 0), parser.col_by_name.count());
+    try std.testing.expectEqual(@as(u32, 0), parser.col_by_name.capacity());
+}
+
+test "MPS parser enforces record and semantic limits and cancellation" {
+    const source =
+        \\NAME LIMITS
+        \\ROWS
+        \\ N OBJ
+        \\ L ROW
+        \\COLUMNS
+        \\ X ROW 1
+        \\RHS
+        \\ RHS1 ROW 1
+        \\ENDATA
+    ;
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_line_bytes = 5 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_rows = 0 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_columns = 0 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_matrix_terms = 0 }));
+    var interrupted = std.atomic.Value(bool).init(true);
+    try std.testing.expectError(error.Cancelled, parse(std.testing.allocator, source, "limits", .{ .interrupt_flag = &interrupted }));
 }
 
 fn parseBound(parser: *Parser, fields: []const []const u8) types.IoError!void {

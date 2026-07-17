@@ -43,6 +43,7 @@ flowchart TB
 | [`docs/architecture.md`](docs/architecture.md) | zhighs 的目标分层、数据所有权和组件边界。 |
 | [`docs/highs-zhighs-file-map.md`](docs/highs-zhighs-file-map.md) | HiGHS C++ 与 zhighs Zig 的逐功能文件对应表及实现状态。 |
 | [`docs/highs-module-architecture.md`](docs/highs-module-architecture.md) | HiGHS 当前模块组织、求解流程和子系统关系的详细中文图解。 |
+| [`docs/lp-format.md`](docs/lp-format.md) | LP 文件的当前语法、词法规则、语义映射与暂不支持范围。 |
 | [`todo.md`](todo.md) | zhighs 按依赖顺序执行的实现清单和验收标准。 |
 
 ## 当前目录

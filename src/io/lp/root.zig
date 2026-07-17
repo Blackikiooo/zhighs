@@ -10,25 +10,41 @@ const types = @import("../types.zig");
 const Builder = @import("../builder.zig").Builder;
 const ModelData = @import("../model_data.zig").ModelData;
 const output = @import("../output.zig");
+const lexer_module = @import("lexer.zig");
+const Token = lexer_module.Token;
+const Tag = lexer_module.Tag;
+
+pub const Lexer = lexer_module.Lexer;
+pub const LexerError = lexer_module.Error;
+pub const token = @import("token.zig");
 
 const Section = enum { none, objective, constraints, bounds, binaries, generals, semicont, semiint, end };
 
 const Parser = struct {
-    allocator: std.mem.Allocator,
     builder: Builder,
     variables: std.StringHashMap(usize),
+    control: types.ParseControl,
     pending_objective_coefficient: ?f64 = null,
     objective_sign: f64 = 1.0,
 
-    fn init(allocator: std.mem.Allocator, name: []const u8) Parser {
+    fn init(allocator: std.mem.Allocator, name: []const u8, options: types.ReadOptions) Parser {
         var builder = Builder.init(allocator);
+        builder.configureLimits(options);
+        builder.enableColumnTermStorage();
         builder.name = name;
-        return .{ .allocator = allocator, .builder = builder, .variables = std.StringHashMap(usize).init(allocator) };
+        return .{ .builder = builder, .variables = std.StringHashMap(usize).init(allocator), .control = types.ParseControl.init(options) };
     }
 
     fn deinit(self: *Parser) void {
         self.variables.deinit();
         self.builder.deinit();
+    }
+
+    /// Name lookup ends with syntax parsing. Releasing the table before CSC
+    /// finalization prevents it from overlapping the final matrix allocation.
+    fn releaseVariableIndex(self: *Parser) void {
+        self.variables.deinit();
+        self.variables = std.StringHashMap(usize).init(self.builder.allocator);
     }
 
     fn variable(self: *Parser, name: []const u8) types.IoError!usize {
@@ -41,17 +57,25 @@ const Parser = struct {
 };
 
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, model_name: []const u8, options: types.ReadOptions) types.IoError!ModelData {
-    var parser = Parser.init(allocator, model_name);
+    if (input.len > options.max_file_bytes) return error.FileTooLarge;
+    try options.checkCancelled();
+    var parser = Parser.init(allocator, model_name, options);
     defer parser.deinit();
     var section: Section = .none;
     var saw_objective = false;
     var saw_end = false;
-    var lines = std.mem.tokenizeScalar(u8, input, '\n');
-    while (lines.next()) |raw| {
-        const code = if (std.mem.indexOfScalar(u8, raw, '\\')) |at| raw[0..at] else raw;
-        const line = std.mem.trim(u8, code, " \t\r");
-        if (line.len == 0) continue;
-        if (header(line)) |next| {
+    var lexer = Lexer.initWithLimits(input, options.max_line_bytes, options.max_token_bytes);
+    while (true) {
+        try parser.control.tick();
+        const line_start = lexer;
+        const first = try nextToken(&lexer);
+        switch (first.tag) {
+            .newline => continue,
+            .eof => break,
+            else => {},
+        }
+
+        if (try consumeHeaderLine(&lexer, first)) |next| {
             if (section == .objective and next.section != .objective) {
                 if (parser.pending_objective_coefficient) |constant| {
                     parser.builder.objective_offset += constant;
@@ -66,18 +90,24 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, model_name: []cons
             if (section == .end) saw_end = true;
             continue;
         }
+
+        // A non-header line is parsed from its first token. Restoring this
+        // cheap value checkpoint avoids a token buffer while header lines
+        // retain the already-consumed first token.
+        lexer = line_start;
         switch (section) {
-            .objective => try parseObjective(&parser, line),
-            .constraints => try parseConstraint(&parser, line),
-            .bounds => try parseBound(&parser, line),
-            .binaries => try parseTypes(&parser, line, .binary),
-            .generals => try parseTypes(&parser, line, .integer),
-            .semicont => try parseTypes(&parser, line, .semi_continuous),
-            .semiint => try parseTypes(&parser, line, .semi_integer),
+            .objective => try parseObjective(&parser, &lexer),
+            .constraints => try parseConstraint(&parser, &lexer),
+            .bounds => try parseBound(&parser, &lexer),
+            .binaries => try parseTypes(&parser, &lexer, .binary),
+            .generals => try parseTypes(&parser, &lexer, .integer),
+            .semicont => try parseTypes(&parser, &lexer, .semi_continuous),
+            .semiint => try parseTypes(&parser, &lexer, .semi_integer),
             else => return error.InvalidSyntax,
         }
     }
     if (!saw_objective or !saw_end) return error.InvalidSyntax;
+    parser.releaseVariableIndex();
     return parser.builder.finish(options);
 }
 
@@ -185,16 +215,63 @@ fn writeTypes(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.M
 
 const Header = struct { section: Section, sense: ?types.ObjectiveSense = null };
 
-fn header(line: []const u8) ?Header {
-    if (equalsAny(line, &.{ "minimize", "minimum", "min" })) return .{ .section = .objective, .sense = .minimize };
-    if (equalsAny(line, &.{ "maximize", "maximum", "max" })) return .{ .section = .objective, .sense = .maximize };
-    if (equalsAny(line, &.{ "subject to", "such that", "st", "s.t." })) return .{ .section = .constraints };
-    if (std.ascii.eqlIgnoreCase(line, "bounds")) return .{ .section = .bounds };
-    if (equalsAny(line, &.{ "binary", "binaries", "bin" })) return .{ .section = .binaries };
-    if (equalsAny(line, &.{ "general", "generals", "gen" })) return .{ .section = .generals };
-    if (equalsAny(line, &.{ "semi-continuous", "semis", "semi" })) return .{ .section = .semicont };
-    if (std.ascii.eqlIgnoreCase(line, "semi-integer")) return .{ .section = .semiint };
-    if (std.ascii.eqlIgnoreCase(line, "end")) return .{ .section = .end };
+/// Recognize a section header only at the parser's current line start. The
+/// checkpoint is committed only when the complete line matches a header, so a
+/// normal expression beginning with a keyword-like identifier is untouched.
+fn consumeHeaderLine(lexer: *Lexer, first: Token) types.IoError!?Header {
+    var probe = lexer.*;
+    if (first.tag != .identifier) return null;
+
+    var result: ?Header = null;
+    if (equalsAny(first.lexeme, &.{ "minimize", "minimum", "min" })) {
+        result = .{ .section = .objective, .sense = .minimize };
+    } else if (equalsAny(first.lexeme, &.{ "maximize", "maximum", "max" })) {
+        result = .{ .section = .objective, .sense = .maximize };
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "subject")) {
+        const second = try nextToken(&probe);
+        if (second.tag == .identifier and std.ascii.eqlIgnoreCase(second.lexeme, "to")) result = .{ .section = .constraints };
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "such")) {
+        const second = try nextToken(&probe);
+        if (second.tag == .identifier and std.ascii.eqlIgnoreCase(second.lexeme, "that")) result = .{ .section = .constraints };
+    } else if (equalsAny(first.lexeme, &.{ "st", "s.t." })) {
+        result = .{ .section = .constraints };
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "bounds")) {
+        result = .{ .section = .bounds };
+    } else if (equalsAny(first.lexeme, &.{ "binary", "binaries", "bin" })) {
+        result = .{ .section = .binaries };
+    } else if (equalsAny(first.lexeme, &.{ "general", "generals", "gen" })) {
+        result = .{ .section = .generals };
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "semis")) {
+        result = .{ .section = .semicont };
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "semi")) {
+        // `Semi` is itself a common alias, while `Semi-Continuous` and
+        // `Semi-Integer` are tokenized as identifier/minus/identifier. Probe
+        // the suffix independently so a failed suffix leaves the lexer just
+        // after `Semi` for the normal line-terminator check below.
+        var suffix = probe;
+        if (try consumeHyphenatedSemiHeader(&suffix)) |header_value| {
+            probe = suffix;
+            result = header_value;
+        } else {
+            result = .{ .section = .semicont };
+        }
+    } else if (std.ascii.eqlIgnoreCase(first.lexeme, "end")) {
+        result = .{ .section = .end };
+    }
+    const header_value = result orelse return null;
+    const terminator = try nextToken(&probe);
+    if (terminator.tag != .newline and terminator.tag != .eof) return null;
+    lexer.* = probe;
+    return header_value;
+}
+
+fn consumeHyphenatedSemiHeader(lexer: *Lexer) types.IoError!?Header {
+    const hyphen = try nextToken(lexer);
+    if (hyphen.tag != .minus) return null;
+    const kind = try nextToken(lexer);
+    if (kind.tag != .identifier) return null;
+    if (std.ascii.eqlIgnoreCase(kind.lexeme, "continuous")) return .{ .section = .semicont };
+    if (std.ascii.eqlIgnoreCase(kind.lexeme, "integer")) return .{ .section = .semiint };
     return null;
 }
 
@@ -212,178 +289,222 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
-fn tokenize(allocator: std.mem.Allocator, text: []const u8) types.IoError!std.ArrayListUnmanaged([]const u8) {
-    var result: std.ArrayListUnmanaged([]const u8) = .empty;
-    errdefer result.deinit(allocator);
-    var iterator = std.mem.tokenizeAny(u8, text, " \t\r");
-    while (iterator.next()) |token| result.append(allocator, token) catch return error.OutOfMemory;
-    return result;
-}
-
 fn parseFinite(text: []const u8) types.IoError!f64 {
     const value = std.fmt.parseFloat(f64, text) catch return error.InvalidNumber;
     if (!std.math.isFinite(value)) return error.NonFiniteValue;
     return value;
 }
 
-fn parseObjective(parser: *Parser, line: []const u8) types.IoError!void {
-    var expression = line;
-    if (std.mem.indexOfScalar(u8, expression, ':')) |colon| expression = std.mem.trimStart(u8, expression[colon + 1 ..], " \t");
-    var tokens = try tokenize(parser.allocator, expression);
-    defer tokens.deinit(parser.allocator);
-    var index: usize = 0;
+fn nextToken(lexer: *Lexer) types.IoError!Token {
+    return lexer.next() catch |err| return switch (err) {
+        error.ResourceLimitExceeded => error.ResourceLimitExceeded,
+        error.InvalidCharacter => error.InvalidSyntax,
+    };
+}
+
+fn peekToken(lexer: *Lexer) types.IoError!Token {
+    return lexer.peek() catch |err| return switch (err) {
+        error.ResourceLimitExceeded => error.ResourceLimitExceeded,
+        error.InvalidCharacter => error.InvalidSyntax,
+    };
+}
+
+fn expect(lexer: *Lexer, expected: Tag) types.IoError!Token {
+    const found = try nextToken(lexer);
+    if (found.tag != expected) return error.InvalidSyntax;
+    return found;
+}
+
+fn expectLineEnd(lexer: *Lexer) types.IoError!void {
+    const terminator = try nextToken(lexer);
+    if (terminator.tag != .newline and terminator.tag != .eof) return error.InvalidSyntax;
+}
+
+fn consumeOptionalLabel(lexer: *Lexer) types.IoError!?[]const u8 {
+    var probe = lexer.*;
+    const name = try nextToken(&probe);
+    if (name.tag != .identifier) return null;
+    const separator = try nextToken(&probe);
+    if (separator.tag != .colon) return null;
+    if (!validName(name.lexeme)) return error.InvalidName;
+    lexer.* = probe;
+    return name.lexeme;
+}
+
+fn parseObjective(parser: *Parser, lexer: *Lexer) types.IoError!void {
+    _ = try consumeOptionalLabel(lexer);
     if (parser.pending_objective_coefficient) |coefficient| {
-        if (tokens.items.len == 0) return;
-        const column = try parser.variable(tokens.items[0]);
+        const name = try nextToken(lexer);
+        if (name.tag == .newline or name.tag == .eof) return;
+        if (name.tag != .identifier) return error.InvalidSyntax;
+        const column = try parser.variable(name.lexeme);
         parser.builder.columns.items[column].cost += coefficient;
         parser.pending_objective_coefficient = null;
-        index = 1;
     }
-    while (index < tokens.items.len) {
-        const token = tokens.items[index];
-        if (std.mem.eql(u8, token, "+")) {
-            parser.objective_sign = 1.0;
-            index += 1;
-            continue;
-        }
-        if (std.mem.eql(u8, token, "-")) {
-            parser.objective_sign = -1.0;
-            index += 1;
-            continue;
-        }
-        if (std.fmt.parseFloat(f64, token)) |number| {
-            if (!std.math.isFinite(number)) return error.NonFiniteValue;
-            const coefficient = parser.objective_sign * number;
-            parser.objective_sign = 1.0;
-            if (index + 1 == tokens.items.len) {
-                parser.pending_objective_coefficient = coefficient;
-                return;
-            }
-            const column = try parser.variable(tokens.items[index + 1]);
-            parser.builder.columns.items[column].cost += coefficient;
-            index += 2;
-        } else |_| {
-            const column = try parser.variable(token);
-            parser.builder.columns.items[column].cost += parser.objective_sign;
-            parser.objective_sign = 1.0;
-            index += 1;
+    while (true) {
+        try parser.control.tick();
+        const current = try nextToken(lexer);
+        switch (current.tag) {
+            .plus => parser.objective_sign = 1.0,
+            .minus => parser.objective_sign = -1.0,
+            .identifier => {
+                const column = try parser.variable(current.lexeme);
+                parser.builder.columns.items[column].cost += parser.objective_sign;
+                parser.objective_sign = 1.0;
+            },
+            .number => {
+                const coefficient = parser.objective_sign * try parseFinite(current.lexeme);
+                parser.objective_sign = 1.0;
+                const following = try nextToken(lexer);
+                if (following.tag == .newline or following.tag == .eof) {
+                    parser.pending_objective_coefficient = coefficient;
+                    return;
+                }
+                if (following.tag != .identifier) return error.InvalidSyntax;
+                const column = try parser.variable(following.lexeme);
+                parser.builder.columns.items[column].cost += coefficient;
+            },
+            .newline, .eof => return,
+            .star, .caret, .left_bracket, .right_bracket, .left_paren, .right_paren => return error.UnsupportedFeature,
+            else => return error.InvalidSyntax,
         }
     }
 }
 
-fn parseConstraint(parser: *Parser, line: []const u8) types.IoError!void {
-    var tokens = try tokenize(parser.allocator, line);
-    defer tokens.deinit(parser.allocator);
-    if (tokens.items.len < 3) return error.InvalidSyntax;
-    var begin: usize = 0;
-    var row_name: ?[]const u8 = null;
-    if (std.mem.endsWith(u8, tokens.items[0], ":")) {
-        row_name = tokens.items[0][0 .. tokens.items[0].len - 1];
-        if (!validName(row_name.?)) return error.InvalidName;
-        begin = 1;
-    }
-    var relation: ?usize = null;
-    var second_relation: ?usize = null;
-    for (tokens.items[begin..], begin..) |token, index| {
-        if (std.mem.eql(u8, token, "<=") or std.mem.eql(u8, token, ">=") or std.mem.eql(u8, token, "=")) {
-            if (relation == null) relation = index else {
-                second_relation = index;
-                break;
-            }
-        }
-    }
-    const at = relation orelse return error.InvalidSyntax;
-    if (second_relation) |second| {
-        if (at != begin + 1 or second + 2 != tokens.items.len or !std.mem.eql(u8, tokens.items[at], "<=") or !std.mem.eql(u8, tokens.items[second], "<=")) return error.InvalidSyntax;
-        const lower = try parseFinite(tokens.items[begin]);
-        const upper = try parseFinite(tokens.items[second + 1]);
-        if (lower > upper) return error.InvalidBounds;
-        const row = try parser.builder.addRow(.{ .name = row_name, .lower = lower, .upper = upper });
-        try parseExpression(parser, tokens.items[at + 1 .. second], row);
-        return;
-    }
-    if (at + 2 != tokens.items.len) return error.InvalidSyntax;
-    const rhs = try parseFinite(tokens.items[at + 1]);
-    const row = try parser.builder.addRow(if (std.mem.eql(u8, tokens.items[at], "<="))
-        .{ .name = row_name, .upper = rhs }
-    else if (std.mem.eql(u8, tokens.items[at], ">="))
-        .{ .name = row_name, .lower = rhs }
-    else
-        .{ .name = row_name, .lower = rhs, .upper = rhs });
-    try parseExpression(parser, tokens.items[begin..at], row);
-}
+const ParsedExpression = struct { relation: Tag, constant: f64 };
 
-fn parseExpression(parser: *Parser, tokens: []const []const u8, row: ?usize) types.IoError!void {
-    var index: usize = 0;
+fn parseLinearExpression(parser: *Parser, lexer: *Lexer, row: usize) types.IoError!ParsedExpression {
     var sign: f64 = 1.0;
-    while (index < tokens.len) {
-        if (std.mem.eql(u8, tokens[index], "+")) {
-            sign = 1.0;
-            index += 1;
-            continue;
+    var constant: f64 = 0.0;
+    while (true) {
+        try parser.control.tick();
+        const current = try nextToken(lexer);
+        switch (current.tag) {
+            .plus => sign = 1.0,
+            .minus => sign = -1.0,
+            .less_equal, .greater_equal, .equal => return .{ .relation = current.tag, .constant = constant },
+            .identifier => {
+                try parser.builder.addColumnTerm(row, try parser.variable(current.lexeme), sign);
+                sign = 1.0;
+            },
+            .number => {
+                const value = try parseFinite(current.lexeme);
+                const following = try peekToken(lexer);
+                if (following.tag == .identifier) {
+                    _ = try nextToken(lexer);
+                    try parser.builder.addColumnTerm(row, try parser.variable(following.lexeme), sign * value);
+                } else if (following.tag == .plus or following.tag == .minus or following.tag == .less_equal or following.tag == .greater_equal or following.tag == .equal or following.tag == .newline or following.tag == .eof) {
+                    constant += sign * value;
+                } else {
+                    return error.UnsupportedFeature;
+                }
+                sign = 1.0;
+            },
+            .star, .caret, .left_bracket, .right_bracket, .left_paren, .right_paren => return error.UnsupportedFeature,
+            else => return error.InvalidSyntax,
         }
-        if (std.mem.eql(u8, tokens[index], "-")) {
-            sign = -1.0;
-            index += 1;
-            continue;
-        }
-        var coefficient: f64 = 1.0;
-        var name = tokens[index];
-        if (std.fmt.parseFloat(f64, tokens[index])) |number| {
-            if (!std.math.isFinite(number)) return error.NonFiniteValue;
-            if (index + 1 >= tokens.len) {
-                if (number == 0.0) return;
-                return error.UnsupportedFeature; // objective constants need an explicit constant term policy
+    }
+}
+
+fn parseConstraint(parser: *Parser, lexer: *Lexer) types.IoError!void {
+    const row_name = try consumeOptionalLabel(lexer);
+    var lower_prefix: ?f64 = null;
+    var probe = lexer.*;
+    if (isScalarStart(try nextToken(&probe))) {
+        probe = lexer.*;
+        const candidate = parseScalar(&probe, false) catch null;
+        if (candidate) |value| {
+            const relation = try nextToken(&probe);
+            if (relation.tag == .less_equal) {
+                lower_prefix = value;
+                lexer.* = probe;
             }
-            coefficient = number;
-            index += 1;
-            name = tokens[index];
-        } else |_| {}
-        const column = try parser.variable(name);
-        if (row) |row_index|
-            try parser.builder.addTerm(row_index, column, sign * coefficient)
-        else
-            parser.builder.columns.items[column].cost += sign * coefficient;
-        sign = 1.0;
-        index += 1;
+        }
+    }
+    const row = try parser.builder.addRow(.{ .name = row_name });
+    const expression = try parseLinearExpression(parser, lexer, row);
+    const rhs = try parseScalar(lexer, false);
+    try expectLineEnd(lexer);
+    const adjusted = rhs - expression.constant;
+    if (lower_prefix) |lower| {
+        if (expression.relation != .less_equal) return error.InvalidSyntax;
+        const adjusted_lower = lower - expression.constant;
+        if (adjusted_lower > adjusted) return error.InvalidBounds;
+        parser.builder.rows.items[row].lower = adjusted_lower;
+        parser.builder.rows.items[row].upper = adjusted;
+    } else switch (expression.relation) {
+        .less_equal => parser.builder.rows.items[row].upper = adjusted,
+        .greater_equal => parser.builder.rows.items[row].lower = adjusted,
+        .equal => {
+            parser.builder.rows.items[row].lower = adjusted;
+            parser.builder.rows.items[row].upper = adjusted;
+        },
+        else => unreachable,
     }
 }
 
-fn parseBound(parser: *Parser, line: []const u8) types.IoError!void {
-    var tokens = try tokenize(parser.allocator, line);
-    defer tokens.deinit(parser.allocator);
-    const values = tokens.items;
-    if (values.len == 2 and std.ascii.eqlIgnoreCase(values[1], "free")) {
-        const column = try parser.variable(values[0]);
-        parser.builder.columns.items[column].lower = -std.math.inf(f64);
-        parser.builder.columns.items[column].upper = std.math.inf(f64);
-        return;
-    }
-    if (values.len == 3 and std.mem.eql(u8, values[1], "=")) {
-        const column = try parser.variable(values[0]);
-        const value = try parseFinite(values[2]);
-        parser.builder.columns.items[column].lower = value;
-        parser.builder.columns.items[column].upper = value;
-        return;
-    }
-    if (values.len == 3 and (std.mem.eql(u8, values[1], ">=") or std.mem.eql(u8, values[1], "<="))) {
-        const column = try parser.variable(values[0]);
-        const value = try parseFinite(values[2]);
-        if (std.mem.eql(u8, values[1], ">=")) parser.builder.columns.items[column].lower = value else parser.builder.columns.items[column].upper = value;
-        return;
-    }
-    if (values.len == 5 and std.mem.eql(u8, values[1], "<=") and std.mem.eql(u8, values[3], "<=")) {
-        const column = try parser.variable(values[2]);
-        parser.builder.columns.items[column].lower = try parseFinite(values[0]);
-        parser.builder.columns.items[column].upper = try parseFinite(values[4]);
-        return;
-    }
-    return error.InvalidSyntax;
+fn isScalarStart(value: Token) bool {
+    return value.tag == .number or value.tag == .plus or value.tag == .minus or value.tag == .identifier;
 }
 
-fn parseTypes(parser: *Parser, line: []const u8, kind: types.VariableType) types.IoError!void {
-    var iterator = std.mem.tokenizeAny(u8, line, " \t\r");
-    while (iterator.next()) |name| parser.builder.columns.items[try parser.variable(name)].kind = kind;
+fn parseScalar(lexer: *Lexer, allow_infinity: bool) types.IoError!f64 {
+    var sign: f64 = 1.0;
+    var value = try nextToken(lexer);
+    if (value.tag == .plus or value.tag == .minus) {
+        if (value.tag == .minus) sign = -1.0;
+        value = try nextToken(lexer);
+    }
+    if (value.tag == .number) return sign * try parseFinite(value.lexeme);
+    if (allow_infinity and value.tag == .identifier and (std.ascii.eqlIgnoreCase(value.lexeme, "inf") or std.ascii.eqlIgnoreCase(value.lexeme, "infinity"))) return sign * std.math.inf(f64);
+    return error.InvalidNumber;
+}
+
+fn parseBound(parser: *Parser, lexer: *Lexer) types.IoError!void {
+    var probe = lexer.*;
+    const first = try nextToken(&probe);
+    if (first.tag == .identifier) {
+        lexer.* = probe;
+        const column = try parser.variable(first.lexeme);
+        const operation = try nextToken(lexer);
+        if (operation.tag == .identifier and std.ascii.eqlIgnoreCase(operation.lexeme, "free")) {
+            parser.builder.columns.items[column].lower = -std.math.inf(f64);
+            parser.builder.columns.items[column].upper = std.math.inf(f64);
+            return expectLineEnd(lexer);
+        }
+        if (operation.tag != .equal and operation.tag != .less_equal and operation.tag != .greater_equal) return error.InvalidSyntax;
+        const value = try parseScalar(lexer, true);
+        try expectLineEnd(lexer);
+        switch (operation.tag) {
+            .equal => {
+                parser.builder.columns.items[column].lower = value;
+                parser.builder.columns.items[column].upper = value;
+            },
+            .less_equal => parser.builder.columns.items[column].upper = value,
+            .greater_equal => parser.builder.columns.items[column].lower = value,
+            else => unreachable,
+        }
+    } else {
+        const lower = try parseScalar(lexer, true);
+        _ = try expect(lexer, .less_equal);
+        const name = try expect(lexer, .identifier);
+        _ = try expect(lexer, .less_equal);
+        const upper = try parseScalar(lexer, true);
+        try expectLineEnd(lexer);
+        if (lower > upper) return error.InvalidBounds;
+        const column = try parser.variable(name.lexeme);
+        parser.builder.columns.items[column].lower = lower;
+        parser.builder.columns.items[column].upper = upper;
+    }
+}
+
+fn parseTypes(parser: *Parser, lexer: *Lexer, kind: types.VariableType) types.IoError!void {
+    while (true) {
+        try parser.control.tick();
+        const name = try nextToken(lexer);
+        if (name.tag == .newline or name.tag == .eof) return;
+        if (name.tag != .identifier) return error.InvalidSyntax;
+        parser.builder.columns.items[try parser.variable(name.lexeme)].kind = kind;
+    }
 }
 
 test "parses a linear mixed integer LP into canonical CSC" {
@@ -406,4 +527,94 @@ test "parses a linear mixed integer LP into canonical CSC" {
     try std.testing.expectEqual(@as(usize, 2), model.matrix.nnz());
     try std.testing.expectEqual(types.VariableType.binary, model.col_type[1]);
     try std.testing.expectEqual(@as(f64, -2.0), model.col_cost[0]);
+}
+
+test "lexer driven parser accepts compact expressions constants and infinite bounds" {
+    const input =
+        \\Minimize
+        \\ obj:2x-3y+5
+        \\Subject To
+        \\ ranged:1<=x+2y+3<=9
+        \\ balance:x-y=-2
+        \\Bounds
+        \\ -inf<=x<=4
+        \\ y free
+        \\Generals
+        \\ y
+        \\End
+    ;
+    var model = try parse(std.testing.allocator, input, "compact", .{});
+    defer model.deinit();
+
+    try std.testing.expectEqualSlices(f64, &.{ 2.0, -3.0 }, model.col_cost);
+    try std.testing.expectEqual(@as(f64, 5.0), model.objective_offset);
+    try std.testing.expectEqualSlices(f64, &.{ -2.0, -2.0 }, model.row_lower);
+    try std.testing.expectEqualSlices(f64, &.{ 6.0, -2.0 }, model.row_upper);
+    try std.testing.expect(std.math.isNegativeInf(model.col_lower[0]));
+    try std.testing.expectEqual(@as(f64, 4.0), model.col_upper[0]);
+    try std.testing.expect(std.math.isNegativeInf(model.col_lower[1]));
+    try std.testing.expect(std.math.isPositiveInf(model.col_upper[1]));
+    try std.testing.expectEqual(types.VariableType.integer, model.col_type[1]);
+    try std.testing.expectEqual(@as(usize, 4), model.matrix.nnz());
+}
+
+test "single lexer streams comments blank lines and compound section headers" {
+    const input =
+        "\\ leading comment\n" ++
+        "Maximize \\ header comment\n" ++
+        " obj: x\n" ++
+        "      + 2y \\ expression comment\n" ++
+        "\n" ++
+        "Such That\n" ++
+        " c0: x + y <= 3\n" ++
+        "Bounds\n" ++
+        " x free\n" ++
+        "Semi-Continuous\n" ++
+        " x\n" ++
+        "Semi-Integer\n" ++
+        " y\n" ++
+        "End";
+
+    var model = try parse(std.testing.allocator, input, "stream", .{});
+    defer model.deinit();
+
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0 }, model.col_cost);
+    try std.testing.expectEqual(@as(usize, 1), model.row_lower.len);
+    try std.testing.expectEqual(@as(usize, 2), model.matrix.nnz());
+    try std.testing.expectEqual(types.VariableType.semi_continuous, model.col_type[0]);
+    try std.testing.expectEqual(types.VariableType.semi_integer, model.col_type[1]);
+}
+
+test "LP name index releases all hash capacity before finalization" {
+    var parser = Parser.init(std.testing.allocator, "names", .{});
+    defer parser.deinit();
+    _ = try parser.variable("alpha");
+    _ = try parser.variable("beta");
+    try std.testing.expect(parser.variables.capacity() > 0);
+
+    parser.releaseVariableIndex();
+    try std.testing.expectEqual(@as(u32, 0), parser.variables.count());
+    try std.testing.expectEqual(@as(u32, 0), parser.variables.capacity());
+}
+
+test "LP parser enforces file line token and semantic resource limits" {
+    const source =
+        \\Minimize
+        \\ obj: alpha + beta
+        \\Subject To
+        \\ row: alpha + beta <= 1
+        \\End
+    ;
+    try std.testing.expectError(error.FileTooLarge, parse(std.testing.allocator, source, "limits", .{ .max_file_bytes = source.len - 1 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_line_bytes = 7 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_token_bytes = 4 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_columns = 1 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_rows = 0 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_matrix_terms = 1 }));
+    try std.testing.expectError(error.ResourceLimitExceeded, parse(std.testing.allocator, source, "limits", .{ .max_name_bytes = 4 }));
+}
+
+test "LP parser honors a pre-set cancellation flag" {
+    var interrupted = std.atomic.Value(bool).init(true);
+    try std.testing.expectError(error.Cancelled, parse(std.testing.allocator, "Minimize\n obj: x\nEnd\n", "cancel", .{ .interrupt_flag = &interrupted }));
 }

@@ -5,6 +5,8 @@
 //! compatible with `highs_parser_bench.cpp`.
 //!
 //! Usage: io-parser-bench MODEL [iterations=7] [warmups=2]
+//!                              [input=automatic|buffered|mmap]
+//!                              [names=keep|drop]
 
 const std = @import("std");
 const model_io = @import("io");
@@ -31,6 +33,22 @@ pub fn main(init: std.process.Init) !void {
     const path = args.next() orelse return error.MissingModelPath;
     const iterations = if (args.next()) |value| try std.fmt.parseUnsigned(usize, value, 10) else 7;
     const warmups = if (args.next()) |value| try std.fmt.parseUnsigned(usize, value, 10) else 2;
+    const input_name = args.next() orelse "automatic";
+    const input_mode: model_io.InputMode = if (std.mem.eql(u8, input_name, "automatic"))
+        .automatic
+    else if (std.mem.eql(u8, input_name, "buffered"))
+        .buffered
+    else if (std.mem.eql(u8, input_name, "mmap"))
+        .memory_map
+    else
+        return error.InvalidInputMode;
+    const names_name = args.next() orelse "keep";
+    const keep_names = if (std.mem.eql(u8, names_name, "keep"))
+        true
+    else if (std.mem.eql(u8, names_name, "drop"))
+        false
+    else
+        return error.InvalidArguments;
     if (iterations == 0 or args.next() != null) return error.InvalidArguments;
 
     const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
@@ -42,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     var checksum: f64 = 0.0;
     for (0..warmups + iterations) |run| {
         const started = nowNs();
-        var parsed = try model_io.readFile(io, allocator, path, .{});
+        var parsed = try model_io.readFile(io, allocator, path, .{ .input_mode = input_mode, .keep_names = keep_names });
         const elapsed: u64 = @intCast(nowNs() - started);
         rows = parsed.row_lower.len;
         columns = parsed.col_cost.len;
@@ -59,8 +77,15 @@ pub fn main(init: std.process.Init) !void {
     const mib = @as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0);
     const throughput = mib / (@as(f64, @floatFromInt(median)) / std.time.ns_per_s);
     const stdout = std.Io.File.stdout();
-    const line = try std.fmt.allocPrint(allocator, "zhighs\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.3}\t{d:.3}\t{d}\t{d:.17}\n", .{
-        path, rows, columns, nonzeros, best, @as(f64, @floatFromInt(median)) / 1e6, throughput, peakRssKb(), checksum,
+    const implementation = if (!keep_names)
+        "zhighs-no-names"
+    else switch (input_mode) {
+        .automatic => "zhighs",
+        .buffered => "zhighs-buffered",
+        .memory_map => "zhighs-mmap",
+    };
+    const line = try std.fmt.allocPrint(allocator, "{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.3}\t{d:.3}\t{d}\t{d:.17}\n", .{
+        implementation, path, rows, columns, nonzeros, best, @as(f64, @floatFromInt(median)) / 1e6, throughput, peakRssKb(), checksum,
     });
     defer allocator.free(line);
     try stdout.writeStreamingAll(io, line);
