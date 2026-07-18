@@ -12,6 +12,7 @@ const sparse_kernel = @import("sparse_kernel.zig");
 pub const SparseLuError = sparse_kernel.KernelError || error{ DimensionMismatch, NumericalFailure };
 
 pub const PivotTrace = struct { rows: []const u32, columns: []const u32 };
+pub const OrderingStrategy = enum { automatic, dod_markowitz, highs_kernel };
 
 pub const SparseLU = struct {
     allocator: std.mem.Allocator,
@@ -24,6 +25,8 @@ pub const SparseLU = struct {
     inserted_fill: usize = 0,
     active_count: usize = 0,
     hyper_views_ready: bool = false,
+    ordering_strategy: OrderingStrategy = .automatic,
+    selected_ordering: OrderingStrategy = .dod_markowitz,
 
     pivot_rows: []u32 = &.{},
     pivot_columns: []u32 = &.{},
@@ -93,6 +96,7 @@ pub const SparseLU = struct {
         self.l_nonzeros = 0;
         self.u_nonzeros = 0;
         self.inserted_fill = 0;
+        self.selected_ordering = self.selectOrdering(basis);
         self.l_starts[0] = 0;
         self.u_starts[0] = 0;
 
@@ -100,7 +104,13 @@ pub const SparseLU = struct {
             const choice = if (trace) |recorded|
                 self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
             else
-                self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular;
+                switch (self.selected_ordering) {
+                    // The backend split is deliberately established before
+                    // the HiGHS-style search lands, so dispatch/API changes
+                    // can be verified independently from ordering changes.
+                    .dod_markowitz, .highs_kernel => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                    .automatic => unreachable,
+                };
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);
             try self.ensureFactorCapacity(@max(self.l_nonzeros + pivot.l_rows.len, self.u_nonzeros + pivot.u_columns.len));
             self.pivot_rows[pivot_index] = pivot.pivot_row;
@@ -278,6 +288,13 @@ pub const SparseLU = struct {
             "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts", "l_row_columns", "l_row_values",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         return total;
+    }
+
+    fn selectOrdering(self: *const SparseLU, _: sparse_basis.SparseBasisView) OrderingStrategy {
+        return switch (self.ordering_strategy) {
+            .automatic => .dod_markowitz,
+            else => |forced| forced,
+        };
     }
 
     fn ensureDimension(self: *SparseLU, required: usize) SparseLuError!void {
@@ -459,6 +476,30 @@ test "factor graph hyper sparse FTRAN BTRAN and adaptive dispatch match dense" {
     try lu.solve(&dense);
     try lu.solveAdaptive(&hyper, &[_]u32{0}, false);
     try std.testing.expectEqualSlices(f64, &dense, &hyper);
+}
+
+test "sparse ordering backends can be forced without changing the public factors" {
+    const foundation = @import("foundation");
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 3,
+        .starts = &[_]foundation.HUInt{ 0, 2, 4, 6 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(2),
+            foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(2),
+        },
+        .values = &[_]f64{ 2, 1, 1, 2, 3, 4 },
+    };
+    var lu = SparseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    inline for (.{ OrderingStrategy.dod_markowitz, OrderingStrategy.highs_kernel }) |strategy| {
+        lu.ordering_strategy = strategy;
+        try lu.factorize(basis);
+        try std.testing.expectEqual(strategy, lu.selected_ordering);
+        var rhs = [_]f64{ 4, 7, 10 };
+        try lu.solve(&rhs);
+        try std.testing.expectApproxEqAbs(@as(f64, 1.375), rhs[0], 1e-12);
+    }
 }
 
 test "sparse LU matches original products across deterministic sparse bases" {
