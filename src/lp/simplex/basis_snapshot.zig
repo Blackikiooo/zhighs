@@ -62,9 +62,9 @@ pub const BasisSnapshot = struct {
 
     pub fn initFromView(allocator: std.mem.Allocator, input_view: BasisView) BasisViewError!BasisSnapshot {
         try input_view.validate(input_view.structural_status.len, input_view.logical_status.len);
-        const status_storage = allocator.alloc(BasisStatus, input_view.structural_status.len + input_view.logical_status.len) catch return error.OutOfMemory;
+        const status_storage = try allocator.alloc(BasisStatus, input_view.structural_status.len + input_view.logical_status.len);
         errdefer allocator.free(status_storage);
-        const basic_index = allocator.dupe(u32, input_view.basic_index) catch return error.OutOfMemory;
+        const basic_index = try allocator.dupe(u32, input_view.basic_index);
         errdefer allocator.free(basic_index);
 
         const structural_status = status_storage[0..input_view.structural_status.len];
