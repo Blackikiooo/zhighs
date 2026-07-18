@@ -20,6 +20,8 @@ pub const NumericalState = struct {
     last_relative_residual: f64 = 0.0,
     max_relative_residual: f64 = 0.0,
     refinement_count: usize = 0,
+    last_ftran_relative_residual: f64 = 0.0,
+    max_ftran_relative_residual: f64 = 0.0,
     /// A cheap pivot-spread warning indicator, not a formal condition number.
     pivot_condition_estimate: f64 = 1.0,
     dual_edge_weight_error_tolerance: f64 = 0.25,
@@ -88,6 +90,8 @@ pub const NumericalState = struct {
         self.anti_cycling_activations = 0;
         self.anti_cycling_active = false;
         self.perturbation = 0.0;
+        self.last_ftran_relative_residual = 0.0;
+        self.max_ftran_relative_residual = 0.0;
     }
 };
 

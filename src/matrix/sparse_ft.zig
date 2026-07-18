@@ -209,12 +209,14 @@ pub const SparseForrestTomlin = struct {
     /// consume the partial BTRAN without another dense copy.
     pub fn solveUpperTranspose(self: *SparseForrestTomlin, values: []f64) FtError!void {
         if (values.len != self.dimension) return error.DimensionMismatch;
-        return self.solveUpperTransposeFrom(values, 0);
+        try self.solveMutableUpperTransposeFrom(values, 0);
+        self.applyCorrectionsTranspose(values);
     }
 
-    /// Solve the active suffix of U^-T. Callers may skip a prefix only when
-    /// every pivot value in that prefix is known to be zero on entry.
-    fn solveUpperTransposeFrom(self: *SparseForrestTomlin, values: []f64, first_logical: usize) FtError!void {
+    /// Solve only the active suffix of mutable U^-T. FT update construction
+    /// must not apply historical row corrections here: those corrections are
+    /// already represented to the left of the current mutable U.
+    fn solveMutableUpperTransposeFrom(self: *SparseForrestTomlin, values: []f64, first_logical: usize) FtError!void {
         for (first_logical..self.logical_count) |logical| {
             const pivot = self.pivot_ids[logical];
             if (pivot == none) continue;
@@ -226,6 +228,9 @@ pub const SparseForrestTomlin = struct {
             if (!std.math.isFinite(value)) return error.NumericalFailure;
             values[pivot] = value;
         }
+    }
+
+    fn applyCorrectionsTranspose(self: *const SparseForrestTomlin, values: []f64) void {
         var correction = self.correction_count;
         while (correction > 0) {
             correction -= 1;
@@ -242,7 +247,7 @@ pub const SparseForrestTomlin = struct {
         if (first_logical == none) return error.Singular;
         @memset(self.work[0..self.dimension], 0.0);
         self.work[leaving_id] = 1.0;
-        try self.solveUpperTransposeFrom(self.work[0..self.dimension], first_logical);
+        try self.solveMutableUpperTransposeFrom(self.work[0..self.dimension], first_logical);
     }
 
     /// Delete the pivotal U row/column, append the captured FTRAN spike, and

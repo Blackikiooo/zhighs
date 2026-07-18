@@ -1053,6 +1053,50 @@ test "Forrest Tomlin repeated basis replacements match dense reinversion" {
     try std.testing.expectEqual(replacements.len, sparse.ft.update_count);
 }
 
+test "Forrest Tomlin update ep excludes historical row corrections" {
+    const foundation = @import("foundation");
+    const n = 3;
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = n,
+        .starts = &[_]foundation.HUInt{ 0, 1, 3, 5 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0),
+            foundation.RowId.fromUsizeAssumeValid(0),
+            foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(2),
+        },
+        .values = &[_]f64{ 2, 1, 3, 1, 4 },
+    };
+    var sparse = SparseLU.init(std.testing.allocator);
+    defer sparse.deinit();
+    try sparse.factorize(basis);
+    var dense_matrix = [_]f64{ 2, 1, 0, 0, 3, 1, 0, 0, 4 };
+    const replacements = [_]struct { column: usize, values: [n]f64 }{
+        .{ .column = 0, .values = .{ 1, 2, 1 } },
+        .{ .column = 1, .values = .{ 2, 1, 3 } },
+    };
+    for (replacements) |replacement| {
+        var direction = replacement.values;
+        try sparse.solveForUpdate(&direction);
+        try sparse.applyForrestTomlinUpdate(@intCast(replacement.column), &direction, 1.0);
+        for (replacement.values, 0..) |value, row| dense_matrix[row * n + replacement.column] = value;
+    }
+    var oracle = @import("dense_lu.zig").DenseLU.init(std.testing.allocator);
+    defer oracle.deinit();
+    try oracle.factorize(n, &dense_matrix);
+    var actual = [_]f64{ 3, -2, 5 };
+    var expected = actual;
+    try sparse.solve(&actual);
+    try oracle.solve(&expected);
+    for (actual, expected) |value, reference| try std.testing.expectApproxEqAbs(reference, value, 1e-12);
+    actual = .{ -1, 4, 2 };
+    expected = actual;
+    try sparse.solveTranspose(&actual);
+    try oracle.solveTranspose(&expected);
+    for (actual, expected) |value, reference| try std.testing.expectApproxEqAbs(reference, value, 1e-12);
+}
+
 test "retained Forrest Tomlin workspace performs warm updates without allocation" {
     const foundation = @import("foundation");
     const basis = sparse_basis.SparseBasisView{

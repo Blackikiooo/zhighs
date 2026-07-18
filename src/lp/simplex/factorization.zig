@@ -11,7 +11,7 @@ pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singula
 /// Selected base factorization. Updates are applied above either backend and
 /// are cleared whenever a new base factorization is installed.
 pub const BackendKind = enum { dense_lu, sparse_lu };
-pub const ReinversionReason = enum { update_limit, update_growth };
+pub const ReinversionReason = enum { update_limit, update_growth, solve_residual };
 pub const FactorizationStats = struct {
     factorizations: usize = 0,
     ftran_calls: usize = 0,
@@ -21,6 +21,7 @@ pub const FactorizationStats = struct {
     maximum_update_growth: f64 = 1.0,
     update_limit_reinversions: usize = 0,
     update_growth_reinversions: usize = 0,
+    solve_residual_reinversions: usize = 0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -313,6 +314,7 @@ pub const Factorization = struct {
         switch (reason) {
             .update_limit => self.stats.update_limit_reinversions += 1,
             .update_growth => self.stats.update_growth_reinversions += 1,
+            .solve_residual => self.stats.solve_residual_reinversions += 1,
         }
     }
 

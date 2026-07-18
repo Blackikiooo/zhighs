@@ -29,6 +29,17 @@ pub const IterationCallback = *const fn (event: ProgressEventView, user_data: ?*
 pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data: ?*anyopaque) void;
 pub const LogLevel = enum { off, iterations };
 pub const SolveStatus = solution_module.SolveStatus;
+pub const PivotTraceEvent = struct {
+    iteration: usize,
+    entering_column: u32,
+    leaving_column: u32,
+    leaving_row: u32,
+    pivot: f64,
+    step: f64,
+    update_count: usize,
+    ftran_relative_residual: f64,
+    condition_estimate: f64,
+};
 const PrimalLeavingResult = struct {
     status: SolveStatus,
     row: ?u32 = null,
@@ -61,6 +72,9 @@ pub const SolveControl = struct {
     log_callback: ?IterationLogCallback = null,
     log_user_data: ?*anyopaque = null,
     log_interval_work: u64 = 100,
+    /// Optional caller-owned trace storage used for deterministic pivot-path
+    /// differential tests. Events beyond the supplied capacity are dropped.
+    pivot_trace: []PivotTraceEvent = &.{},
 };
 
 pub const SimplexEngine = struct {
@@ -85,6 +99,8 @@ pub const SimplexEngine = struct {
     /// Structural basic columns replaced by logical columns while repairing a
     /// singular imported basis during the current solve.
     rank_repair_count: usize = 0,
+    pivot_trace_count: usize = 0,
+    active_pivot_trace: []PivotTraceEvent = &.{},
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -453,7 +469,31 @@ pub const SimplexEngine = struct {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
         self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+        if (!self.directionResidualAcceptable(problem, entering_col)) {
+            self.factorization.recordReinversion(.solve_residual);
+            if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+            if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
+            self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+            if (!self.directionResidualAcceptable(problem, entering_col)) return .numerical_failure;
+        }
         return .optimal;
+    }
+
+    /// Validate an updated FTRAN before its direction reaches ratio testing.
+    /// A drifting FT chain can otherwise select an invalid leaving row and
+    /// permanently corrupt the basis before the periodic growth gate fires.
+    fn directionResidualAcceptable(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) bool {
+        const basis = if (self.basis) |*value| value else return false;
+        if (self.fillInternalColumn(problem, entering_col, basis.residual_work) != .optimal) return false;
+        var rhs_scale: f64 = 0.0;
+        for (basis.residual_work) |value| rhs_scale = @max(rhs_scale, @abs(value));
+        self.subtractBasisProduct(problem, basis.pivot_direction, basis.residual_work) catch return false;
+        var residual_max: f64 = 0.0;
+        for (basis.residual_work) |value| residual_max = @max(residual_max, @abs(value));
+        const relative = residual_max / @max(1.0, rhs_scale);
+        self.numerical.last_ftran_relative_residual = relative;
+        self.numerical.max_ftran_relative_residual = @max(self.numerical.max_ftran_relative_residual, relative);
+        return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
     }
 
     /// Choose the leaving basic row for the currently materialized pivot
@@ -487,8 +527,11 @@ pub const SimplexEngine = struct {
         var best_column: u32 = std.math.maxInt(u32);
         var best_step = std.math.inf(f64);
         const tie_tolerance = self.numerical.perturbation;
+        var maximum_direction: f64 = 0.0;
+        for (basis.ratio_direction) |direction| maximum_direction = @max(maximum_direction, direction);
+        const pivot_tolerance = @max(self.numerical.zero_tolerance, self.ratio_test.tolerance * maximum_direction);
         for (basis.ratio_direction, basis.basic_margin, basis.basic_index, 0..) |direction, margin, basic_column, row| {
-            if (direction <= self.numerical.zero_tolerance) continue;
+            if (direction <= pivot_tolerance) continue;
             const step = @max(margin / direction, 0.0);
             if (!std.math.isFinite(step)) continue;
             if (step < best_step - tie_tolerance or
@@ -539,6 +582,20 @@ pub const SimplexEngine = struct {
         basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
         basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
         for (basis.basic_index, basis.basic_value) |global_col, value| basis.primal[global_col] = value;
+        if (self.pivot_trace_count < self.active_pivot_trace.len) {
+            self.active_pivot_trace[self.pivot_trace_count] = .{
+                .iteration = self.iterations,
+                .entering_column = @intCast(entering_col),
+                .leaving_column = leaving_col,
+                .leaving_row = @intCast(leaving_row),
+                .pivot = pivot,
+                .step = step,
+                .update_count = self.factorization.update_count,
+                .ftran_relative_residual = self.numerical.last_ftran_relative_residual,
+                .condition_estimate = self.numerical.pivot_condition_estimate,
+            };
+            self.pivot_trace_count += 1;
+        }
         const reinversion_reason = self.factorization.reinversionReason(self.numerical.max_update_count);
         if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
         if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor())
@@ -1067,6 +1124,8 @@ pub const SimplexEngine = struct {
     }
 
     fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
+        self.active_pivot_trace = control.pivot_trace;
+        self.pivot_trace_count = 0;
         if (control.time_limit_ns == null) {
             self.solve_start_ns = null;
             self.solve_clock_io = null;
@@ -1430,6 +1489,14 @@ test "anti cycling uses basic-column order for degenerate primal and dual ties" 
     const primal = engine.chooseLeaving();
     try std.testing.expectEqual(SolveStatus.optimal, primal.status);
     try std.testing.expectEqual(@as(?u32, 1), primal.row);
+
+    // Bland ordering must not admit a numerically unsafe pivot merely because
+    // its basic-column ID is lower than every stable candidate.
+    engine.basis.?.basic_index[0] = 3;
+    engine.basis.?.pivot_direction[0] = engine.ratio_test.tolerance * 50.0;
+    engine.basis.?.pivot_direction[1] = 100.0;
+    const stable_primal = engine.chooseLeaving();
+    try std.testing.expectEqual(@as(?u32, 1), stable_primal.row);
 
     engine.basis.?.basic_value[0] = -1.0;
     engine.basis.?.basic_value[1] = -1.0;

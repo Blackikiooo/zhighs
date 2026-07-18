@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
     const path = args.next() orelse return error.MissingModelPath;
     const max_iterations = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 1_000_000;
     const max_updates = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 100;
+    const trace_enabled = if (args.next()) |text| std.mem.eql(u8, text, "trace") else false;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -48,9 +49,23 @@ pub fn main(init: std.process.Init) !void {
     var engine = zhighs.lp.simplex.engine.SimplexEngine.init(allocator);
     defer engine.deinit();
     engine.numerical.max_update_count = max_updates;
+    const trace: []zhighs.lp.simplex.engine.PivotTraceEvent = if (trace_enabled)
+        try allocator.alloc(zhighs.lp.simplex.engine.PivotTraceEvent, @min(max_iterations, 100_000))
+    else
+        &.{};
+    defer if (trace_enabled) allocator.free(trace);
     const solve_started = nowNs();
-    const status = engine.solveProblem(problem, .{ .max_iterations = max_iterations });
+    const status = engine.solveProblem(problem, .{ .max_iterations = max_iterations, .pivot_trace = trace });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
+    if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
+        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
+            event.iteration,          event.entering_column, event.leaving_column, event.leaving_row,
+            event.pivot,              event.step,            event.update_count,   event.ftran_relative_residual,
+            event.condition_estimate,
+        });
+        defer allocator.free(trace_line);
+        try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
+    };
 
     var primal_residual: f64 = std.math.inf(f64);
     var dual_residual: f64 = std.math.inf(f64);
@@ -82,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const stats = engine.factorization.stats;
-    const reinversions = stats.update_limit_reinversions + stats.update_growth_reinversions;
+    const reinversions = stats.update_limit_reinversions + stats.update_growth_reinversions + stats.solve_residual_reinversions;
     const total_ns = parsed_ns + solve_ns;
     const line = try std.fmt.allocPrint(
         allocator,

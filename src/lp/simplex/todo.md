@@ -40,6 +40,9 @@
 
 - [x] 建立 MPS -> canonical CSC -> simplex 的 zhighs/HiGHS serial-simplex
   差分 runner，统一输出 objective、status、iterations、residual 和耗时。
+- [x] 修复 `sc105` 暴露的 FT `ep` 历史 correction 重复应用；增加
+  allocation-free FTRAN backward-error gate 和 caller-owned pivot trace。
+- [ ] 修复 `brandy` 在相同 FT/reinvert trace 下复现的 Phase-I 零步长循环。
 - [ ] Netlib 和 Mittelmann 完整求解结果与 HiGHS/CLP 对比。
 - [ ] 汇总 objective、status、iteration count 和 residual。
 - [ ] 汇总 reinversion 次数、原因和 FT chain 长度。
