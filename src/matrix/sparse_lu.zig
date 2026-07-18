@@ -150,6 +150,17 @@ pub const SparseLU = struct {
         return self.dimension + self.l_nonzeros + self.u_nonzeros;
     }
 
+    /// Retained requested bytes for the complete numerical kernel, factors,
+    /// permutations and solve workspace. Allocator bookkeeping is excluded.
+    pub fn requestedBytes(self: *const SparseLU) usize {
+        var total = self.kernel.requestedBytes();
+        inline for (.{
+            "pivot_rows", "pivot_columns", "row_position", "column_position", "pivot_values",
+            "l_starts", "u_starts", "l_rows", "l_values", "u_columns", "u_values", "work",
+        }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        return total;
+    }
+
     fn ensureDimension(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
@@ -214,6 +225,23 @@ test "packed sparse LU solves FTRAN and BTRAN with fill" {
             product += values[entry] * transpose_rhs[rows[entry].toUsize()];
         try std.testing.expectApproxEqAbs(original_transpose_rhs[column], product, 1e-11);
     }
+}
+
+test "sparse LU requested bytes account for retained buffers" {
+    const foundation = @import("foundation");
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 2,
+        .starts = &[_]foundation.HUInt{ 0, 1, 2 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0),
+            foundation.RowId.fromUsizeAssumeValid(1),
+        },
+        .values = &[_]f64{ 1, 1 },
+    };
+    var lu = SparseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    try lu.factorize(basis);
+    try std.testing.expect(lu.requestedBytes() >= lu.factorNonzeros() * @sizeOf(f64));
 }
 
 test "sparse LU matches original products across deterministic sparse bases" {

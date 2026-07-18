@@ -78,6 +78,25 @@ pub const MutableSparseKernel = struct {
         self.* = .{ .allocator = self.allocator };
     }
 
+    /// Bytes requested from the allocator by the retained SoA capacities.
+    /// This intentionally excludes allocator metadata and resident pages; it
+    /// is the stable, cross-allocator number used beside process peak RSS.
+    pub fn requestedBytes(self: *const MutableSparseKernel) usize {
+        var total: usize = 0;
+        inline for (.{
+            "row_head", "column_head", "row_count", "column_count",
+            "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous",
+            "column_bucket_next", "column_bucket_previous", "entry_row", "entry_column",
+            "row_next", "row_previous", "column_next", "column_previous", "free_next",
+            "scratch_rows", "scratch_columns",
+        }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        inline for (.{ "row_active", "column_active" }) |name|
+            total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        inline for (.{ "entry_value", "scratch_l", "scratch_u" }) |name|
+            total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        return total;
+    }
+
     pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
         return self.loadImpl(basis, true);
     }

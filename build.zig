@@ -201,6 +201,21 @@ pub fn build(b: *std.Build) void {
     const build_sparse_lu_bench_step = b.step("build-bench-sparse-lu", "Build sparse LU benchmark for perf/disassembly");
     build_sparse_lu_bench_step.dependOn(&install_sparse_lu_bench.step);
 
+    const sparse_lu_corpus = b.addExecutable(.{
+        .name = "sparse-lu-corpus",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/sparse_lu_corpus.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_sparse_lu_corpus = b.addRunArtifact(sparse_lu_corpus);
+    if (b.args) |args| run_sparse_lu_corpus.addArgs(args);
+    const sparse_lu_corpus_step = b.step("bench-sparse-lu-corpus", "Run deterministic sparse LU acceptance corpus");
+    sparse_lu_corpus_step.dependOn(&run_sparse_lu_corpus.step);
+
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);
