@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     const degenerate_limit = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 8;
     const refinement_steps = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 2;
     const sparse_threshold = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
+    const collect_statistics = if (args.next()) |text| std.mem.eql(u8, text, "stats") else false;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -78,7 +79,11 @@ pub fn main(init: std.process.Init) !void {
         &.{};
     defer if (trace_enabled) allocator.free(trace);
     const solve_started = nowNs();
-    const status = engine.solveProblem(problem, .{ .max_iterations = max_iterations, .pivot_trace = trace });
+    const status = engine.solveProblem(problem, .{
+        .max_iterations = max_iterations,
+        .pivot_trace = trace,
+        .collect_statistics = collect_statistics,
+    });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
         const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
@@ -151,4 +156,98 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(line);
     try std.Io.File.stdout().writeStreamingAll(io_context, line);
+    if (!collect_statistics) return;
+
+    const simplex_stats = engine.stats;
+    const factor_stats = engine.factorization.stats;
+    const aq_density = if (simplex_stats.aq_samples == 0 or problem.num_rows == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(simplex_stats.aq_nonzeros)) /
+            @as(f64, @floatFromInt(simplex_stats.aq_samples * problem.num_rows));
+    const ep_density = if (simplex_stats.ep_samples == 0 or problem.num_rows == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(simplex_stats.ep_nonzeros)) /
+            @as(f64, @floatFromInt(simplex_stats.ep_samples * problem.num_rows));
+    const pricing_density = if (simplex_stats.pricing_entries == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(simplex_stats.pricing_nonzeros)) /
+            @as(f64, @floatFromInt(simplex_stats.pricing_entries));
+    const ftran_rhs_density = if (factor_stats.ftran_rhs_samples == 0 or problem.num_rows == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(factor_stats.ftran_rhs_nonzeros)) /
+            @as(f64, @floatFromInt(factor_stats.ftran_rhs_samples * problem.num_rows));
+    const btran_rhs_density = if (factor_stats.btran_rhs_samples == 0 or problem.num_rows == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(factor_stats.btran_rhs_nonzeros)) /
+            @as(f64, @floatFromInt(factor_stats.btran_rhs_samples * problem.num_rows));
+    const requested_bytes = engine.requestedBytes();
+    const peak_rss_kb: u64 = @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
+    const stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tphase1_iterations={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",
+        .{
+            path,
+            simplex_stats.phase_one_iterations,
+            simplex_stats.dual_repair_iterations,
+            simplex_stats.phase_two_iterations,
+            simplex_stats.phase_one_ns,
+            simplex_stats.dual_repair_ns,
+            simplex_stats.phase_two_ns,
+            simplex_stats.cleanup_ns,
+            simplex_stats.rebuild_calls,
+            simplex_stats.rebuild_ns,
+            factor_stats.factorizations,
+            factor_stats.invert_ns,
+            factor_stats.ftran_calls,
+            factor_stats.ftran_ns,
+            factor_stats.btran_calls,
+            factor_stats.btran_ns,
+            factor_stats.eta_updates + factor_stats.ft_updates,
+            factor_stats.update_ns,
+            simplex_stats.pricing_calls,
+            simplex_stats.pricing_ns,
+            engine.numerical.degenerate_pivot_count,
+            engine.numerical.anti_cycling_activations,
+            simplex_stats.bound_flips,
+        },
+    );
+    defer allocator.free(stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, stats_line);
+
+    const kernel_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tupdate_limit_reinversions={d}\tupdate_growth_reinversions={d}\tsolve_residual_reinversions={d}\tsmall_pivot_reinversions={d}\tmax_ft_chain={d}\tmax_update_growth={e:.6}\tmax_ftran_residual={e:.6}\tftran_rhs_density={e:.6}\tbtran_rhs_density={e:.6}\taq_density={e:.6}\tep_density={e:.6}\tpricing_density={e:.6}\tdense_ftran={d}\thyper_ftran={d}\tdense_btran={d}\thyper_btran={d}\tdense_pricing={d}\thyper_pricing={d}\trow_pricing={d}\tcolumn_pricing={d}\trequested_bytes={d}\tpeak_rss_kb={d}\n",
+        .{
+            path,
+            factor_stats.update_limit_reinversions,
+            factor_stats.update_growth_reinversions,
+            factor_stats.solve_residual_reinversions,
+            factor_stats.small_pivot_reinversions,
+            factor_stats.maximum_update_count,
+            factor_stats.maximum_update_growth,
+            engine.numerical.max_ftran_relative_residual,
+            ftran_rhs_density,
+            btran_rhs_density,
+            aq_density,
+            ep_density,
+            pricing_density,
+            factor_stats.dense_ftran_dispatches,
+            factor_stats.hyper_ftran_dispatches,
+            factor_stats.dense_btran_dispatches,
+            factor_stats.hyper_btran_dispatches,
+            simplex_stats.dense_pricing_dispatches,
+            simplex_stats.hyper_pricing_dispatches,
+            simplex_stats.row_pricing_dispatches,
+            simplex_stats.column_pricing_dispatches,
+            requested_bytes,
+            peak_rss_kb,
+        },
+    );
+    defer allocator.free(kernel_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, kernel_stats_line);
 }

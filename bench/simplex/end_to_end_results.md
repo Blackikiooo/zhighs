@@ -102,3 +102,34 @@ limits for optimal zhighs solutions, validates the `gas11` unbounded ray, and
 checks the four pinned pivot traces. Any unexpected result returns a non-zero
 exit status. Set `VERIFY_TRACES=0` only for an explicitly requested status-only
 diagnostic run; it is not valid for the commit gate.
+
+## Phase-attributed baseline
+
+Stage 6.1 adds opt-in phase and kernel statistics. Normal solver calls do not
+read clocks or scan vectors for density. The benchmark deliberately runs each
+model twice per sample: an instrumentation-free run supplies fair total time,
+while a separate profiling run supplies Phase I/II, INVERT, FTRAN, BTRAN,
+PRICE, UPDATE, rebuild, density, requested-byte, and peak-RSS measurements.
+Profiling stage times must not be added to or compared directly with the
+instrumentation-free total.
+
+Run two warmups and seven measured repetitions with:
+
+```sh
+bench/simplex/run_end_to_end_benchmark.sh
+```
+
+The complete median/p95 table is stored in `end_to_end_phase_baseline.tsv`.
+Median total solve results from the frozen host are:
+
+| model | zhighs | HiGHS | relative result | main zhighs cost |
+|---|---:|---:|---:|---|
+| gas11 | 20.76 ms | 47.15 ms | zhighs 2.27x faster | Phase I / pricing |
+| sc105 | 0.90 ms | 5.65 ms | zhighs 6.24x faster | Phase II |
+| brandy | 57.25 ms | 21.62 ms | zhighs 2.65x slower | Phase I / pricing |
+| scsd1 | 13.00 ms | 6.46 ms | zhighs 2.01x slower | Phase II / rebuild / pricing |
+
+Retained simplex requested bytes are 629741 (`gas11`), 394588 (`brandy`),
+145752 (`sc105`), and 183485 (`scsd1`). The runner also reports process
+`ru_maxrss`; unlike requested bytes this includes runtime and parser memory and
+is platform-specific.

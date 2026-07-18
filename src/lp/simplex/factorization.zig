@@ -23,6 +23,19 @@ pub const FactorizationStats = struct {
     update_growth_reinversions: usize = 0,
     solve_residual_reinversions: usize = 0,
     small_pivot_reinversions: usize = 0,
+    maximum_update_count: usize = 0,
+    invert_ns: u64 = 0,
+    ftran_ns: u64 = 0,
+    btran_ns: u64 = 0,
+    update_ns: u64 = 0,
+    ftran_rhs_samples: usize = 0,
+    ftran_rhs_nonzeros: usize = 0,
+    btran_rhs_samples: usize = 0,
+    btran_rhs_nonzeros: usize = 0,
+    dense_ftran_dispatches: usize = 0,
+    dense_btran_dispatches: usize = 0,
+    hyper_ftran_dispatches: usize = 0,
+    hyper_btran_dispatches: usize = 0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -53,6 +66,9 @@ pub const Factorization = struct {
     /// Largest max(|d|)/|d[p]| observed since reinversion. This inexpensive
     /// signal estimates how strongly an update can amplify solve error.
     maximum_update_growth: f64 = 1.0,
+    /// Optional solve-owned clock. It remains null in production hot paths
+    /// unless the caller explicitly requests benchmark statistics.
+    statistics_io: ?std.Io = null,
 
     pub fn init(allocator: std.mem.Allocator) Factorization {
         return .{
@@ -73,6 +89,8 @@ pub const Factorization = struct {
         self.allocator.free(self.identity_sign);
     }
     pub fn factorize(self: *Factorization, n: usize, matrix_data: []const f64) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.invert_ns, started);
         self.dense_lu.factorize(n, matrix_data) catch |err| return switch (err) {
             error.DimensionMismatch => error.DimensionMismatch,
             error.Singular => error.Singular,
@@ -95,6 +113,8 @@ pub const Factorization = struct {
         column_scale: []const f64,
         artificial_sign: []const f64,
     ) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.invert_ns, started);
         const basis = self.sparse_basis.assemble(problem_matrix, basic_index, row_scale, column_scale, artificial_sign) catch |err| return switch (err) {
             error.DimensionMismatch, error.InvalidBasisColumn => error.DimensionMismatch,
             error.CapacityOverflow, error.OutOfMemory => error.OutOfMemory,
@@ -167,6 +187,8 @@ pub const Factorization = struct {
             const empty_matrix = matrix.CscView.initAssumeValid(n, 0, &[_]usize{0}, &.{}, &.{});
             return self.factorizeSparseBasis(empty_matrix, self.identity_basic, self.identity_scale, &.{}, self.identity_sign);
         }
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.invert_ns, started);
         const data = self.allocator.alloc(f64, n * n) catch return error.OutOfMemory;
         @memset(data, 0.0);
         for (0..n) |i| data[i * n + i] = 1.0;
@@ -187,6 +209,8 @@ pub const Factorization = struct {
     }
 
     pub fn refactorizeInPlace(self: *Factorization) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.invert_ns, started);
         if (self.backend_kind != .dense_lu) return error.NotImplemented;
         self.dense_lu.refactorizeInPlace() catch |err| return switch (err) {
             error.DimensionMismatch => error.DimensionMismatch,
@@ -200,7 +224,11 @@ pub const Factorization = struct {
         self.stats.factorizations += 1;
     }
     pub fn solve(self: *Factorization, rhs: []f64) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.ftran_ns, started);
         self.stats.ftran_calls += 1;
+        self.observeFtranRhs(rhs);
+        self.stats.dense_ftran_dispatches += 1;
         switch (self.backend_kind) {
             .dense_lu => self.dense_lu.solve(rhs) catch |err| return switch (err) {
                 error.DimensionMismatch => error.DimensionMismatch,
@@ -223,7 +251,11 @@ pub const Factorization = struct {
     /// to use the product-form Eta path.
     pub fn solveForUpdate(self: *Factorization, rhs: []f64) FactorizationError!void {
         if (self.backend_kind == .dense_lu) return self.solve(rhs);
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.ftran_ns, started);
         self.stats.ftran_calls += 1;
+        self.observeFtranRhs(rhs);
+        self.stats.dense_ftran_dispatches += 1;
         self.sparse_lu.solveForUpdate(rhs) catch |err| return switch (err) {
             error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
             error.Singular => error.Singular,
@@ -232,7 +264,11 @@ pub const Factorization = struct {
         };
     }
     pub fn solveTranspose(self: *Factorization, rhs: []f64) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.btran_ns, started);
         self.stats.btran_calls += 1;
+        self.observeBtranRhs(rhs);
+        self.stats.dense_btran_dispatches += 1;
         var update_index = self.eta_count;
         while (update_index > 0) {
             update_index -= 1;
@@ -254,6 +290,8 @@ pub const Factorization = struct {
         }
     }
     pub fn update(self: *Factorization, update_view: PivotUpdateView) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.update_ns, started);
         if (update_view.direction.len != self.dimension or update_view.leaving_row >= self.dimension) return error.DimensionMismatch;
         if (self.backend_kind == .dense_lu and self.eta_count >= self.eta_capacity) return error.NotImplemented;
         const pivot_row: usize = @intCast(update_view.leaving_row);
@@ -291,6 +329,7 @@ pub const Factorization = struct {
             },
         }
         self.update_count += 1;
+        self.stats.maximum_update_count = @max(self.stats.maximum_update_count, self.update_count);
         self.maximum_update_growth = @max(self.maximum_update_growth, update_growth);
         self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
     }
@@ -328,6 +367,58 @@ pub const Factorization = struct {
         return switch (self.backend_kind) {
             .dense_lu => self.dense_lu.pivotConditionEstimate(),
             .sparse_lu => self.sparse_lu.pivotConditionEstimate(),
+        };
+    }
+
+    pub fn requestedBytes(self: *const Factorization) usize {
+        var total = self.sparse_lu.requestedBytes();
+        total += std.mem.sliceAsBytes(self.dense_lu.lu).len;
+        total += std.mem.sliceAsBytes(self.dense_lu.pivots).len;
+        total += std.mem.sliceAsBytes(self.dense_lu.work).len;
+        total += std.mem.sliceAsBytes(self.sparse_basis.starts).len;
+        total += std.mem.sliceAsBytes(self.sparse_basis.rows).len;
+        total += std.mem.sliceAsBytes(self.sparse_basis.values).len;
+        total += std.mem.sliceAsBytes(self.eta_values).len;
+        total += std.mem.sliceAsBytes(self.eta_rows).len;
+        total += std.mem.sliceAsBytes(self.identity_basic).len;
+        total += std.mem.sliceAsBytes(self.identity_scale).len;
+        total += std.mem.sliceAsBytes(self.identity_sign).len;
+        return total;
+    }
+
+    /// Reset per-solve counters and enable timing only when an I/O clock is
+    /// supplied. Call counts remain available even when timing is disabled.
+    pub fn resetStatistics(self: *Factorization, io: ?std.Io) void {
+        self.stats = .{};
+        self.statistics_io = io;
+    }
+
+    fn statisticsTimestamp(self: *const Factorization) ?i96 {
+        const io = self.statistics_io orelse return null;
+        return std.Io.Clock.awake.now(io).nanoseconds;
+    }
+
+    fn recordElapsed(self: *const Factorization, target: *u64, started: ?i96) void {
+        const begin = started orelse return;
+        const io = self.statistics_io orelse return;
+        const end = std.Io.Clock.awake.now(io).nanoseconds;
+        if (end <= begin) return;
+        target.* = std.math.add(u64, target.*, @intCast(end - begin)) catch std.math.maxInt(u64);
+    }
+
+    fn observeFtranRhs(self: *Factorization, rhs: []const f64) void {
+        if (self.statistics_io == null) return;
+        self.stats.ftran_rhs_samples += 1;
+        for (rhs) |value| if (value != 0.0) {
+            self.stats.ftran_rhs_nonzeros += 1;
+        };
+    }
+
+    fn observeBtranRhs(self: *Factorization, rhs: []const f64) void {
+        if (self.statistics_io == null) return;
+        self.stats.btran_rhs_samples += 1;
+        for (rhs) |value| if (value != 0.0) {
+            self.stats.btran_rhs_nonzeros += 1;
         };
     }
 

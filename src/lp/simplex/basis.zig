@@ -195,6 +195,47 @@ pub const BasisState = struct {
         self.allocator.free(self.published_reduced_cost);
         self.allocator.free(self.unbounded_ray);
     }
+
+    /// Bytes explicitly requested for retained basis SoA storage. Allocator
+    /// metadata and the borrowed model matrix are intentionally excluded.
+    pub fn requestedBytes(self: *const BasisState) usize {
+        var total: usize = 0;
+        total += std.mem.sliceAsBytes(self.row_status).len;
+        total += std.mem.sliceAsBytes(self.col_status).len;
+        total += std.mem.sliceAsBytes(self.basic_index).len;
+        total += std.mem.sliceAsBytes(self.basic_pos).len;
+        total += std.mem.sliceAsBytes(self.primal).len;
+        total += std.mem.sliceAsBytes(self.dual).len;
+        total += std.mem.sliceAsBytes(self.reduced_cost).len;
+        total += std.mem.sliceAsBytes(self.pivot_direction).len;
+        total += std.mem.sliceAsBytes(self.basic_value).len;
+        total += std.mem.sliceAsBytes(self.basic_lower).len;
+        total += std.mem.sliceAsBytes(self.basic_upper).len;
+        total += std.mem.sliceAsBytes(self.basic_margin).len;
+        total += std.mem.sliceAsBytes(self.ratio_direction).len;
+        total += std.mem.sliceAsBytes(self.row_scale).len;
+        total += std.mem.sliceAsBytes(self.column_scale).len;
+        total += std.mem.sliceAsBytes(self.row_rhs).len;
+        total += std.mem.sliceAsBytes(self.col_lower).len;
+        total += std.mem.sliceAsBytes(self.col_upper).len;
+        total += std.mem.sliceAsBytes(self.artificial_sign).len;
+        total += std.mem.sliceAsBytes(self.rhs_work).len;
+        total += std.mem.sliceAsBytes(self.residual_work).len;
+        total += std.mem.sliceAsBytes(self.col_edge_weight).len;
+        total += std.mem.sliceAsBytes(self.row_edge_weight).len;
+        total += std.mem.sliceAsBytes(self.dual_row).len;
+        total += std.mem.sliceAsBytes(self.tableau).len;
+        total += std.mem.sliceAsBytes(self.dual_ratio).len;
+        total += std.mem.sliceAsBytes(self.dual_direction).len;
+        total += std.mem.sliceAsBytes(self.flip_columns).len;
+        total += std.mem.sliceAsBytes(self.dual_candidate_rows).len;
+        total += std.mem.sliceAsBytes(self.dual_candidate_score).len;
+        total += std.mem.sliceAsBytes(self.published_primal).len;
+        total += std.mem.sliceAsBytes(self.published_dual).len;
+        total += std.mem.sliceAsBytes(self.published_reduced_cost).len;
+        total += std.mem.sliceAsBytes(self.unbounded_ray).len;
+        return total;
+    }
 };
 
 test {

@@ -88,6 +88,35 @@ pub const SolveControl = struct {
     /// Optional caller-owned trace storage used for deterministic pivot-path
     /// differential tests. Events beyond the supplied capacity are dropped.
     pivot_trace: []PivotTraceEvent = &.{},
+    /// Collect phase and kernel timings. Disabled by default so production
+    /// solves do not perform clock reads in simplex hot paths.
+    collect_statistics: bool = false,
+};
+
+pub const SimplexStats = struct {
+    phase_one_iterations: usize = 0,
+    dual_repair_iterations: usize = 0,
+    phase_two_iterations: usize = 0,
+    phase_one_ns: u64 = 0,
+    dual_repair_ns: u64 = 0,
+    phase_two_ns: u64 = 0,
+    cleanup_ns: u64 = 0,
+    rebuild_calls: usize = 0,
+    rebuild_ns: u64 = 0,
+    pricing_calls: usize = 0,
+    pricing_ns: u64 = 0,
+    pricing_samples: usize = 0,
+    pricing_nonzeros: usize = 0,
+    pricing_entries: usize = 0,
+    bound_flips: usize = 0,
+    aq_samples: usize = 0,
+    aq_nonzeros: usize = 0,
+    ep_samples: usize = 0,
+    ep_nonzeros: usize = 0,
+    dense_pricing_dispatches: usize = 0,
+    hyper_pricing_dispatches: usize = 0,
+    row_pricing_dispatches: usize = 0,
+    column_pricing_dispatches: usize = 0,
 };
 
 pub const SimplexEngine = struct {
@@ -122,6 +151,8 @@ pub const SimplexEngine = struct {
     reduced_cost_update_count: usize = 0,
     reduced_cost_refresh_period: usize = 8,
     failure_site: FailureSite = .none,
+    stats: SimplexStats = .{},
+    statistics_io: ?std.Io = null,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -129,6 +160,11 @@ pub const SimplexEngine = struct {
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
         self.factorization.deinit();
+    }
+
+    pub fn requestedBytes(self: *const SimplexEngine) usize {
+        const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
+        return basis_bytes + self.factorization.requestedBytes();
     }
     pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
         return .not_implemented;
@@ -140,6 +176,7 @@ pub const SimplexEngine = struct {
     /// model arrays. Basis storage is owned by the engine instance.
     pub fn solveProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         self.startSolveClock(control);
+        self.resetStatistics(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
         self.fresh_factorization_mode = false;
@@ -287,6 +324,7 @@ pub const SimplexEngine = struct {
     /// retained after this call.
     pub fn reoptimizeProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         self.startSolveClock(control);
+        self.resetStatistics(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
         self.numerical.resetAntiCycling();
@@ -601,6 +639,7 @@ pub const SimplexEngine = struct {
                 self.direction_requires_reinversion = true;
             }
         }
+        self.observeAqDensity(basis.pivot_direction);
         return .optimal;
     }
 
@@ -785,6 +824,10 @@ pub const SimplexEngine = struct {
     }
 
     fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const phase_started = self.statisticsTimestamp();
+        const iteration_started = self.iterations;
+        defer self.recordPhaseElapsed(.phase_two, phase_started);
+        defer self.recordPhaseIterations(.phase_two, iteration_started);
         if (self.recomputeReducedCosts(problem) != .optimal) {
             self.failure_site = .reduced_cost;
             return .numerical_failure;
@@ -794,19 +837,7 @@ pub const SimplexEngine = struct {
             const basis = if (self.basis) |*value| value else return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
             const pricing_tolerance = self.scaledDualTolerance(problem);
-            const entering = (if (self.numerical.anti_cycling_active)
-                self.pricing.choosePrimalEnteringBland(
-                    basis.reduced_cost[0..original_cols],
-                    basis.col_status[0..original_cols],
-                    pricing_tolerance,
-                )
-            else
-                self.pricing.choosePrimalEnteringWeighted(
-                    basis.reduced_cost[0..original_cols],
-                    basis.col_status[0..original_cols],
-                    basis.col_edge_weight[0..original_cols],
-                    pricing_tolerance,
-                )) orelse {
+            const entering = self.choosePrimalEnteringTimed(original_cols, pricing_tolerance) orelse {
                 // Never certify dual feasibility from an updated BTRAN chain.
                 // Reinvert the unchanged basis once and price again; a stale
                 // transpose solve can otherwise publish a false optimum.
@@ -886,7 +917,46 @@ pub const SimplexEngine = struct {
         return @max(std.math.floatEps(f64), self.numerical.dual_tolerance * self.objective_scale * minimum_column_scale);
     }
 
+    fn choosePrimalEnteringTimed(self: *SimplexEngine, column_count: usize, tolerance: f64) ?pricing_module.EnteringChoice {
+        const started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(started);
+        const basis = if (self.basis) |*value| value else return null;
+        self.observePricingDensity(basis.reduced_cost[0..column_count]);
+        self.stats.dense_pricing_dispatches += 1;
+        return if (self.numerical.anti_cycling_active)
+            self.pricing.choosePrimalEnteringBland(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                tolerance,
+            )
+        else
+            self.pricing.choosePrimalEnteringWeighted(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                basis.col_edge_weight[0..column_count],
+                tolerance,
+            );
+    }
+
+    fn choosePrimalEnteringWeightedTimed(self: *SimplexEngine, column_count: usize, tolerance: f64) ?pricing_module.EnteringChoice {
+        const started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(started);
+        const basis = if (self.basis) |*value| value else return null;
+        self.observePricingDensity(basis.reduced_cost[0..column_count]);
+        self.stats.dense_pricing_dispatches += 1;
+        return self.pricing.choosePrimalEnteringWeighted(
+            basis.reduced_cost[0..column_count],
+            basis.col_status[0..column_count],
+            basis.col_edge_weight[0..column_count],
+            tolerance,
+        );
+    }
+
     fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const phase_started = self.statisticsTimestamp();
+        const iteration_started = self.iterations;
+        defer self.recordPhaseElapsed(.phase_two, phase_started);
+        defer self.recordPhaseIterations(.phase_two, iteration_started);
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
@@ -942,7 +1012,14 @@ pub const SimplexEngine = struct {
     }
 
     fn chooseDualLeavingRow(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordRowPricingElapsed(pricing_started);
         const basis = if (self.basis) |*value| value else return null;
+        if (self.pricing.rule == .hyper_sparse and self.dual_hyper_sparse_active) {
+            self.stats.hyper_pricing_dispatches += 1;
+        } else {
+            self.stats.dense_pricing_dispatches += 1;
+        }
         if (self.numerical.anti_cycling_active) return self.chooseDualLeavingBland();
         if (self.pricing.rule != .hyper_sparse or !self.dual_hyper_sparse_active)
             return self.pricing.chooseDualLeavingWeighted(
@@ -1092,6 +1169,10 @@ pub const SimplexEngine = struct {
     /// imported basis or factorization. The original objective is restored by
     /// the caller before entering Phase II.
     fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const phase_started = self.statisticsTimestamp();
+        const iteration_started = self.iterations;
+        defer self.recordPhaseElapsed(.dual_feasibility_repair, phase_started);
+        defer self.recordPhaseIterations(.dual_feasibility_repair, iteration_started);
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         self.algorithm = .dual_revised;
         @memset(basis.reduced_cost, 0.0);
@@ -1155,6 +1236,9 @@ pub const SimplexEngine = struct {
         @memset(basis.dual_row, 0.0);
         basis.dual_row[row] = 1.0;
         self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
+        self.observeEpDensity(basis.dual_row);
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(pricing_started);
         if (self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid) {
             var exact_weight: f64 = 0.0;
             for (basis.dual_row) |entry| exact_weight += entry * entry;
@@ -1197,6 +1281,7 @@ pub const SimplexEngine = struct {
     }
 
     fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
+        self.stats.bound_flips += flip_count;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         for (basis.flip_columns[0..flip_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
@@ -1216,6 +1301,10 @@ pub const SimplexEngine = struct {
     }
 
     fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const phase_started = self.statisticsTimestamp();
+        const iteration_started = self.iterations;
+        defer self.recordPhaseElapsed(.phase_one, phase_started);
+        defer self.recordPhaseIterations(.phase_one, iteration_started);
         if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_one)) |status| return status;
@@ -1223,10 +1312,8 @@ pub const SimplexEngine = struct {
             // General bounded Phase I contains artificial columns and is not
             // the standard-form setting required by Bland's proof. Retain the
             // numerically stable Harris candidate set throughout this phase.
-            const entering = self.pricing.choosePrimalEnteringWeighted(
-                basis.reduced_cost,
-                basis.col_status,
-                basis.col_edge_weight,
+            const entering = self.choosePrimalEnteringWeightedTimed(
+                basis.reduced_cost.len,
                 self.numerical.dual_tolerance,
             ) orelse {
                 if (self.factorization.update_count != 0) {
@@ -1364,11 +1451,95 @@ pub const SimplexEngine = struct {
         self.solve_start_ns = std.Io.Clock.awake.now(io).nanoseconds;
     }
 
+    fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
+        self.stats = .{};
+        self.statistics_io = if (control.collect_statistics)
+            control.clock_io orelse std.Io.Threaded.global_single_threaded.io()
+        else
+            null;
+        self.factorization.resetStatistics(self.statistics_io);
+    }
+
+    fn statisticsTimestamp(self: *const SimplexEngine) ?i96 {
+        const io = self.statistics_io orelse return null;
+        return std.Io.Clock.awake.now(io).nanoseconds;
+    }
+
+    fn elapsedSince(self: *const SimplexEngine, started: ?i96) u64 {
+        const begin = started orelse return 0;
+        const io = self.statistics_io orelse return 0;
+        const end = std.Io.Clock.awake.now(io).nanoseconds;
+        if (end <= begin) return 0;
+        return @intCast(end - begin);
+    }
+
+    fn recordPhaseElapsed(self: *SimplexEngine, phase: SolvePhase, started: ?i96) void {
+        const elapsed = self.elapsedSince(started);
+        const target = switch (phase) {
+            .phase_one => &self.stats.phase_one_ns,
+            .dual_feasibility_repair => &self.stats.dual_repair_ns,
+            .phase_two => &self.stats.phase_two_ns,
+        };
+        target.* = std.math.add(u64, target.*, elapsed) catch std.math.maxInt(u64);
+    }
+
+    fn recordPhaseIterations(self: *SimplexEngine, phase: SolvePhase, started: usize) void {
+        const count = self.iterations -| started;
+        const target = switch (phase) {
+            .phase_one => &self.stats.phase_one_iterations,
+            .dual_feasibility_repair => &self.stats.dual_repair_iterations,
+            .phase_two => &self.stats.phase_two_iterations,
+        };
+        target.* = std.math.add(usize, target.*, count) catch std.math.maxInt(usize);
+    }
+
+    fn recordPricingElapsed(self: *SimplexEngine, started: ?i96) void {
+        self.stats.pricing_calls += 1;
+        self.stats.column_pricing_dispatches += 1;
+        self.stats.pricing_ns = std.math.add(u64, self.stats.pricing_ns, self.elapsedSince(started)) catch std.math.maxInt(u64);
+    }
+
+    fn recordRowPricingElapsed(self: *SimplexEngine, started: ?i96) void {
+        self.stats.pricing_calls += 1;
+        self.stats.row_pricing_dispatches += 1;
+        self.stats.pricing_ns = std.math.add(u64, self.stats.pricing_ns, self.elapsedSince(started)) catch std.math.maxInt(u64);
+    }
+
+    fn observeAqDensity(self: *SimplexEngine, vector: []const f64) void {
+        if (self.statistics_io == null) return;
+        self.stats.aq_samples += 1;
+        for (vector) |value| if (@abs(value) > self.numerical.zero_tolerance) {
+            self.stats.aq_nonzeros += 1;
+        };
+    }
+
+    fn observeEpDensity(self: *SimplexEngine, vector: []const f64) void {
+        if (self.statistics_io == null) return;
+        self.stats.ep_samples += 1;
+        for (vector) |value| if (@abs(value) > self.numerical.zero_tolerance) {
+            self.stats.ep_nonzeros += 1;
+        };
+    }
+
+    fn observePricingDensity(self: *SimplexEngine, vector: []const f64) void {
+        if (self.statistics_io == null) return;
+        self.stats.pricing_samples += 1;
+        self.stats.pricing_entries += vector.len;
+        for (vector) |value| if (@abs(value) > self.numerical.dual_tolerance) {
+            self.stats.pricing_nonzeros += 1;
+        };
+    }
+
     /// Pivot zero-valued artificial basics out whenever a stable original or
     /// logical column is available. An artificial that remains basic denotes
     /// a rank-redundant row and is fixed at zero until presolve can remove that
     /// row explicitly.
     fn cleanupArtificialBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const cleanup_started = self.statisticsTimestamp();
+        defer {
+            const elapsed = self.elapsedSince(cleanup_started);
+            self.stats.cleanup_ns = std.math.add(u64, self.stats.cleanup_ns, elapsed) catch std.math.maxInt(u64);
+        }
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         const artificial_begin = problem.num_cols + problem.num_rows;
 
@@ -1400,6 +1571,8 @@ pub const SimplexEngine = struct {
         const artificial_begin = problem.num_cols + problem.num_rows;
         for (basis.basic_index, 0..) |global_col, row| basis.dual[row] = if (global_col >= artificial_begin) 1.0 else 0.0;
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(pricing_started);
 
         // Compute c - A^T*y directly from CSC. The previous generic column
         // loop cleared and dotted a rows-long dense vector for every internal
@@ -1449,6 +1622,8 @@ pub const SimplexEngine = struct {
         @memset(basis.residual_work, 0.0);
         basis.residual_work[row] = 1.0;
         self.factorization.solveTranspose(basis.residual_work) catch return .numerical_failure;
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(pricing_started);
         for (0..problem.num_cols) |column| {
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
@@ -1482,6 +1657,8 @@ pub const SimplexEngine = struct {
                 0.0;
         }
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(pricing_started);
         for (0..problem.num_cols) |col| {
             var reduced = (if (maximize) -problem.col_cost[col] else problem.col_cost[col]) * self.objective_scale * basis.column_scale[col];
             const begin = problem.matrix.col_starts[col];
@@ -1500,6 +1677,11 @@ pub const SimplexEngine = struct {
     }
 
     fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const rebuild_started = self.statisticsTimestamp();
+        defer {
+            self.stats.rebuild_calls += 1;
+            self.stats.rebuild_ns = std.math.add(u64, self.stats.rebuild_ns, self.elapsedSince(rebuild_started)) catch std.math.maxInt(u64);
+        }
         self.factorizeCurrentBasis(problem) catch {
             self.failure_site = .pivot_factorization;
             return .numerical_failure;
@@ -1961,6 +2143,12 @@ test "engine solves a standard-form LP with primal revised simplex" {
     const solution = engine.solutionView(problem, status).?;
     try std.testing.expectEqual(@as(usize, 2), solution.primal.len);
     try std.testing.expectApproxEqAbs(@as(f64, -4), solution.objective_value, 1e-12);
+    try std.testing.expectEqual(engine.iterations, engine.stats.phase_two_iterations);
+    try std.testing.expectEqual(@as(usize, 0), engine.stats.phase_one_iterations);
+    try std.testing.expect(engine.stats.pricing_calls > 0);
+    try std.testing.expectEqual(@as(u64, 0), engine.stats.pricing_ns);
+    try std.testing.expectEqual(engine.factorization.stats.ftran_calls, engine.factorization.stats.dense_ftran_dispatches);
+    try std.testing.expect(engine.requestedBytes() > 0);
 }
 
 test "Bland fallback resolves the Beale degenerate cycling example" {
