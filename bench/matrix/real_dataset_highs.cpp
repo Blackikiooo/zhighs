@@ -12,6 +12,11 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <cstdlib>
+#ifdef ZHIGHS_RSS_SPAN_PARSER
+#include <span>
+#include <spanstream>
+#endif
 
 #include "util/HighsSparseMatrix.h"
 
@@ -25,8 +30,23 @@ struct Triplet {
 };
 
 static HighsSparseMatrix read_matrix_market(const fs::path& path) {
+#ifdef ZHIGHS_RSS_SPAN_PARSER
+  // Match the Zig benchmark parser's lifetime: retain the complete Matrix
+  // Market text while triplets are built and sorted. This makes peak-RSS
+  // comparisons about data structures rather than stream-vs-whole-file I/O.
+  std::ifstream file(path, std::ios::binary);
+  if (!file) throw std::runtime_error("cannot open " + path.string());
+  file.seekg(0, std::ios::end);
+  const std::streamsize content_size = file.tellg();
+  file.seekg(0, std::ios::beg);
+  std::string content(static_cast<std::size_t>(content_size), '\0');
+  if (!file.read(content.data(), content_size))
+    throw std::runtime_error("cannot read " + path.string());
+  std::ispanstream input(std::span<const char>(content.data(), content.size()));
+#else
   std::ifstream input(path);
   if (!input) throw std::runtime_error("cannot open " + path.string());
+#endif
   std::string line, banner, object, format, field, symmetry;
   if (!std::getline(input, line)) throw std::runtime_error("missing banner");
   std::istringstream header(line);
@@ -112,6 +132,19 @@ static double elapsed_ms(Clock::time_point started, std::size_t repeats = 1) {
          static_cast<double>(repeats);
 }
 
+static std::size_t current_rss_kb() {
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    if (line.rfind("VmRSS:", 0) != 0) continue;
+    std::istringstream fields(line.substr(6));
+    std::size_t value;
+    fields >> value;
+    return value;
+  }
+  throw std::runtime_error("cannot read VmRSS");
+}
+
 int main(int argc, char** argv) {
   if (argc != 3) {
     std::cerr << "usage: real-dataset-highs DATASET_DIR REPORT.tsv\n";
@@ -127,14 +160,32 @@ int main(int argc, char** argv) {
     return lhs.file_size() < rhs.file_size();
   });
   std::ofstream report(argv[2]);
-  report << "implementation\tdataset\trows\tcols\tnnz\tcsc_spmv_ms\tcsr_spmv_ms"
-            "\tcsc_to_csr_ms\tpeak_rss_kb\n";
+  const bool rss_only = std::getenv("ZHIGHS_DATASET_RSS_ONLY") != nullptr;
+  const char* filter = std::getenv("ZHIGHS_DATASET_FILTER");
+  if (rss_only)
+    report << "implementation\tdataset\trows\tcols\tnnz\trequested_bytes"
+              "\tcurrent_rss_kb\tpeak_rss_kb\n";
+  else
+    report << "implementation\tdataset\trows\tcols\tnnz\tcsc_spmv_ms\tcsr_spmv_ms"
+              "\tcsc_to_csr_ms\tpeak_rss_kb\n";
   report.setf(std::ios::fixed);
   report.precision(3);
 
   for (const auto& dataset : datasets) {
+    if (filter && dataset.path().filename() != filter) continue;
     std::cerr << "benchmarking HiGHS " << dataset.path().filename() << "\n";
     HighsSparseMatrix matrix = read_matrix_market(dataset.path());
+    if (rss_only) {
+      rusage usage{};
+      getrusage(RUSAGE_SELF, &usage);
+      const std::size_t requested = matrix.start_.size() * sizeof(HighsInt) +
+                                    matrix.index_.size() * sizeof(HighsInt) +
+                                    matrix.value_.size() * sizeof(double);
+      report << "HiGHS\t" << dataset.path().filename().string() << '\t' << matrix.num_row_
+             << '\t' << matrix.num_col_ << '\t' << matrix.numNz() << '\t' << requested
+             << '\t' << current_rss_kb() << '\t' << usage.ru_maxrss << '\n';
+      continue;
+    }
     std::vector<double> x(matrix.num_col_);
     for (std::size_t index = 0; index < x.size(); ++index)
       x[index] = 1.0 + static_cast<double>(index % 17) * 0.03125;

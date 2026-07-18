@@ -211,8 +211,18 @@ fn warmRepeats(kernel: []const u8) usize {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    var h = try TestHarness.init(allocator);
+    const allocator_name = init.environ_map.get("ZHIGHS_PERF_ALLOCATOR") orelse "smp";
+    const benchmark_allocator = if (std.mem.eql(u8, allocator_name, "smp"))
+        std.heap.smp_allocator
+    else if (std.mem.eql(u8, allocator_name, "c"))
+        std.heap.c_allocator
+    else {
+        std.debug.print("ZHIGHS_PERF_ALLOCATOR must be smp or c, got {s}\n", .{allocator_name});
+        return error.InvalidAllocator;
+    };
+    // The fixture is deliberately invariant across allocator A/B runs. Only
+    // allocations inside the selected owning kernel use benchmark_allocator.
+    var h = try TestHarness.init(std.heap.smp_allocator);
     defer h.deinit();
 
     const requested = init.environ_map.get("ZHIGHS_PERF_KERNEL") orelse {
@@ -306,29 +316,29 @@ pub fn main(init: std.process.Init) !void {
         // Match C++ semantics: copy the CSC matrix (like HighsSparseMatrix fresh = csc),
         // then build CSR from the copy (like fresh.ensureRowwise()).
         for (0..repeats) |_| {
-            const starts_copy = try h.allocator.dupe(usize, h.matrix.col_starts);
-            defer h.allocator.free(starts_copy);
-            const indices_copy = try h.allocator.dupe(zhighs.RowId, h.matrix.row_indices);
-            defer h.allocator.free(indices_copy);
-            const values_copy = try h.allocator.dupe(f64, h.matrix.values);
-            defer h.allocator.free(values_copy);
+            const starts_copy = try benchmark_allocator.dupe(usize, h.matrix.col_starts);
+            defer benchmark_allocator.free(starts_copy);
+            const indices_copy = try benchmark_allocator.dupe(zhighs.RowId, h.matrix.row_indices);
+            defer benchmark_allocator.free(indices_copy);
+            const values_copy = try benchmark_allocator.dupe(f64, h.matrix.values);
+            defer benchmark_allocator.free(values_copy);
             const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
-            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(h.allocator, matrix_copy, 0, h.csr_buffers.cursor);
+            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(benchmark_allocator, matrix_copy, 0, h.csr_buffers.cursor);
             clobberPtr(cache.values.ptr);
-            cache.deinit(h.allocator);
+            cache.deinit(benchmark_allocator);
         }
         result_checksum = checksum(h.csr_view.values);
         // Build one extra for struct hash (must be on the owning CSR, not the reusable buffers)
         {
-            const starts_copy = try h.allocator.dupe(usize, h.matrix.col_starts);
-            defer h.allocator.free(starts_copy);
-            const indices_copy = try h.allocator.dupe(zhighs.RowId, h.matrix.row_indices);
-            defer h.allocator.free(indices_copy);
-            const values_copy = try h.allocator.dupe(f64, h.matrix.values);
-            defer h.allocator.free(values_copy);
+            const starts_copy = try benchmark_allocator.dupe(usize, h.matrix.col_starts);
+            defer benchmark_allocator.free(starts_copy);
+            const indices_copy = try benchmark_allocator.dupe(zhighs.RowId, h.matrix.row_indices);
+            defer benchmark_allocator.free(indices_copy);
+            const values_copy = try benchmark_allocator.dupe(f64, h.matrix.values);
+            defer benchmark_allocator.free(values_copy);
             const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
-            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(h.allocator, matrix_copy, 0, h.csr_buffers.cursor);
-            defer cache.deinit(h.allocator);
+            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(benchmark_allocator, matrix_copy, 0, h.csr_buffers.cursor);
+            defer cache.deinit(benchmark_allocator);
             result_struct_hash = structuralHashCsr(cache.row_starts, cache.col_indices, cache.values);
         }
     } else if (std.mem.eql(u8, requested, "transpose_into")) {
@@ -340,47 +350,47 @@ pub fn main(init: std.process.Init) !void {
         result_struct_hash = structuralHash(h.transpose_buffers.starts, h.transpose_buffers.rows, h.transpose_buffers.values);
     } else if (std.mem.eql(u8, requested, "transpose_owning")) {
         for (0..repeats) |_| {
-            var t = try zhighs.matrix.transposeLeanAssumeValidCompact(h.allocator, h.matrix);
+            var t = try zhighs.matrix.transposeLeanAssumeValidCompact(benchmark_allocator, h.matrix);
             clobberPtr(t.values.ptr);
-            t.deinit(h.allocator);
+            t.deinit(benchmark_allocator);
         }
         // Build one extra for checksum + structural hash
         {
-            var t = try zhighs.matrix.transposeAssumeValid(h.allocator, h.matrix);
+            var t = try zhighs.matrix.transposeAssumeValid(benchmark_allocator, h.matrix);
             result_checksum = checksum(t.values);
             result_struct_hash = structuralHash(t.col_starts, t.row_indices, t.values);
-            t.deinit(h.allocator);
+            t.deinit(benchmark_allocator);
         }
     } else if (std.mem.eql(u8, requested, "builder_freeze_sorted")) {
         for (0..repeats) |_| {
             var b = try zhighs.matrix.MatrixBuilder.init(dimension, dimension);
-            defer b.deinit(h.allocator);
-            try b.reserve(h.allocator, nnz);
+            defer b.deinit(benchmark_allocator);
+            try b.reserve(benchmark_allocator, nnz);
             for (0..dimension) |col| {
                 const col_id = zhighs.ColId.fromUsizeAssumeValid(col);
                 if (col != 0) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col - 1), col_id, -1.0);
                 b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col), col_id, 4.0);
                 if (col + 1 < dimension) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col + 1), col_id, -1.0);
             }
-            var m = try b.freezeSortedLeanAssumeValid(h.allocator, 0.0);
+            var m = try b.freezeSortedLeanAssumeValid(benchmark_allocator, 0.0);
             clobberPtr(m.values.ptr);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
         // Build one extra for checksum
         {
             var b = try zhighs.matrix.MatrixBuilder.init(dimension, dimension);
-            defer b.deinit(h.allocator);
-            try b.reserve(h.allocator, nnz);
+            defer b.deinit(benchmark_allocator);
+            try b.reserve(benchmark_allocator, nnz);
             for (0..dimension) |col| {
                 const col_id = zhighs.ColId.fromUsizeAssumeValid(col);
                 if (col != 0) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col - 1), col_id, -1.0);
                 b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col), col_id, 4.0);
                 if (col + 1 < dimension) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col + 1), col_id, -1.0);
             }
-            var m = try b.freezeSortedLeanAssumeValid(h.allocator, 0.0);
+            var m = try b.freezeSortedLeanAssumeValid(benchmark_allocator, 0.0);
             result_checksum = checksum(m.values);
             result_struct_hash = structuralHash(m.col_starts, m.row_indices, m.values);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
     } else if (std.mem.eql(u8, requested, "builder_freeze_prepopulated")) {
         // Only the freeze step — arrays are pre-built outside the timed loop.
@@ -413,16 +423,16 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         for (0..repeats) |_| {
-            var m = try zhighs.matrix.freezeFromSortedArraysAssumeValid(h.allocator, dimension, dimension, prepop_rows, prepop_cols, prepop_values, 0.0, false);
+            var m = try zhighs.matrix.freezeFromSortedArraysAssumeValid(benchmark_allocator, dimension, dimension, prepop_rows, prepop_cols, prepop_values, 0.0, false);
             clobberPtr(m.values.ptr);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
         // Build one extra for checksum + struct hash
         {
-            var m = try zhighs.matrix.freezeFromSortedArraysAssumeValid(h.allocator, dimension, dimension, prepop_rows, prepop_cols, prepop_values, 0.0, false);
+            var m = try zhighs.matrix.freezeFromSortedArraysAssumeValid(benchmark_allocator, dimension, dimension, prepop_rows, prepop_cols, prepop_values, 0.0, false);
             result_checksum = checksum(m.values);
             result_struct_hash = structuralHash(m.col_starts, m.row_indices, m.values);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
     } else if (std.mem.eql(u8, requested, "builder_freeze_canonical")) {
         // Canonical input: no duplicates, no zeros, all finite — single-pass count+memcpy.
@@ -455,15 +465,15 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         for (0..repeats) |_| {
-            var m = try zhighs.matrix.freezeFromCanonicalArraysAssumeValid(h.allocator, dimension, dimension, canon_rows, canon_cols, canon_values, 0.0, false);
+            var m = try zhighs.matrix.freezeFromCanonicalArraysAssumeValid(benchmark_allocator, dimension, dimension, canon_rows, canon_cols, canon_values, 0.0, false);
             clobberPtr(m.values.ptr);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
         {
-            var m = try zhighs.matrix.freezeFromCanonicalArraysAssumeValid(h.allocator, dimension, dimension, canon_rows, canon_cols, canon_values, 0.0, false);
+            var m = try zhighs.matrix.freezeFromCanonicalArraysAssumeValid(benchmark_allocator, dimension, dimension, canon_rows, canon_cols, canon_values, 0.0, false);
             result_checksum = checksum(m.values);
             result_struct_hash = structuralHash(m.col_starts, m.row_indices, m.values);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
     } else if (std.mem.eql(u8, requested, "builder_freeze_reusable")) {
         // Uses formal CscBuildBuffers API: allocate once, pre-touch, reuse across iterations.
@@ -513,8 +523,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, requested, "builder_freeze_general")) {
         for (0..repeats) |_| {
             var b = try zhighs.matrix.MatrixBuilder.init(dimension, dimension);
-            defer b.deinit(h.allocator);
-            try b.reserve(h.allocator, nnz);
+            defer b.deinit(benchmark_allocator);
+            try b.reserve(benchmark_allocator, nnz);
             var col = dimension;
             while (col != 0) {
                 col -= 1;
@@ -523,15 +533,15 @@ pub fn main(init: std.process.Init) !void {
                 b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col), col_id, 4.0);
                 if (col != 0) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col - 1), col_id, -1.0);
             }
-            var m = try b.freeze(h.allocator, 0.0);
+            var m = try b.freeze(benchmark_allocator, 0.0);
             clobberPtr(m.values.ptr);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
         // Build one extra for checksum
         {
             var b = try zhighs.matrix.MatrixBuilder.init(dimension, dimension);
-            defer b.deinit(h.allocator);
-            try b.reserve(h.allocator, nnz);
+            defer b.deinit(benchmark_allocator);
+            try b.reserve(benchmark_allocator, nnz);
             var col = dimension;
             while (col != 0) {
                 col -= 1;
@@ -540,10 +550,10 @@ pub fn main(init: std.process.Init) !void {
                 b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col), col_id, 4.0);
                 if (col != 0) b.appendPreReserved(zhighs.RowId.fromUsizeAssumeValid(col - 1), col_id, -1.0);
             }
-            var m = try b.freeze(h.allocator, 0.0);
+            var m = try b.freeze(benchmark_allocator, 0.0);
             result_checksum = checksum(m.values);
             result_struct_hash = structuralHash(m.col_starts, m.row_indices, m.values);
-            m.deinit(h.allocator);
+            m.deinit(benchmark_allocator);
         }
     } else if (std.mem.eql(u8, requested, "sparse_accumulate")) {
         var accumulator = zhighs.matrix.SparseAccumulator(zhighs.RowId).initWithCapacity(h.allocator, dimension, dimension) catch unreachable;

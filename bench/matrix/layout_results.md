@@ -107,3 +107,13 @@ both without another backing allocation; retained capacities for dimensions
 64/512/4096 were about 10.6/81.5/648.5 KiB. Those bytes are intentionally
 session-retained and are not reported as an independently owned matrix memory
 reduction.
+
+A later libc-linked A/B corrected the C++ fairness boundary for repeated large
+owning objects. The identical Zig owning-transpose code measured about 905 us
+with `smp_allocator`, 357 us with `c_allocator`, and 340 us in the C++ malloc
+runner. Perf counted about 61,867 page faults for smp versus 3,853 for c and
+4,038 for C++; retired instructions were unchanged between the Zig allocators.
+Therefore libc-linked solver sessions that repeatedly create and destroy large
+owning matrices should select `c_allocator` (or an explicitly retained session
+allocator). Matrix APIs remain allocator-parametric and do not hardcode libc;
+reusable buffers remain preferred when ownership permits.

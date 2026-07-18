@@ -222,6 +222,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/matrix/perf_profile.zig"),
             .target = target,
             .optimize = optimize,
+            // Enables an explicit c_allocator A/B against C++ malloc. The
+            // profiling default remains smp_allocator for continuity.
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "zhighs", .module = matrix_bench_module },
             },
@@ -275,6 +278,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/matrix/dataset_runner.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{.{ .name = "zhighs", .module = matrix_bench_module }},
         }),
     });

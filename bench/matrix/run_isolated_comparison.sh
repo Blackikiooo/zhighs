@@ -21,6 +21,12 @@ BUILD_ROOT="${BUILD_ROOT:-/tmp/zhighs-matrix-isolated}"
 HIGHS_SOURCE="${HIGHS_SOURCE:-/home/godv/documents/codefiles/cppfiles/HiGHS}"
 FORCE_REBUILD="${FORCE_REBUILD:-1}"
 PERF_STAT="${PERF_STAT:-0}"
+PERF_BIN="${PERF_BIN:-perf}"
+if [ "$PERF_BIN" = perf ]; then
+  for candidate in /usr/lib/linux-tools-*/perf; do
+    if [ -x "$candidate" ]; then PERF_BIN="$candidate"; break; fi
+  done
+fi
 ZHIGHS_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RESULTS_DIR="$BUILD_ROOT/results"
 
@@ -163,7 +169,7 @@ export LD_LIBRARY_PATH="$BUILD_ROOT/highs-build/lib:${LD_LIBRARY_PATH:-}"
 
 # Verify both binaries work and record SHA-256
 echo "Verifying binaries..."
-ZHIGHS_PERF_KERNEL=clear_output "$ZIG_BIN" > /dev/null 2>&1 || {
+ZHIGHS_PERF_KERNEL=clear_output ZHIGHS_PERF_ALLOCATOR=c "$ZIG_BIN" > /dev/null 2>&1 || {
   echo "ERROR: Zig binary failed to execute"; exit 1
 }
 ZHIGHS_PERF_KERNEL=clear_output "$CPP_BIN" > /dev/null 2>&1 || {
@@ -183,6 +189,7 @@ cat > "$RAW_CSV" <<RAW_HEADER
 # CPU core: $CPU_CORE  Runs: $RUNS  Load: $LOAD  Governor: $(cat /sys/devices/system/cpu/cpu$CPU_CORE/cpufreq/scaling_governor 2>/dev/null || echo unknown)
 # Zig binary SHA-256:  $ZIG_SHA256
 # C++ binary SHA-256:  $CPP_SHA256
+# Owning allocator policy: Zig c_allocator, C++ malloc/std::vector
 # Columns: run,kernel,impl,total_ns,ns_per_repeat,checksum,struct_hash
 RAW_HEADER
 
@@ -220,7 +227,7 @@ for kernel in "${KERNELS[@]}"; do
       fi
 
       # Run with taskset pinning — no || true, crashes must surface.
-      raw_output="$(taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" "$bin" 2>&1)"
+      raw_output="$(taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" ZHIGHS_PERF_ALLOCATOR=c "$bin" 2>&1)"
       _rc=$?
       if [ $_rc -ne 0 ]; then
         echo "ERROR: $impl_name/$kernel crashed with exit code $_rc at run $run"
@@ -341,14 +348,14 @@ if [ "$PERF_STAT" = "1" ]; then
   for kernel in "${LAGGING_KERNELS[@]}"; do
     echo "--- $kernel (zig) ---"
     # Single warmup run, then perf stat
-    taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" "$ZIG_BIN" 2>&1 > /dev/null || true
-    perf stat -e cycles,instructions,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses \
-      taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" "$ZIG_BIN" \
+    taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" ZHIGHS_PERF_ALLOCATOR=c "$ZIG_BIN" 2>&1 > /dev/null || true
+    "$PERF_BIN" stat -e cycles,instructions,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses \
+      taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" ZHIGHS_PERF_ALLOCATOR=c "$ZIG_BIN" \
       2>&1 | tee "$PERF_DIR/${kernel}_zig.perf"
     echo ""
     echo "--- $kernel (cpp) ---"
     taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" "$CPP_BIN" 2>&1 > /dev/null || true
-    perf stat -e cycles,instructions,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses \
+    "$PERF_BIN" stat -e cycles,instructions,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses \
       taskset -c "$CPU_CORE" env ZHIGHS_PERF_KERNEL="$kernel" "$CPP_BIN" \
       2>&1 | tee "$PERF_DIR/${kernel}_cpp.perf"
     echo ""

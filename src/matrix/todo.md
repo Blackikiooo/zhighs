@@ -491,20 +491,54 @@ OOM、三份真实大数据、Debug/ReleaseSafe/ReleaseFast × w32/w64 四项全
 - [x] 真实数据中，thermal/cage/web 的 CSC SpMV 分别比 HiGHS 快 7.3%/1.0%/13.7%，CSR
   分别快 0.8%/5.9%/16.7%；CSC->CSR reusable 分别快 16.4%、慢 0.6%、快 4.2%。低于 1%
   只判定为持平，不宣称领先。完整表写入 `bench/matrix/real_dataset_results.md`。
-- [x] synthetic 稳定项：CSR dense 快 20.4%，full scale 快 9.3%，CSR reusable conversion
-  快 18.5%，owning CSR 快 2.2%，transpose-into 慢 1.3%（持平），reusable builder 快 10.7%，
-  general builder 快 12.4%，sparse accumulate 快 66.6%。
-- [ ] owning transpose 仍为 920 us vs HiGHS 337 us（Zig 慢 2.73x）；本次 cursor 复用已令
-  Zig 自身快约 7.7%，但 reusable transpose 已基本持平，差距集中于 owning allocation 与
-  双 wide/compact starts 输出。下一批用 perf/汇编单独定位，不再修改 scatter 内核。
-- [ ] canonical owning builder 仍为 745 us vs 256 us（慢 2.91x），但 reusable builder 已快
-  10.7%；下一批拆分 output allocation、wide starts 填充、输入扫描/memcpy 做单变量 perf。
-- [ ] 建立等生命周期的 RSS runner。目前 acceptance Zig 进程额外保留 CSR/transpose/scaling/
-  permutation 验证对象，不能与窄 C++ runner RSS 直接比较。按 authoritative w32 CSC 数组计算，
-  Zig 相对 HiGHS 在 thermal/cage/web 多 9.2%/4.2%/19.4%；webbase 的双 offsets 多 7.63 MiB。
+- [x] 修正 allocator 后 synthetic 稳定项：CSC/CSR dense 快 9.2%/20.9%，full scale 快 9.1%，
+  CSR reusable conversion 快 19.9%，owning CSR 慢 5.2%，transpose-into 持平、owning transpose
+  慢 6.1%；sorted/prepop/canonical/general builder 快 48.6%/40.1%/12.1%/53.7%，reusable
+  builder 快 10.2%，sparse accumulate 快 66.9%。
+- [x] 修正 owning allocator 公平性后，transpose 为 360 us vs HiGHS 340 us（慢 6.1%），不再是
+  2.73x；canonical builder 为 231 us vs 263 us（快 12.1%），不再是慢 2.91x。旧结论来自
+  Zig smp 大块映射反复 page fault 与 C++ malloc retention 的策略差异，已由新报告取代。
+- [x] 建立等生命周期 RSS runner。按 authoritative w32 CSC requested bytes，Zig 相对 HiGHS
+  在 thermal/cage/web 多 9.2%/4.2%/19.4%；webbase 双 offsets 多 7.63 MiB。公平整文件 parser
+  下构建 peak RSS 反而低 17.9%/11.8%/9.3%，因为 Zig 原地 merge，C++ 同时持有 input/canonical
+  triplets。current RSS 受页驻留影响，只作辅助，不替代 requested bytes。
 
-本轮结论：不能说所有 matrix 路径已经完全超过 HiGHS。SpMV、reusable CSR conversion、通用
-builder 和 sparse accumulator 已达到持平或领先；主要剩余差距已收敛到 owning transpose、
-canonical/sorted owning build 以及双 offsets 的内存成本。高 MAD 的 synthetic CSC/product
-排名不作为结论，真实数据交错 medians 才作为 SpMV 判据。原始结果位于
-`/tmp/zhighs-matrix-after-layout/results` 与 `/tmp/zhighs-matrix-after-layout/real`。
+本轮结论：公平 allocator 下 owning builder 已全面领先，owning transpose 仅慢 6.1%，不再有
+2--3 倍 owning 差距。当前明确剩余项是 `alpha_ax_plus_y` 慢 23.4%、CSR transpose product
+慢 3.8%、owning CSR 慢 5.2%，以及双 offsets 的最终存储成本。原始 corrected synthetic 位于
+`/tmp/zhighs-matrix-fair-allocator/results`，RSS 样本位于其 `rss` 子目录。
+
+## 2026-07-14 Owning 路径后续优化顺序
+
+执行纪律：每项只改一个变量，固定 CPU、交替实现顺序并报告 median/MAD/min/max；任何一侧
+MAD 超过 10% 或出现离群点时保留原始样本，不用单次最好值下结论。SpMV、reusable CSR、
+reusable builder、general builder 和 sparse accumulator 是领先回归护栏，不在 owning 实验中改动。
+
+### I. Owning transpose
+
+- [x] 公平性审计：确认 Zig benchmark allocator 的实际类型，并分别测 `smp_allocator` 与和
+  C++ malloc 同源的 `c_allocator`；不得把 allocator 差异误判为 transpose 算法差异。
+- [x] 将 owning 时间拆为 allocation/free、histogram+prefix、scatter、wide/compact restore；
+  对 Zig/C++ 同语义阶段执行 `perf stat`，必要时反汇编稳定 noinline leaf。
+- [ ] 比较单 compact starts、双 starts、caller-required wide starts 三种输出契约；仅在不破坏
+  现有公共 ownership 和 hot-kernel compact 消费者时修改默认实现。
+- [ ] 合入后重跑 transpose checksum/hash、w32/w64、领先 kernel 11 轮回归及 full gate。
+
+### J. Owning builder
+
+- [x] 对 canonical/sorted owning build 拆分 output allocation、starts count/prefix、wide/compact
+  conversion、rows/values copy；与 C++ 输入 constness、输出 offset 宽度和 allocator 对齐。
+- [x] 优先复用已领先的 `CscBuildBuffers` 逻辑；不得为优化 owning 路径拖慢 reusable/general build。
+- [ ] 合入后执行同一组领先 kernel 与真实数据回归，异常值和失败实验全部记录。
+
+### K. 公平 RSS
+
+- [x] 新增等生命周期 runner：两侧只保留同一种 authoritative CSC，
+  分别报告 raw requested bytes、独立进程 current RSS 与 peak RSS。
+- [x] 三份 SuiteSparse 使用交替进程顺序；acceptance workflow RSS 继续单列，不再混作 CSC 对比。
+
+RSS probe 初次尝试发现 C++ 流式 parser 与 Zig 整文件 parser 不公平；第二次让 C++
+`istringstream` 持有额外文本副本，又人为放大 C++ peak。这两组失败数据均未用于结论。最终
+C++23 span stream 与 Zig 都只保留一份完整文本，7 轮每组波动不超过 164 KiB。thermal/cage/web
+current RSS medians 为 Zig 9.46/26.70/48.93 MiB、HiGHS 12.05/28.93/44.52 MiB；build peak 为
+Zig 32.19/131.88/187.34 MiB、HiGHS 39.22/149.53/206.56 MiB。

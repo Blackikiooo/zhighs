@@ -132,32 +132,47 @@ were repeatable across the seven samples. The current conclusion is therefore
 that zhighs SpMV is at least in the same class as HiGHS and usually faster on
 this corpus, but it is not uniformly faster for every sparsity distribution.
 
-### Stable synthetic ownership and construction results
+### Corrected fair-allocator synthetic results
+
+The first synthetic rerun used Zig `smp_allocator` while C++ `std::vector`
+used libc malloc. That was not allocator-fair for repeated multi-megabyte
+owning operations: smp returned large mappings to the OS on every iteration,
+while malloc retained and reused them. The corrected runner uses Zig
+`c_allocator` only for timed owning allocations; fixtures and allocation-free
+kernels are unchanged.
 
 | kernel (50k dimension, 149,998 nnz) | zhighs | C++/HiGHS harness | result |
 | --- | ---: | ---: | ---: |
-| CSR dense SpMV | 89.990 us | 113.018 us | zhighs 20.4% faster |
-| apply full row/column scale | 107.836 us | 118.864 us | zhighs 9.3% faster |
-| CSC -> CSR reusable | 272.527 us | 334.395 us | zhighs 18.5% faster |
-| CSC -> CSR owning | 1,365.465 us | 1,396.231 us | zhighs 2.2% faster |
-| transpose reusable/into | 291.938 us | 288.059 us | parity; zhighs 1.3% slower |
-| transpose owning | 920.299 us | 337.142 us | zhighs 2.73x slower |
-| builder canonical owning | 745.046 us | 256.373 us | zhighs 2.91x slower |
-| builder reusable | 277.446 us | 310.629 us | zhighs 10.7% faster |
-| builder general/sort | 3,009.064 us | 3,433.172 us | zhighs 12.4% faster |
-| sparse accumulate | 81.419 us | 243.653 us | zhighs 2.99x faster |
+| CSC dense SpMV | 114.519 us | 126.147 us | zhighs 9.2% faster |
+| CSR dense SpMV | 89.136 us | 112.666 us | zhighs 20.9% faster |
+| apply full row/column scale | 108.555 us | 119.462 us | zhighs 9.1% faster |
+| CSC -> CSR reusable | 271.822 us | 339.225 us | zhighs 19.9% faster |
+| CSC -> CSR owning | 1,435.375 us | 1,363.925 us | zhighs 5.2% slower |
+| transpose reusable/into | 297.416 us | 296.905 us | parity; zhighs 0.2% slower |
+| transpose owning | 360.382 us | 339.685 us | zhighs 6.1% slower |
+| builder sorted owning | 646.968 us | 1,258.392 us | zhighs 48.6% faster |
+| builder prepopulated owning | 414.441 us | 691.635 us | zhighs 40.1% faster |
+| builder canonical owning | 231.101 us | 262.858 us | zhighs 12.1% faster |
+| builder reusable | 278.216 us | 309.656 us | zhighs 10.2% faster |
+| builder general/sort | 1,591.723 us | 3,437.349 us | zhighs 53.7% faster |
+| sparse accumulate | 80.115 us | 241.703 us | zhighs 3.02x faster |
 
-The owning-transpose result improved about 7.7% versus the immediately prior
-Zig implementation (compact output reused as cursor), but remains the largest
-HiGHS gap. The near-equal reusable transpose shows that counting/prefix/scatter
-is not the cause. The owning Zig result constructs and retains both `usize` and
-`HUInt` starts, whereas the C++ result stores one `HighsInt` stream. The same
-representation and output-construction cost is visible in canonical builder;
-the reusable builder is already faster. These are the next justified perf and
-assembly targets. `csc_ax_dense`, `csc_atx_dense`, `alpha_ax_plus_y`, and
-`product_quad` had 13-45% median absolute deviation in at least one side during
-this synthetic run, so their single-run rankings are not used for a verdict;
-the real-data SpMV table is the authoritative product comparison.
+The same Zig transpose code measured 905 us with smp, 357 us with c allocator,
+and 340 us in C++. `perf stat` retired about 403M instructions for both Zig
+allocator variants, but smp incurred about 61,867 page faults versus 3,853 for
+c and 4,038 for C++. With allocator policy equalized, Zig and C++ transpose
+also had essentially equal instructions and user cycles; the remaining 6.1%
+wall-time difference does not justify changing the already-parity scatter
+kernel. Canonical builder similarly changed from a false 2.91x deficit to a
+12.1% lead; perf measured about 1.19B Zig versus 1.86B C++ instructions.
+
+All corrected medians had MAD below 4.4%. Explicit high-side anomalies remain
+in the raw report: C++ owning transpose reached 436 us versus its 340 us median,
+and Zig sorted builder reached 808 us versus its 647 us median. They were not
+discarded; median/MAD conclusions remain unchanged. `alpha_ax_plus_y` is the
+remaining stable compute deficit at 23.4%; CSR transpose-product is 3.8% slower
+and `product_quad` 2.4% slower. These are separate compute-kernel tasks and were
+not modified during owning-allocation work.
 
 ### Fair memory interpretation
 
@@ -177,3 +192,23 @@ Thus the earlier whole-process impression that zhighs was universally crushed
 on memory was not a fair CSC-only comparison. A real and material deficit does
 remain for matrices with many columns: the duplicate wide/compact offset
 streams cost 7.63 MiB on webbase-1M and directly affect owning construction.
+
+An RSS-only probe then ran each dataset in a fresh process, retained only the
+canonical CSC, and used libc allocation on both sides. Both parsers retained
+the complete Matrix Market text during construction; the C++ RSS probe used a
+non-copying span stream so the input text existed exactly once. Seven runs per
+dataset were invariant or varied by at most 164 KiB; there were no material
+outliers.
+
+| dataset | current RSS zhighs / HiGHS | peak build RSS zhighs / HiGHS |
+| --- | ---: | ---: |
+| thermal1 | 9.46 / 12.05 MiB | 32.19 / 39.22 MiB |
+| cage12 | 26.70 / 28.93 MiB | 131.88 / 149.53 MiB |
+| webbase-1M | 48.93 / 44.52 MiB | 187.34 / 206.56 MiB |
+
+Current RSS is page-residency and allocator dependent, so requested bytes are
+the authoritative final-storage comparison. Peak construction RSS is useful:
+zhighs was 9-18% lower because its builder merges canonical entries in place,
+while the C++ reference held both input and canonical triplet vectors. This
+does not erase the final dual-offset overhead on webbase; it separates that
+19.4% storage cost from transient construction memory.

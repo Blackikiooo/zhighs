@@ -104,6 +104,9 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
 /// offsets for downstream kernels. The compact output stream is reused as the
 /// cursor during construction and restored before return, so no dead scratch
 /// is retained and no separate cursor allocation is required.
+/// For repeated multi-megabyte owning transforms, use a retaining caller
+/// allocator (`c_allocator` in libc-linked builds or a session allocator);
+/// allocation policy dominates latency when pages are returned on every free.
 pub fn transposeLeanAssumeValidCompact(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,

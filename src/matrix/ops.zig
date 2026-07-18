@@ -150,13 +150,24 @@ pub fn addProduct(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) c
     addProductAssumeValid(matrix, alpha, x, y);
 }
 
-pub fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
+pub noinline fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
-    for (0..matrix.num_cols) |col| {
+    if (matrix.compact_col_starts) |starts|
+        return addProductKernel(foundation.HUInt, matrix.num_cols, starts, matrix.row_indices, matrix.values, alpha, x, y);
+    return addProductKernel(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, alpha, x, y);
+}
+
+/// Stable leaf and one-time offset dispatch mirror the dense CSC product. This
+/// prevents a large solver caller from spilling all array bases around the
+/// dependent scatter update.
+noinline fn addProductKernel(comptime Offset: type, num_cols: usize, starts: []const Offset, rows: []const foundation.RowId, values: []const f64, alpha: f64, x: []const f64, y: []f64) void {
+    for (0..num_cols) |col| {
         const multiplier = alpha * x[col];
-        for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
-            const row = matrix.row_indices[position].toUsize();
-            y[row] += multiplier * matrix.values[position];
+        const begin: usize = @intCast(starts[col]);
+        const end: usize = @intCast(starts[col + 1]);
+        for (begin..end) |position| {
+            const row = rows[position].toUsize();
+            y[row] = @mulAdd(f64, values[position], multiplier, y[row]);
         }
     }
 }

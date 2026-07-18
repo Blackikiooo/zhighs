@@ -97,6 +97,22 @@ fn peakRssKb() usize {
     return if (value > 0) @intCast(value) else 1;
 }
 
+fn currentRssKb(io: std.Io) !usize {
+    const file = try std.Io.Dir.cwd().openFile(io, "/proc/self/status", .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var content: [4096]u8 = undefined;
+    const length = try reader.interface.readSliceShort(&content);
+    var lines = std.mem.tokenizeScalar(u8, content[0..length], '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "VmRSS:")) continue;
+        var fields = std.mem.tokenizeAny(u8, line[6..], " \t");
+        return try std.fmt.parseInt(usize, fields.next() orelse return error.InvalidProcStatus, 10);
+    }
+    return error.InvalidProcStatus;
+}
+
 fn writeLine(io: std.Io, file: std.Io.File, allocator: std.mem.Allocator, comptime format: []const u8, values: anytype) !void {
     const line = try std.fmt.allocPrint(allocator, format, values);
     defer allocator.free(line);
@@ -207,8 +223,24 @@ fn benchmarkOne(io: std.Io, allocator: std.mem.Allocator, dataset_dir: []const u
     });
 }
 
+fn rssOne(io: std.Io, allocator: std.mem.Allocator, dataset_dir: []const u8, name: []const u8, report: std.Io.File) !void {
+    const path = try std.fs.path.join(allocator, &.{ dataset_dir, name });
+    defer allocator.free(path);
+    var parsed = try parseMatrixMarket(io, allocator, path);
+    defer parsed.matrix.deinit(allocator);
+    try parsed.matrix.validate();
+    const requested = if (parsed.matrix.storage) |storage| storage.len else parsed.matrix.col_starts.len * @sizeOf(usize) +
+        parsed.matrix.row_indices.len * @sizeOf(zhighs.RowId) +
+        parsed.matrix.values.len * @sizeOf(f64);
+    try writeLine(io, report, allocator, "{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        name,      parsed.matrix.num_rows, parsed.matrix.num_cols, parsed.matrix.nnz(),
+        requested, try currentRssKb(io),   peakRssKb(),
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    const rss_only = init.environ_map.get("ZHIGHS_DATASET_RSS_ONLY") != null;
+    const allocator = if (rss_only) std.heap.c_allocator else std.heap.smp_allocator;
     const io = init.io;
     var args = std.process.Args.iterate(init.minimal.args);
     _ = args.next();
@@ -218,12 +250,18 @@ pub fn main(init: std.process.Init) !void {
 
     const report = try std.Io.Dir.cwd().createFile(io, report_path, .{});
     defer report.close(io);
-    try report.writeStreamingAll(io, "dataset\trows\tcols\tnnz\telapsed_ms\tpeak_rss_kb\tstatus\n");
+    if (rss_only)
+        try report.writeStreamingAll(io, "dataset\trows\tcols\tnnz\trequested_bytes\tcurrent_rss_kb\tpeak_rss_kb\n")
+    else
+        try report.writeStreamingAll(io, "dataset\trows\tcols\tnnz\telapsed_ms\tpeak_rss_kb\tstatus\n");
     const details_path = try std.fmt.allocPrint(allocator, "{s}.details.tsv", .{report_path});
     defer allocator.free(details_path);
     const details = try std.Io.Dir.cwd().createFile(io, details_path, .{});
     defer details.close(io);
-    try details.writeStreamingAll(io, "dataset\trows\tcols\tnnz\tparse_build_ms\tcsc_spmv_ms\tcsr_spmv_ms\tcsc_to_csr_ms\ttranspose_ms\tpeak_rss_kb\n");
+    if (!rss_only)
+        try details.writeStreamingAll(io, "dataset\trows\tcols\tnnz\tparse_build_ms\tcsc_spmv_ms\tcsr_spmv_ms\tcsc_to_csr_ms\ttranspose_ms\tpeak_rss_kb\n");
+
+    const filter = init.environ_map.get("ZHIGHS_DATASET_FILTER");
 
     var dir = try std.Io.Dir.cwd().openDir(io, dataset_dir, .{ .iterate = true });
     defer dir.close(io);
@@ -247,7 +285,11 @@ pub fn main(init: std.process.Init) !void {
     }.lessThan);
     if (datasets.items.len < 3) return error.InsufficientDatasets;
     for (datasets.items) |dataset| {
+        if (filter) |selected| if (!std.mem.eql(u8, selected, dataset.name)) continue;
         std.debug.print("benchmarking {s}\n", .{dataset.name});
-        try benchmarkOne(io, allocator, dataset_dir, dataset.name, report, details);
+        if (rss_only)
+            try rssOne(io, allocator, dataset_dir, dataset.name, report)
+        else
+            try benchmarkOne(io, allocator, dataset_dir, dataset.name, report, details);
     }
 }
