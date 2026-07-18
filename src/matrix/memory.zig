@@ -19,13 +19,8 @@ fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) v
     // Pick vector width from the target SIMD ISA.
     // VW is chosen so that VW × @sizeOf(T) fills a single vector register.
     const VW = nativeVectorLanes(T);
-    // Unroll factor tuned by microarchitecture.
-    // Zen-family benefit from deep unrolling (larger store buffers, write combining);
-    // Intel cores prefer shallower unrolling to avoid uop-cache pressure.
-    const UN = comptime if (@import("builtin").cpu.arch == .x86_64)
-        if (std.mem.indexOf(u8, @import("builtin").cpu.model.name, "zen")) |_| 4 else 2
-    else
-        2;
+    // Unroll factor tuned by microarchitecture — see target_policy.unrollFactor().
+    const UN = target.unrollFactor();
 
     const Vec = @Vector(VW, T);
     const align_mask = @alignOf(Vec) - 1;

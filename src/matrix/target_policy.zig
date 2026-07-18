@@ -36,6 +36,24 @@ pub fn vectorLanes(comptime T: type) comptime_int {
     return 16 / @sizeOf(T);
 }
 
+/// Tuned unroll factor for vector store loops (e.g. memory clear kernels).
+///
+/// Larger values benefit cores with deep store buffers / write combining;
+/// smaller values avoid uop-cache pressure on narrower pipelines.
+/// Current policy:
+///   x86/x86_64 — Zen-family → 4, Intel-family → 2
+///   AArch64    — Apple Silicon → 4, server/device cores → 3
+///   PowerPC64  — 3
+///   others     — 2 (conservative default)
+pub fn unrollFactor() comptime_int {
+    return switch (builtin.cpu.arch) {
+        .x86, .x86_64 => if (std.mem.find(u8, builtin.cpu.model.name, "zen")) |_| 4 else 2,
+        .aarch64 => if (std.mem.find(u8, builtin.cpu.model.name, "apple")) |_| 4 else 3,
+        .powerpc64, .powerpc64le => 3,
+        else => 2,
+    };
+}
+
 test "target policy exposes power-of-two cache and vector widths" {
     try std.testing.expect(std.math.isPowerOfTwo(cache_line_bytes));
     try std.testing.expect(std.math.isPowerOfTwo(vectorLanes(f64)));
