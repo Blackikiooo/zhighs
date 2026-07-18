@@ -1,19 +1,13 @@
 //! Small memory kernels shared by sparse matrix hot paths.
 
 const std = @import("std");
+const target = @import("target_policy.zig");
 
 /// Native SIMD lane count for a scalar type on the selected build target.
 /// Callers still need an unaligned scalar tail because borrowed matrix slices
 /// are not required to begin at a vector boundary.
 pub fn nativeVectorLanes(comptime T: type) comptime_int {
-    if (@import("builtin").cpu.arch == .x86_64) {
-        const features = @import("builtin").cpu.features;
-        if (std.Target.x86.featureSetHas(features, .avx512f)) return 64 / @sizeOf(T);
-        if (std.Target.x86.featureSetHas(features, .avx2)) return 32 / @sizeOf(T);
-        return 16 / @sizeOf(T);
-    }
-    // AArch64 NEON and the conservative generic vector width are 128 bits.
-    return 16 / @sizeOf(T);
+    return target.vectorLanes(T);
 }
 
 /// Generic vectorized clear for any integer or float type.

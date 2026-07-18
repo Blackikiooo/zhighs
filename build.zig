@@ -166,6 +166,23 @@ pub fn build(b: *std.Build) void {
     const simplex_session_bench_step = b.step("bench-simplex", "Run cold and warm simplex-session benchmarks");
     simplex_session_bench_step.dependOn(&run_simplex_session_bench.step);
 
+    const sparse_basis_bench = b.addExecutable(.{
+        .name = "sparse-basis-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/sparse_basis_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_sparse_basis_bench = b.addRunArtifact(sparse_basis_bench);
+    if (b.args) |args| run_sparse_basis_bench.addArgs(args);
+    const sparse_basis_bench_step = b.step("bench-sparse-basis", "Benchmark retaining sparse basis assembly");
+    sparse_basis_bench_step.dependOn(&run_sparse_basis_bench.step);
+    const install_sparse_basis_bench = b.addInstallArtifact(sparse_basis_bench, .{});
+    const build_sparse_basis_bench_step = b.step("build-bench-sparse-basis", "Build sparse basis benchmark for perf/disassembly");
+    build_sparse_basis_bench_step.dependOn(&install_sparse_basis_bench.step);
+
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);

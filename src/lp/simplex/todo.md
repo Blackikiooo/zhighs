@@ -55,7 +55,11 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 
 ## Priority 3: sparse factorization
 
-- Sparse basis assembly and sparse LU with Markowitz pivoting.
+- [x] DOD compact sparse-basis assembly with retaining SoA buffers,
+  compile-time target prefetch policy, w32/w64 tests, and a standalone
+  perf/disassembly benchmark. Design and fair HiGHS comparison rules are in
+  `docs/sparse-basis-design.md`.
+- Reusable symbolic workspace and sparse LU with Markowitz pivoting.
 - Forrest--Tomlin updates and adaptive reinversion.
 - Hyper-sparse FTRAN/BTRAN.
 - Retain dense LU only as a small-basis fallback and correctness oracle.
