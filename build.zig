@@ -231,6 +231,21 @@ pub fn build(b: *std.Build) void {
     const basis_file_bench_step = b.step("bench-basis-file", "Validate and benchmark an exported sparse basis");
     basis_file_bench_step.dependOn(&run_basis_file_bench.step);
 
+    const suitesparse_basis_bench = b.addExecutable(.{
+        .name = "suitesparse-basis-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/suitesparse_basis_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_suitesparse_basis_bench = b.addRunArtifact(suitesparse_basis_bench);
+    if (b.args) |args| run_suitesparse_basis_bench.addArgs(args);
+    const suitesparse_basis_bench_step = b.step("bench-suitesparse-basis", "Derive and validate a deterministic SuiteSparse basis");
+    suitesparse_basis_bench_step.dependOn(&run_suitesparse_basis_bench.step);
+
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);
