@@ -21,6 +21,7 @@ pub const SparseLU = struct {
     u_nonzeros: usize = 0,
     inserted_fill: usize = 0,
     active_count: usize = 0,
+    hyper_views_ready: bool = false,
 
     pivot_rows: []u32 = &.{},
     pivot_columns: []u32 = &.{},
@@ -104,7 +105,7 @@ pub const SparseLU = struct {
             self.u_starts[pivot_index + 1] = self.u_nonzeros;
             self.inserted_fill += pivot.inserted_fill;
         }
-        self.buildHyperViews();
+        self.hyper_views_ready = false;
     }
 
     /// Solve `B x = rhs` in place using the published row/column permutations.
@@ -165,6 +166,7 @@ pub const SparseLU = struct {
     pub fn solveHyperSparse(self: *SparseLU, rhs: []f64, input_indices: []const u32, output_indices: []u32) SparseLuError!usize {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
+        self.ensureHyperViews();
         self.clearActive();
         for (input_indices) |row| {
             if (row >= n) return error.DimensionMismatch;
@@ -203,6 +205,7 @@ pub const SparseLU = struct {
     pub fn solveTransposeHyperSparse(self: *SparseLU, rhs: []f64, input_indices: []const u32, output_indices: []u32) SparseLuError!usize {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
+        self.ensureHyperViews();
         self.clearActive();
         for (input_indices) |column| {
             if (column >= n) return error.DimensionMismatch;
@@ -312,6 +315,11 @@ pub const SparseLU = struct {
         };
         @memset(self.marked[0..n], false);
         self.active_count = 0;
+        self.hyper_views_ready = true;
+    }
+
+    inline fn ensureHyperViews(self: *SparseLU) void {
+        if (!self.hyper_views_ready) self.buildHyperViews();
     }
 
     fn clearActive(self: *SparseLU) void {
