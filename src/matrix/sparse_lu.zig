@@ -357,7 +357,7 @@ pub const SparseLU = struct {
     fn solveTransposeFt(self: *SparseLU, rhs: []f64) SparseLuError!void {
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
-        try self.ft.solveUpperTranspose(rhs, false);
+        try self.ft.solveUpperTranspose(rhs);
         for (0..n) |position| self.work[position] = rhs[self.pivot_columns[position]];
         var k = n;
         while (k > 0) {

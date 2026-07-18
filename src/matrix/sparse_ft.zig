@@ -55,7 +55,6 @@ pub const SparseForrestTomlin = struct {
 
     work: []f64 = &.{},
     captured_aq: []f64 = &.{},
-    captured_ep: []f64 = &.{},
     aq_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) SparseForrestTomlin {
@@ -82,7 +81,6 @@ pub const SparseForrestTomlin = struct {
         self.allocator.free(self.correction_values);
         self.allocator.free(self.work);
         self.allocator.free(self.captured_aq);
-        self.allocator.free(self.captured_ep);
         self.* = .{ .allocator = self.allocator };
     }
 
@@ -168,7 +166,6 @@ pub const SparseForrestTomlin = struct {
         total += std.mem.sliceAsBytes(self.correction_values).len;
         total += std.mem.sliceAsBytes(self.work).len;
         total += std.mem.sliceAsBytes(self.captured_aq).len;
-        total += std.mem.sliceAsBytes(self.captured_ep).len;
         return total;
     }
 
@@ -207,9 +204,10 @@ pub const SparseForrestTomlin = struct {
         }
     }
 
-    /// U^-T followed by the reverse FT row-correction product. Optionally
-    /// retain the partial BTRAN vector consumed by the next FT update.
-    pub fn solveUpperTranspose(self: *SparseForrestTomlin, values: []f64, capture: bool) FtError!void {
+    /// U^-T followed by the reverse FT row-correction product. `captureEp`
+    /// runs this directly in retained work storage so the next update can
+    /// consume the partial BTRAN without another dense copy.
+    pub fn solveUpperTranspose(self: *SparseForrestTomlin, values: []f64) FtError!void {
         if (values.len != self.dimension) return error.DimensionMismatch;
         for (0..self.logical_count) |logical| {
             const pivot = self.pivot_ids[logical];
@@ -229,14 +227,13 @@ pub const SparseForrestTomlin = struct {
             for (self.correction_starts[correction]..self.correction_starts[correction + 1]) |entry|
                 values[self.correction_indices[entry]] -= multiplier * self.correction_values[entry];
         }
-        if (capture) @memcpy(self.captured_ep[0..self.dimension], values);
     }
 
     pub fn captureEp(self: *SparseForrestTomlin, leaving_id: u32) FtError!void {
         if (leaving_id >= self.dimension) return error.DimensionMismatch;
         @memset(self.work[0..self.dimension], 0.0);
         self.work[leaving_id] = 1.0;
-        try self.solveUpperTranspose(self.work[0..self.dimension], true);
+        try self.solveUpperTranspose(self.work[0..self.dimension]);
     }
 
     /// Delete the pivotal U row/column, append the captured FTRAN spike, and
@@ -283,7 +280,7 @@ pub const SparseForrestTomlin = struct {
 
         self.correction_pivots[self.correction_count] = leaving_id;
         var correction_output = self.correction_starts[self.correction_count];
-        for (self.captured_ep[0..self.dimension], 0..) |value, index| {
+        for (self.work[0..self.dimension], 0..) |value, index| {
             if (index == leaving_id or @abs(value) <= zero_tolerance) continue;
             self.correction_indices[correction_output] = @intCast(index);
             self.correction_values[correction_output] = -value * old_pivot;
@@ -342,7 +339,6 @@ pub const SparseForrestTomlin = struct {
         try self.resizeRetained(&self.row_head, capacity);
         try self.resizeRetained(&self.work, capacity);
         try self.resizeRetained(&self.captured_aq, capacity);
-        try self.resizeRetained(&self.captured_ep, capacity);
     }
     fn ensureLogical(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.logical_capacity) return;

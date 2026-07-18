@@ -201,6 +201,24 @@ pub fn build(b: *std.Build) void {
     const build_sparse_lu_bench_step = b.step("build-bench-sparse-lu", "Build sparse LU benchmark for perf/disassembly");
     build_sparse_lu_bench_step.dependOn(&install_sparse_lu_bench.step);
 
+    const sparse_ft_bench = b.addExecutable(.{
+        .name = "sparse-ft-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/sparse_ft_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_sparse_ft_bench = b.addRunArtifact(sparse_ft_bench);
+    if (b.args) |args| run_sparse_ft_bench.addArgs(args);
+    const sparse_ft_bench_step = b.step("bench-sparse-ft", "Benchmark Forrest-Tomlin updates and updated solves");
+    sparse_ft_bench_step.dependOn(&run_sparse_ft_bench.step);
+    const install_sparse_ft_bench = b.addInstallArtifact(sparse_ft_bench, .{});
+    const build_sparse_ft_bench_step = b.step("build-bench-sparse-ft", "Build Forrest-Tomlin benchmark for perf/disassembly");
+    build_sparse_ft_bench_step.dependOn(&install_sparse_ft_bench.step);
+
     const sparse_lu_corpus = b.addExecutable(.{
         .name = "sparse-lu-corpus",
         .root_module = b.createModule(.{
