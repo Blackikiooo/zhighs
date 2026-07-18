@@ -34,6 +34,10 @@ pub const SparseLU = struct {
     kernel_nonzeros: usize = 0,
     kernel_maximum_row_count: u32 = 0,
     kernel_maximum_column_count: u32 = 0,
+    /// Pivots accepted from the beginning of a validated previous trace.
+    trace_replayed_pivots: usize = 0,
+    /// Pivots reordered after the first trace validation failure.
+    trace_repaired_pivots: usize = 0,
 
     pivot_rows: []u32 = &.{},
     pivot_columns: []u32 = &.{},
@@ -78,13 +82,13 @@ pub const SparseLU = struct {
     }
 
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
-        return self.factorizeImpl(basis, true, null);
+        return self.factorizeImpl(basis, true, null, false);
     }
 
     /// Zero-copy trusted reinversion entry for canonical engine-owned basis
     /// CSC. Workspace and factor capacities are retained across calls.
     pub fn factorizeAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
-        return self.factorizeImpl(basis, false, null);
+        return self.factorizeImpl(basis, false, null, false);
     }
 
     /// Replay a previously recorded row/column pivot sequence. This is mainly
@@ -92,10 +96,19 @@ pub const SparseLU = struct {
     /// ordering; normal reinversion should use threshold Markowitz selection.
     pub fn factorizeWithTraceAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
         if (trace.rows.len != basis.dimension or trace.columns.len != basis.dimension) return error.DimensionMismatch;
-        return self.factorizeImpl(basis, false, trace);
+        return self.factorizeImpl(basis, false, trace, false);
     }
 
-    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace) SparseLuError!void {
+    /// Reuse the valid prefix of a pivot trace from a neighbouring basis.
+    /// Once a recorded pivot is missing or fails the numerical threshold, the
+    /// remaining suffix is repaired with the configured ordering backend.
+    /// This path retains all workspaces and performs no warm allocations.
+    pub fn factorizeWithTraceRepairAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
+        if (trace.rows.len != basis.dimension or trace.columns.len != basis.dimension) return error.DimensionMismatch;
+        return self.factorizeImpl(basis, false, trace, true);
+    }
+
+    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace, repair_trace: bool) SparseLuError!void {
         const n = basis.dimension;
         try self.ensureDimension(n);
         try self.ensureFactorCapacity(@max(basis.nnz(), n));
@@ -108,6 +121,8 @@ pub const SparseLU = struct {
         self.kernel_nonzeros = basis.nnz();
         self.kernel_maximum_row_count = 0;
         self.kernel_maximum_column_count = 0;
+        self.trace_replayed_pivots = 0;
+        self.trace_repaired_pivots = 0;
         self.selected_ordering = switch (self.ordering_strategy) {
             .automatic => .dod_markowitz,
             else => |forced| forced,
@@ -138,7 +153,7 @@ pub const SparseLU = struct {
             self.selected_ordering = self.selectOrdering(shape);
         } else {
             if (validate) try self.kernel.load(basis) else try self.kernel.loadAssumeValid(basis);
-            if (trace == null) {
+            if (trace == null or repair_trace) {
                 const shape = self.kernel.shape();
                 self.kernel_dimension = shape.dimension;
                 self.kernel_nonzeros = shape.nonzeros;
@@ -148,17 +163,34 @@ pub const SparseLU = struct {
             }
         }
 
+        var repairing = false;
         for (first_kernel_pivot..n) |pivot_index| {
-            const choice = if (trace) |recorded|
-                self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
-            else switch (self.selected_ordering) {
-                // The backend split is deliberately established before
-                // the HiGHS-style search lands, so dispatch/API changes
-                // can be verified independently from ordering changes.
-                .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
-                .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
-                .automatic => unreachable,
-            };
+            var choice: sparse_kernel.PivotChoice = undefined;
+            if (trace) |recorded| {
+                if (!repairing) {
+                    const recorded_choice = if (repair_trace)
+                        self.kernel.chooseRecordedPivotThreshold(recorded.rows[pivot_index], recorded.columns[pivot_index], self.pivot_threshold)
+                    else
+                        self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]);
+                    if (recorded_choice) |accepted| {
+                        choice = accepted;
+                        self.trace_replayed_pivots += 1;
+                    } else if (repair_trace) {
+                        repairing = true;
+                    } else return error.Singular;
+                }
+            }
+            if (trace == null or repairing) {
+                choice = switch (self.selected_ordering) {
+                    // The backend split is deliberately established before
+                    // the HiGHS-style search lands, so dispatch/API changes
+                    // can be verified independently from ordering changes.
+                    .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                    .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
+                    .automatic => unreachable,
+                };
+                if (repairing) self.trace_repaired_pivots += 1;
+            }
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);
             try self.ensureFactorCapacity(@max(self.l_nonzeros + pivot.l_rows.len, self.u_nonzeros + pivot.u_columns.len));
             self.pivot_rows[pivot_index] = pivot.pivot_row;
@@ -512,6 +544,68 @@ test "packed sparse LU solves FTRAN and BTRAN with fill" {
             product += values[entry] * transpose_rhs[rows[entry].toUsize()];
         try std.testing.expectApproxEqAbs(original_transpose_rhs[column], product, 1e-11);
     }
+}
+
+test "validated trace replays prefix and repairs invalid suffix" {
+    const foundation = @import("foundation");
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 4,
+        .starts = &[_]foundation.HUInt{ 0, 2, 4, 6, 8 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(2),
+            foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(3),
+            foundation.RowId.fromUsizeAssumeValid(2), foundation.RowId.fromUsizeAssumeValid(3),
+        },
+        .values = &[_]f64{ 4, 1, 1, 3, 2, 5, 1, 4 },
+    };
+    var lu = SparseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    try lu.factorize(basis);
+    var trace_rows: [4]u32 = undefined;
+    var trace_columns: [4]u32 = undefined;
+    @memcpy(&trace_rows, lu.pivot_rows[0..4]);
+    @memcpy(&trace_columns, lu.pivot_columns[0..4]);
+
+    // Reusing the first pivot's now-retired row makes the second recorded
+    // pivot invalid. The valid prefix remains useful and only the suffix is
+    // reordered.
+    trace_rows[1] = trace_rows[0];
+    trace_columns[1] = trace_columns[0];
+    try lu.factorizeWithTraceRepairAssumeValid(basis, .{ .rows = &trace_rows, .columns = &trace_columns });
+    try std.testing.expectEqual(@as(usize, 1), lu.trace_replayed_pivots);
+    try std.testing.expectEqual(@as(usize, 3), lu.trace_repaired_pivots);
+
+    var rhs = [_]f64{ 3, -2, 5, 7 };
+    const original = rhs;
+    try lu.solve(&rhs);
+    for (0..4) |row| {
+        var product: f64 = 0.0;
+        for (0..4) |column| for (@as(usize, basis.starts[column])..@as(usize, basis.starts[column + 1])) |entry|
+            if (basis.rows[entry].toUsize() == row) {
+                product += basis.values[entry] * rhs[column];
+            };
+        try std.testing.expectApproxEqAbs(original[row], product, 1e-11);
+    }
+}
+
+test "validated trace rejects a pivot below the current column threshold" {
+    const foundation = @import("foundation");
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 2,
+        .starts = &[_]foundation.HUInt{ 0, 2, 4 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+        },
+        .values = &[_]f64{ 1e-3, 1, 2, 3 },
+    };
+    var kernel = sparse_kernel.MutableSparseKernel.init(std.testing.allocator);
+    defer kernel.deinit();
+    try kernel.load(basis);
+    try std.testing.expect(kernel.chooseRecordedPivot(0, 0) != null);
+    try std.testing.expect(kernel.chooseRecordedPivotThreshold(0, 0, 0.1) == null);
+    try std.testing.expect(kernel.chooseRecordedPivotThreshold(1, 0, 0.1) != null);
 }
 
 test "sparse LU requested bytes account for retained buffers" {

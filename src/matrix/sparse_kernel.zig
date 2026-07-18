@@ -380,6 +380,18 @@ pub const MutableSparseKernel = struct {
         return .{ .row = row, .column = column, .value = value, .merit = 0 };
     }
 
+    /// Resolve a recorded pivot and verify the same numerical threshold used
+    /// by a fresh Markowitz search. A trace from a neighbouring simplex basis
+    /// is reusable only while its pivot remains large enough relative to the
+    /// current active column; existence alone is not a stability guarantee.
+    pub fn chooseRecordedPivotThreshold(self: *MutableSparseKernel, row: u32, column: u32, threshold: f64) ?PivotChoice {
+        if (!std.math.isFinite(threshold) or threshold <= 0.0 or threshold > 1.0) return null;
+        const choice = self.chooseRecordedPivot(row, column) orelse return null;
+        const maximum = self.columnMaximum(column);
+        if (maximum == 0.0 or !std.math.isFinite(maximum) or @abs(choice.value) < threshold * maximum) return null;
+        return choice;
+    }
+
     fn singletonMember(self: *const MutableSparseKernel, first: u32, next: []const u32) ?u32 {
         if (first == none) return null;
         if (self.dimension >= 128) return first;
