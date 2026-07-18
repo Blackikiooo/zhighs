@@ -37,6 +37,7 @@ const target_policy = @import("target_policy.zig");
 const sparse_symbolic = @import("sparse_symbolic.zig");
 const sparse_kernel = @import("sparse_kernel.zig");
 const sparse_lu = @import("sparse_lu.zig");
+const sparse_ft = @import("sparse_ft.zig");
 
 pub const DenseLU = dense_lu.DenseLU;
 pub const DenseLuError = dense_lu.DenseLuError;
@@ -54,6 +55,8 @@ pub const SparsePivotView = sparse_kernel.PivotView;
 pub const MutableSparseKernel = sparse_kernel.MutableSparseKernel;
 pub const SparseLuError = sparse_lu.SparseLuError;
 pub const SparseLU = sparse_lu.SparseLU;
+pub const SparseForrestTomlin = sparse_ft.SparseForrestTomlin;
+pub const MutableUpperView = sparse_ft.MutableUpperView;
 
 pub const SparseVectorError = sparse_vector.SparseVectorError;
 pub const SparseVectorView = sparse_vector.SparseVectorView;

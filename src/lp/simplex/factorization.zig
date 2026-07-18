@@ -17,6 +17,7 @@ pub const FactorizationStats = struct {
     ftran_calls: usize = 0,
     btran_calls: usize = 0,
     eta_updates: usize = 0,
+    ft_updates: usize = 0,
     maximum_update_growth: f64 = 1.0,
     update_limit_reinversions: usize = 0,
     update_growth_reinversions: usize = 0,
@@ -38,6 +39,9 @@ pub const Factorization = struct {
     sparse_basis: matrix.SparseBasisBuffers,
     eta_values: []f64 = &.{},
     eta_rows: []u32 = &.{},
+    identity_basic: []u32 = &.{},
+    identity_scale: []f64 = &.{},
+    identity_sign: []f64 = &.{},
     eta_count: usize = 0,
     eta_capacity: usize = 64,
     dimension: usize = 0,
@@ -61,6 +65,9 @@ pub const Factorization = struct {
         self.sparse_basis.deinit();
         self.allocator.free(self.eta_values);
         self.allocator.free(self.eta_rows);
+        self.allocator.free(self.identity_basic);
+        self.allocator.free(self.identity_scale);
+        self.allocator.free(self.identity_sign);
     }
     pub fn factorize(self: *Factorization, n: usize, matrix_data: []const f64) FactorizationError!void {
         self.dense_lu.factorize(n, matrix_data) catch |err| return switch (err) {
@@ -90,12 +97,12 @@ pub const Factorization = struct {
             error.NonFiniteValue => error.NumericalFailure,
         };
         self.sparse_lu.factorizeAssumeValid(basis) catch |err| return switch (err) {
-            error.DimensionMismatch => error.DimensionMismatch,
+            error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
             error.Singular => error.Singular,
             error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
             error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
         };
-        try self.prepareEtaStorage(problem_matrix.num_rows);
+        self.prepareSparseUpdateStorage(problem_matrix.num_rows);
         self.backend_kind = .sparse_lu;
         self.stats.factorizations += 1;
     }
@@ -144,6 +151,16 @@ pub const Factorization = struct {
     /// Build and factorize an identity basis without an intermediate matrix
     /// copy. Used by the canonical slack-basis crash initializer.
     pub fn factorizeIdentity(self: *Factorization, n: usize) FactorizationError!void {
+        if (n >= 64) {
+            self.identity_basic = self.allocator.realloc(self.identity_basic, n) catch return error.OutOfMemory;
+            self.identity_scale = self.allocator.realloc(self.identity_scale, n) catch return error.OutOfMemory;
+            self.identity_sign = self.allocator.realloc(self.identity_sign, n) catch return error.OutOfMemory;
+            for (self.identity_basic, 0..) |*column, index| column.* = @intCast(index);
+            @memset(self.identity_scale, 1.0);
+            @memset(self.identity_sign, 1.0);
+            const empty_matrix = matrix.CscView.initAssumeValid(n, 0, &[_]usize{0}, &.{}, &.{});
+            return self.factorizeSparseBasis(empty_matrix, self.identity_basic, self.identity_scale, self.identity_sign);
+        }
         const data = self.allocator.alloc(f64, n * n) catch return error.OutOfMemory;
         @memset(data, 0.0);
         for (0..n) |i| data[i * n + i] = 1.0;
@@ -186,13 +203,27 @@ pub const Factorization = struct {
                 error.OutOfMemory => error.OutOfMemory,
             },
             .sparse_lu => self.sparse_lu.solve(rhs) catch |err| return switch (err) {
-                error.DimensionMismatch => error.DimensionMismatch,
+                error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
                 error.Singular => error.Singular,
                 error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
                 error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
             },
         }
         for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
+    }
+
+    /// FTRAN used for an entering column. SparseLU retains the partial `aq`
+    /// spike required by its next Forrest--Tomlin update; dense LU continues
+    /// to use the product-form Eta path.
+    pub fn solveForUpdate(self: *Factorization, rhs: []f64) FactorizationError!void {
+        if (self.backend_kind == .dense_lu) return self.solve(rhs);
+        self.stats.ftran_calls += 1;
+        self.sparse_lu.solveForUpdate(rhs) catch |err| return switch (err) {
+            error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+            error.Singular => error.Singular,
+            error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+            error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+        };
     }
     pub fn solveTranspose(self: *Factorization, rhs: []f64) FactorizationError!void {
         self.stats.btran_calls += 1;
@@ -209,7 +240,7 @@ pub const Factorization = struct {
                 error.OutOfMemory => error.OutOfMemory,
             },
             .sparse_lu => self.sparse_lu.solveTranspose(rhs) catch |err| return switch (err) {
-                error.DimensionMismatch => error.DimensionMismatch,
+                error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
                 error.Singular => error.Singular,
                 error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
                 error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
@@ -218,7 +249,7 @@ pub const Factorization = struct {
     }
     pub fn update(self: *Factorization, update_view: PivotUpdateView) FactorizationError!void {
         if (update_view.direction.len != self.dimension or update_view.leaving_row >= self.dimension) return error.DimensionMismatch;
-        if (self.eta_count >= self.eta_capacity) return error.NotImplemented;
+        if (self.backend_kind == .dense_lu and self.eta_count >= self.eta_capacity) return error.NotImplemented;
         const pivot_row: usize = @intCast(update_view.leaving_row);
         if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
         const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
@@ -231,12 +262,29 @@ pub const Factorization = struct {
             return error.Singular;
         const update_growth = maximum_magnitude / pivot_magnitude;
         if (!std.math.isFinite(update_growth)) return error.NumericalFailure;
-        const eta = self.eta_values[self.eta_count * self.dimension ..][0..self.dimension];
-        for (eta, update_view.direction) |*value, direction| value.* = direction * update_view.column_scale;
-        self.eta_rows[self.eta_count] = update_view.leaving_row;
-        self.eta_count += 1;
+        switch (self.backend_kind) {
+            .dense_lu => {
+                const eta = self.eta_values[self.eta_count * self.dimension ..][0..self.dimension];
+                for (eta, update_view.direction) |*value, direction| value.* = direction * update_view.column_scale;
+                self.eta_rows[self.eta_count] = update_view.leaving_row;
+                self.eta_count += 1;
+                self.stats.eta_updates += 1;
+            },
+            .sparse_lu => {
+                self.sparse_lu.applyForrestTomlinUpdate(
+                    update_view.leaving_row,
+                    update_view.direction,
+                    update_view.column_scale,
+                ) catch |err| return switch (err) {
+                    error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+                    error.Singular => error.Singular,
+                    error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                    error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+                };
+                self.stats.ft_updates += 1;
+            },
+        }
         self.update_count += 1;
-        self.stats.eta_updates += 1;
         self.maximum_update_growth = @max(self.maximum_update_growth, update_growth);
         self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
     }
@@ -245,7 +293,7 @@ pub const Factorization = struct {
     /// updates retain the caller's hard limit; increasingly oblique entering
     /// columns request earlier reinversion before residual drift accumulates.
     pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
-        const storage_limit = @min(hard_limit, self.eta_capacity);
+        const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
         if (self.maximum_update_growth >= 1e10) return @min(storage_limit, 8);
         if (self.maximum_update_growth >= 1e7) return @min(storage_limit, 16);
         if (self.maximum_update_growth >= 1e4) return @min(storage_limit, 32);
@@ -255,7 +303,8 @@ pub const Factorization = struct {
     pub fn reinversionReason(self: Factorization, hard_limit: usize) ?ReinversionReason {
         const recommended = self.recommendedUpdateLimit(hard_limit);
         if (self.update_count < recommended) return null;
-        return if (recommended < @min(hard_limit, self.eta_capacity)) .update_growth else .update_limit;
+        const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
+        return if (recommended < storage_limit) .update_growth else .update_limit;
     }
     pub fn needsRefactor(self: Factorization, limit: usize) bool {
         return self.reinversionReason(limit) != null;
@@ -277,6 +326,13 @@ pub const Factorization = struct {
     fn prepareEtaStorage(self: *Factorization, dimension: usize) FactorizationError!void {
         self.eta_values = self.allocator.realloc(self.eta_values, dimension * self.eta_capacity) catch return error.OutOfMemory;
         self.eta_rows = self.allocator.realloc(self.eta_rows, self.eta_capacity) catch return error.OutOfMemory;
+        self.dimension = dimension;
+        self.eta_count = 0;
+        self.update_count = 0;
+        self.maximum_update_growth = 1.0;
+    }
+
+    fn prepareSparseUpdateStorage(self: *Factorization, dimension: usize) void {
         self.dimension = dimension;
         self.eta_count = 0;
         self.update_count = 0;
@@ -407,4 +463,26 @@ test "sparse backend factors an assembled simplex basis" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.7), transpose_rhs[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 2.2), transpose_rhs[1], 1e-12);
     try std.testing.expect(factorization.pivotConditionEstimate() >= 1.0);
+
+    var aq = [_]f64{ 2, 1 };
+    try factorization.solveForUpdate(&aq);
+    try factorization.update(.{ .leaving_row = 0, .entering_col = 2, .direction = &aq });
+    try std.testing.expectEqual(@as(usize, 1), factorization.stats.ft_updates);
+    try std.testing.expectEqual(@as(usize, 0), factorization.eta_count);
+    rhs = .{ 4, 7 };
+    try factorization.solve(&rhs);
+    // Updated basis [[2, 2], [1, 3]].
+    try std.testing.expectApproxEqAbs(@as(f64, -0.5), rhs[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), rhs[1], 1e-12);
+}
+
+test "large crash identity uses sparse backend without Eta slab" {
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeIdentity(64);
+    try std.testing.expectEqual(BackendKind.sparse_lu, factorization.backend_kind);
+    try std.testing.expectEqual(@as(usize, 0), factorization.eta_values.len);
+    var rhs = [_]f64{1.0} ** 64;
+    try factorization.solve(&rhs);
+    try std.testing.expectEqualSlices(f64, &[_]f64{1.0} ** 64, &rhs);
 }

@@ -434,7 +434,7 @@ pub const SimplexEngine = struct {
     pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
-        self.factorization.solve(basis.pivot_direction) catch return .numerical_failure;
+        self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
         return .optimal;
     }
 
@@ -470,7 +470,7 @@ pub const SimplexEngine = struct {
         if (entering_col >= basis.col_status.len or leaving_row >= problem.num_rows) return .numerical_failure;
         const leaving_col = basis.basic_index[leaving_row];
         const pivot = basis.pivot_direction[leaving_row];
-        if (self.pricing.rule == .steepest_edge and self.dual_row_index == leaving_row) {
+        if (self.pricing.rule == .steepest_edge and self.dual_row_index == @as(u32, @intCast(leaving_row))) {
             if (self.updateDualSteepestEdgeWeights(leaving_row, pivot) != .optimal)
                 self.dual_edge_weights_valid = false;
         } else {

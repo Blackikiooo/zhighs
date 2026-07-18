@@ -9,8 +9,9 @@ const std = @import("std");
 const sparse_basis = @import("sparse_basis.zig");
 const sparse_kernel = @import("sparse_kernel.zig");
 const sparse_symbolic = @import("sparse_symbolic.zig");
+const sparse_ft = @import("sparse_ft.zig");
 
-pub const SparseLuError = sparse_kernel.KernelError || sparse_symbolic.SymbolicError || error{ DimensionMismatch, NumericalFailure };
+pub const SparseLuError = sparse_kernel.KernelError || sparse_symbolic.SymbolicError || sparse_ft.FtError || error{ DimensionMismatch, NumericalFailure };
 
 pub const PivotTrace = struct { rows: []const u32, columns: []const u32 };
 pub const OrderingStrategy = enum { automatic, dod_markowitz, highs_kernel };
@@ -19,6 +20,8 @@ pub const SparseLU = struct {
     allocator: std.mem.Allocator,
     kernel: sparse_kernel.MutableSparseKernel,
     symbolic: sparse_symbolic.SymbolicWorkspace,
+    ft: sparse_ft.SparseForrestTomlin,
+    ft_ready: bool = false,
     dimension_capacity: usize = 0,
     factor_capacity: usize = 0,
     dimension: usize = 0,
@@ -65,12 +68,18 @@ pub const SparseLU = struct {
     zero_tolerance: f64 = 1e-14,
 
     pub fn init(allocator: std.mem.Allocator) SparseLU {
-        return .{ .allocator = allocator, .kernel = sparse_kernel.MutableSparseKernel.init(allocator), .symbolic = sparse_symbolic.SymbolicWorkspace.init(allocator) };
+        return .{
+            .allocator = allocator,
+            .kernel = sparse_kernel.MutableSparseKernel.init(allocator),
+            .symbolic = sparse_symbolic.SymbolicWorkspace.init(allocator),
+            .ft = sparse_ft.SparseForrestTomlin.init(allocator),
+        };
     }
 
     pub fn deinit(self: *SparseLU) void {
         self.kernel.deinit();
         self.symbolic.deinit();
+        self.ft.deinit();
         inline for (.{
             "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
             "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
@@ -78,7 +87,12 @@ pub const SparseLU = struct {
             "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts",    "l_row_columns",
             "l_row_values",
         }) |field_name| self.allocator.free(@field(self, field_name));
-        self.* = .{ .allocator = self.allocator, .kernel = sparse_kernel.MutableSparseKernel.init(self.allocator), .symbolic = sparse_symbolic.SymbolicWorkspace.init(self.allocator) };
+        self.* = .{
+            .allocator = self.allocator,
+            .kernel = sparse_kernel.MutableSparseKernel.init(self.allocator),
+            .symbolic = sparse_symbolic.SymbolicWorkspace.init(self.allocator),
+            .ft = sparse_ft.SparseForrestTomlin.init(self.allocator),
+        };
     }
 
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
@@ -123,6 +137,7 @@ pub const SparseLU = struct {
         self.kernel_maximum_column_count = 0;
         self.trace_replayed_pivots = 0;
         self.trace_repaired_pivots = 0;
+        self.ft_ready = false;
         self.selected_ordering = switch (self.ordering_strategy) {
             .automatic => .dod_markowitz,
             else => |forced| forced,
@@ -252,6 +267,7 @@ pub const SparseLU = struct {
 
     /// Solve `B x = rhs` in place using the published row/column permutations.
     pub fn solve(self: *SparseLU, rhs: []f64) SparseLuError!void {
+        if (self.ft_ready) return self.solveFt(rhs, false);
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
         for (0..n) |k| self.work[k] = rhs[self.pivot_rows[k]];
@@ -278,9 +294,31 @@ pub const SparseLU = struct {
         for (0..n) |position| rhs[self.pivot_columns[position]] = self.work[position];
     }
 
+    /// FTRAN that retains the partial vector after L and existing FT row
+    /// corrections. The next update consumes this captured `aq` spike.
+    pub fn solveForUpdate(self: *SparseLU, rhs: []f64) SparseLuError!void {
+        try self.ensureFt();
+        return self.solveFt(rhs, true);
+    }
+
+    fn solveFt(self: *SparseLU, rhs: []f64, capture: bool) SparseLuError!void {
+        const n = self.dimension;
+        if (rhs.len != n) return error.DimensionMismatch;
+        for (0..n) |k| self.work[k] = rhs[self.pivot_rows[k]];
+        for (0..n) |k| {
+            const solved = self.work[k];
+            for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, value|
+                self.work[self.row_position[row]] -= value * solved;
+        }
+        for (0..n) |position| rhs[self.pivot_columns[position]] = self.work[position];
+        try self.ft.prepareFtran(rhs, capture);
+        try self.ft.solveUpper(rhs);
+    }
+
     /// Solve `B^T x = rhs` in place. U^T uses forward scatter and L^T uses a
     /// reverse gather over the same packed factor streams as FTRAN.
     pub fn solveTranspose(self: *SparseLU, rhs: []f64) SparseLuError!void {
+        if (self.ft_ready) return self.solveTransposeFt(rhs);
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
         for (0..n) |k| self.work[k] = rhs[self.pivot_columns[k]];
@@ -302,12 +340,58 @@ pub const SparseLU = struct {
         for (0..n) |position| rhs[self.pivot_rows[position]] = self.work[position];
     }
 
+    fn solveTransposeFt(self: *SparseLU, rhs: []f64) SparseLuError!void {
+        const n = self.dimension;
+        if (rhs.len != n) return error.DimensionMismatch;
+        try self.ft.solveUpperTranspose(rhs, false);
+        for (0..n) |position| self.work[position] = rhs[self.pivot_columns[position]];
+        var k = n;
+        while (k > 0) {
+            k -= 1;
+            var solved = self.work[k];
+            for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, coefficient|
+                solved -= coefficient * self.work[self.row_position[row]];
+            self.work[k] = solved;
+        }
+        for (0..n) |position| rhs[self.pivot_rows[position]] = self.work[position];
+    }
+
+    /// Form partial BTRAN `ep`, then mutate U/UR with the captured FTRAN
+    /// spike and append its FT row correction.
+    pub fn applyForrestTomlinUpdate(self: *SparseLU, leaving_column: u32, direction: []const f64, column_scale: f64) SparseLuError!void {
+        if (direction.len != self.dimension or leaving_column >= self.dimension or !std.math.isFinite(column_scale)) return error.DimensionMismatch;
+        try self.ensureFt();
+        try self.ft.captureEp(leaving_column);
+        const alpha = direction[leaving_column] * column_scale;
+        try self.ft.update(leaving_column, alpha, self.zero_tolerance);
+    }
+
+    pub fn mutableUpperView(self: *SparseLU) SparseLuError!sparse_ft.MutableUpperView {
+        try self.ensureFt();
+        return self.ft.mutableUpperView();
+    }
+
     /// Solve a hyper-sparse FTRAN from the explicitly nonzero entries of
     /// `rhs`. The factor graph is traversed by scatter reachability; unrelated
     /// L/U rows are never visited. Only returned positions in `rhs` are valid.
     pub fn solveHyperSparse(self: *SparseLU, rhs: []f64, input_indices: []const u32, output_indices: []u32) SparseLuError!usize {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
+        if (self.ft_ready and self.ft.hasUpdates()) {
+            @memset(self.work[0..n], 0.0);
+            for (input_indices) |row| {
+                if (row >= n) return error.DimensionMismatch;
+                self.work[row] = rhs[row];
+            }
+            @memcpy(rhs, self.work[0..n]);
+            try self.solve(rhs);
+            var output_count: usize = 0;
+            for (rhs, 0..) |value, index| if (value != 0.0) {
+                output_indices[output_count] = @intCast(index);
+                output_count += 1;
+            };
+            return output_count;
+        }
         self.ensureHyperViews();
         self.clearActive();
         for (input_indices) |row| {
@@ -347,6 +431,21 @@ pub const SparseLU = struct {
     pub fn solveTransposeHyperSparse(self: *SparseLU, rhs: []f64, input_indices: []const u32, output_indices: []u32) SparseLuError!usize {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
+        if (self.ft_ready and self.ft.hasUpdates()) {
+            @memset(self.work[0..n], 0.0);
+            for (input_indices) |column| {
+                if (column >= n) return error.DimensionMismatch;
+                self.work[column] = rhs[column];
+            }
+            @memcpy(rhs, self.work[0..n]);
+            try self.solveTranspose(rhs);
+            var output_count: usize = 0;
+            for (rhs, 0..) |value, index| if (value != 0.0) {
+                output_indices[output_count] = @intCast(index);
+                output_count += 1;
+            };
+            return output_count;
+        }
         self.ensureHyperViews();
         self.clearActive();
         for (input_indices) |column| {
@@ -381,6 +480,7 @@ pub const SparseLU = struct {
     /// Select hyper-sparse traversal below 12.5% RHS density, otherwise use
     /// the sequential packed kernel. The returned RHS is always dense.
     pub fn solveAdaptive(self: *SparseLU, rhs: []f64, input_indices: []const u32, transpose: bool) SparseLuError!void {
+        if (self.ft_ready and self.ft.hasUpdates()) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         if (input_indices.len * 8 >= self.dimension) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         const count = if (transpose)
             try self.solveTransposeHyperSparse(rhs, input_indices, self.hyper_output)
@@ -415,7 +515,7 @@ pub const SparseLU = struct {
     /// Retained requested bytes for the complete numerical kernel, factors,
     /// permutations and solve workspace. Allocator bookkeeping is excluded.
     pub fn requestedBytes(self: *const SparseLU) usize {
-        var total = self.kernel.requestedBytes() + self.symbolic.retainedBytes();
+        var total = self.kernel.requestedBytes() + self.symbolic.retainedBytes() + self.ft.retainedBytes();
         inline for (.{
             "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
             "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
@@ -491,6 +591,19 @@ pub const SparseLU = struct {
 
     inline fn ensureHyperViews(self: *SparseLU) void {
         if (!self.hyper_views_ready) self.buildHyperViews();
+    }
+
+    fn ensureFt(self: *SparseLU) SparseLuError!void {
+        if (self.ft_ready) return;
+        self.ensureHyperViews();
+        try self.ft.reset(
+            self.pivot_columns[0..self.dimension],
+            self.pivot_values[0..self.dimension],
+            self.u_column_starts[0 .. self.dimension + 1],
+            self.u_column_rows[0..self.u_nonzeros],
+            self.u_column_values[0..self.u_nonzeros],
+        );
+        self.ft_ready = true;
     }
 
     fn clearActive(self: *SparseLU) void {
@@ -788,4 +901,162 @@ test "warm reinversion and solves perform no allocator calls" {
     try lu.solveTranspose(&rhs);
     try std.testing.expectEqual(allocations, counted.allocations);
     try std.testing.expectEqual(resizes, counted.resize_index);
+}
+
+test "Forrest Tomlin repeated basis replacements match dense reinversion" {
+    const foundation = @import("foundation");
+    const n = 4;
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = n,
+        .starts = &[_]foundation.HUInt{ 0, 3, 6, 9, 10 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(3),
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(2),
+            foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(2), foundation.RowId.fromUsizeAssumeValid(3),
+            foundation.RowId.fromUsizeAssumeValid(3),
+        },
+        .values = &[_]f64{ 6, 1, 1, 1, 5, 1, 1, 4, 1, 5 },
+    };
+    var sparse = SparseLU.init(std.testing.allocator);
+    defer sparse.deinit();
+    try sparse.factorize(basis);
+
+    var dense_matrix = [_]f64{
+        6, 1, 0, 0,
+        1, 5, 1, 0,
+        0, 1, 4, 0,
+        1, 0, 1, 5,
+    };
+    const replacements = [_]struct { column: usize, values: [n]f64 }{
+        .{ .column = 1, .values = .{ 2, 3, 1, 1 } },
+        .{ .column = 3, .values = .{ 1, 2, 1, 4 } },
+        .{ .column = 0, .values = .{ 5, 1, 2, 1 } },
+        .{ .column = 2, .values = .{ 1, 2, 5, 2 } },
+    };
+    var oracle = @import("dense_lu.zig").DenseLU.init(std.testing.allocator);
+    defer oracle.deinit();
+
+    for (replacements, 0..) |replacement, replacement_index| {
+        var aq = replacement.values;
+        try sparse.solveForUpdate(&aq);
+        const column_scale: f64 = if (replacement_index == 2) -1.0 else 1.0;
+        if (column_scale < 0.0) {
+            for (&aq) |*value| value.* = -value.*;
+        }
+        try sparse.applyForrestTomlinUpdate(@intCast(replacement.column), &aq, column_scale);
+        for (replacement.values, 0..) |value, row| dense_matrix[row * n + replacement.column] = value;
+        try oracle.factorize(n, &dense_matrix);
+
+        var sparse_rhs: [n]f64 = undefined;
+        for (&sparse_rhs, 0..) |*value, index| value.* = @as(f64, @floatFromInt(2 + replacement_index * 3 + index));
+        var dense_rhs = sparse_rhs;
+        try sparse.solve(&sparse_rhs);
+        try oracle.solve(&dense_rhs);
+        for (sparse_rhs, dense_rhs) |actual, expected| try std.testing.expectApproxEqAbs(expected, actual, 2e-11);
+
+        for (&sparse_rhs, 0..) |*value, index| value.* = @as(f64, @floatFromInt(1 + replacement_index + index * 2));
+        dense_rhs = sparse_rhs;
+        try sparse.solveTranspose(&sparse_rhs);
+        try oracle.solveTranspose(&dense_rhs);
+        for (sparse_rhs, dense_rhs) |actual, expected| try std.testing.expectApproxEqAbs(expected, actual, 2e-11);
+    }
+    const upper = try sparse.mutableUpperView();
+    try std.testing.expectEqual(n + replacements.len, upper.pivot_ids.len);
+    try std.testing.expectEqual(replacements.len, sparse.ft.update_count);
+}
+
+test "retained Forrest Tomlin workspace performs warm updates without allocation" {
+    const foundation = @import("foundation");
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 4,
+        .starts = &[_]foundation.HUInt{ 0, 1, 2, 3, 4 },
+        .rows = &[_]foundation.RowId{
+            foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+            foundation.RowId.fromUsizeAssumeValid(2), foundation.RowId.fromUsizeAssumeValid(3),
+        },
+        .values = &[_]f64{ 1, 1, 1, 1 },
+    };
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var sparse = SparseLU.init(counted.allocator());
+    defer sparse.deinit();
+    try sparse.factorize(basis);
+    var aq = [_]f64{ 2, 1, 1, 1 };
+    try sparse.solveForUpdate(&aq);
+    const allocations = counted.allocations;
+    const resizes = counted.resize_index;
+    try sparse.applyForrestTomlinUpdate(0, &aq, 1);
+    aq = .{ 1, 3, 1, 1 };
+    try sparse.solveForUpdate(&aq);
+    try sparse.applyForrestTomlinUpdate(1, &aq, 1);
+    aq = .{ 1, 1, 4, 1 };
+    try sparse.solveForUpdate(&aq);
+    try sparse.applyForrestTomlinUpdate(2, &aq, 1);
+    var rhs = [_]f64{ 1, 2, 3, 4 };
+    try sparse.solve(&rhs);
+    try sparse.solveTranspose(&rhs);
+    try std.testing.expectEqual(allocations, counted.allocations);
+    try std.testing.expectEqual(resizes, counted.resize_index);
+}
+
+test "Forrest Tomlin deterministic replacement corpus matches dense oracle" {
+    const foundation = @import("foundation");
+    var starts: [9]foundation.HUInt = undefined;
+    var rows: [64]foundation.RowId = undefined;
+    var values: [64]f64 = undefined;
+    var dense_matrix: [64]f64 = undefined;
+
+    for (2..9) |n| {
+        var nnz: usize = 0;
+        @memset(dense_matrix[0 .. n * n], 0.0);
+        for (0..n) |column| {
+            starts[column] = @intCast(nnz);
+            for (0..n) |row| {
+                const value = if (row == column)
+                    9.0 + @as(f64, @floatFromInt(column))
+                else
+                    @as(f64, @floatFromInt((row * 7 + column * 5) % 5 + 1)) * 0.04;
+                rows[nnz] = foundation.RowId.fromUsizeAssumeValid(row);
+                values[nnz] = value;
+                dense_matrix[row * n + column] = value;
+                nnz += 1;
+            }
+        }
+        starts[n] = @intCast(nnz);
+        const basis = sparse_basis.SparseBasisView{ .dimension = n, .starts = starts[0 .. n + 1], .rows = rows[0..nnz], .values = values[0..nnz] };
+        var sparse = SparseLU.init(std.testing.allocator);
+        defer sparse.deinit();
+        try sparse.factorize(basis);
+        var oracle = @import("dense_lu.zig").DenseLU.init(std.testing.allocator);
+        defer oracle.deinit();
+
+        for (0..2 * n) |replacement_index| {
+            const column = (replacement_index * 3 + 1) % n;
+            var entering: [8]f64 = undefined;
+            for (0..n) |row| {
+                entering[row] = if (row == column)
+                    8.0 + @as(f64, @floatFromInt(replacement_index)) * 0.125
+                else
+                    @as(f64, @floatFromInt((row * 11 + replacement_index * 3) % 7 + 1)) * 0.03;
+            }
+            var aq: [8]f64 = undefined;
+            @memcpy(aq[0..n], entering[0..n]);
+            try sparse.solveForUpdate(aq[0..n]);
+            try sparse.applyForrestTomlinUpdate(@intCast(column), aq[0..n], 1);
+            for (entering[0..n], 0..) |value, row| dense_matrix[row * n + column] = value;
+            try oracle.factorize(n, dense_matrix[0 .. n * n]);
+
+            var actual: [8]f64 = undefined;
+            for (actual[0..n], 0..) |*value, index| value.* = @as(f64, @floatFromInt(index + replacement_index + 1)) * 0.375;
+            var expected = actual;
+            try sparse.solve(actual[0..n]);
+            try oracle.solve(expected[0..n]);
+            for (actual[0..n], expected[0..n]) |a, e| try std.testing.expectApproxEqAbs(e, a, 1e-10);
+
+            for (actual[0..n], 0..) |*value, index| value.* = @as(f64, @floatFromInt(index * 2 + replacement_index + 2)) * -0.25;
+            expected = actual;
+            try sparse.solveTranspose(actual[0..n]);
+            try oracle.solveTranspose(expected[0..n]);
+            for (actual[0..n], expected[0..n]) |a, e| try std.testing.expectApproxEqAbs(e, a, 1e-10);
+        }
+    }
 }
