@@ -20,6 +20,7 @@ pub const SolutionView = struct {
     primal: []const f64,
     dual: []const f64,
     reduced_cost: []const f64,
+    unbounded_ray: []const f64,
     objective_value: f64,
     iterations: usize,
 };

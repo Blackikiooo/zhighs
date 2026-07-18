@@ -75,10 +75,11 @@ pub const SparseBasisBuffers = struct {
         matrix: csc.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
+        column_scale: []const f64,
         artificial_sign: []const f64,
     ) SparseBasisError!SparseBasisView {
         const n = matrix.num_rows;
-        if (basic_index.len != n or row_scale.len != n or artificial_sign.len != n)
+        if (basic_index.len != n or row_scale.len != n or column_scale.len != matrix.num_cols or artificial_sign.len != n)
             return error.DimensionMismatch;
 
         var required_entries: usize = 0;
@@ -122,7 +123,8 @@ pub const SparseBasisBuffers = struct {
                 const begin = matrix.col_starts[global_column];
                 const end = matrix.col_starts[global_column + 1];
                 for (matrix.row_indices[begin..end], matrix.values[begin..end]) |row, coefficient| {
-                    const scaled = coefficient * row_scale[row.toUsize()];
+                    if (!target.retainsModelCoefficient(coefficient)) continue;
+                    const scaled = coefficient * row_scale[row.toUsize()] * column_scale[global_column];
                     if (!std.math.isFinite(scaled)) return error.NonFiniteValue;
                     // Free rows have a zero normalization scale. Do not publish
                     // explicit zeros: symbolic counts and Markowitz merit must
@@ -201,7 +203,7 @@ test "basis assembly mixes structural logical and artificial columns" {
     );
     var buffers = SparseBasisBuffers.init(std.testing.allocator);
     defer buffers.deinit();
-    const basis = try buffers.assemble(matrix, &[_]u32{ 0, 3, 6 }, &[_]f64{ 1, -1, 0.5 }, &[_]f64{ 0, 0, -1 });
+    const basis = try buffers.assemble(matrix, &[_]u32{ 0, 3, 6 }, &[_]f64{ 1, -1, 0.5 }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 0, 0, -1 });
     try std.testing.expectEqualSlices(Offset, &[_]Offset{ 0, 2, 3, 4 }, basis.starts);
     try std.testing.expectEqualSlices(RowId, &[_]RowId{ rows[0], rows[1], RowId.fromUsizeAssumeValid(1), RowId.fromUsizeAssumeValid(2) }, basis.rows);
     try std.testing.expectEqualSlices(f64, &[_]f64{ 2, 2, 1, -1 }, basis.values);
@@ -212,10 +214,10 @@ test "basis assembly retains capacity across reinversions" {
     const matrix = csc.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &row, &[_]f64{2});
     var buffers = SparseBasisBuffers.init(std.testing.allocator);
     defer buffers.deinit();
-    _ = try buffers.assemble(matrix, &[_]u32{0}, &[_]f64{1}, &[_]f64{0});
+    _ = try buffers.assemble(matrix, &[_]u32{0}, &[_]f64{1}, &[_]f64{1}, &[_]f64{0});
     const starts_pointer = buffers.starts.ptr;
     const values_pointer = buffers.values.ptr;
-    _ = try buffers.assemble(matrix, &[_]u32{1}, &[_]f64{1}, &[_]f64{0});
+    _ = try buffers.assemble(matrix, &[_]u32{1}, &[_]f64{1}, &[_]f64{1}, &[_]f64{0});
     try std.testing.expectEqual(starts_pointer, buffers.starts.ptr);
     try std.testing.expectEqual(values_pointer, buffers.values.ptr);
 }

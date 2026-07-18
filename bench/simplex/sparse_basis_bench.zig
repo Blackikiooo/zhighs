@@ -38,6 +38,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(basic_index);
     const row_scale = try allocator.alloc(f64, dimension);
     defer allocator.free(row_scale);
+    const column_scale = try allocator.alloc(f64, dimension);
+    defer allocator.free(column_scale);
     const artificial_sign = try allocator.alloc(f64, dimension);
     defer allocator.free(artificial_sign);
 
@@ -45,6 +47,7 @@ pub fn main(init: std.process.Init) !void {
         starts[column] = column * entries_per_column;
         basic_index[column] = @intCast(column);
         row_scale[column] = if (column & 1 == 0) 1.0 else -1.0;
+        column_scale[column] = 1.0;
         artificial_sign[column] = 0.0;
         // The stride is coprime to common powers of two; sorting the small
         // local set preserves canonical CSC without hiding random-row traffic.
@@ -62,14 +65,14 @@ pub fn main(init: std.process.Init) !void {
     const matrix = zhighs.matrix.CscView.initAssumeValid(dimension, dimension, starts, rows, values);
     var buffers = zhighs.matrix.SparseBasisBuffers.init(allocator);
     defer buffers.deinit();
-    _ = try buffers.assemble(matrix, basic_index, row_scale, artificial_sign);
+    _ = try buffers.assemble(matrix, basic_index, row_scale, column_scale, artificial_sign);
 
     const samples = try allocator.alloc(u64, repetitions);
     defer allocator.free(samples);
     var checksum: f64 = 0.0;
     for (samples) |*sample| {
         const started = nowNs();
-        const basis = try buffers.assemble(matrix, basic_index, row_scale, artificial_sign);
+        const basis = try buffers.assemble(matrix, basic_index, row_scale, column_scale, artificial_sign);
         sample.* = @intCast(nowNs() - started);
         checksum += basis.values[(basis.nnz() / 2) % basis.nnz()];
         std.mem.doNotOptimizeAway(basis.values.ptr);

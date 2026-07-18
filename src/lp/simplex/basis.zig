@@ -28,6 +28,7 @@ pub const BasisState = struct {
     basic_margin: []f64 = &.{},
     ratio_direction: []f64 = &.{},
     row_scale: []f64 = &.{},
+    column_scale: []f64 = &.{},
     row_rhs: []f64 = &.{},
     col_lower: []f64 = &.{},
     col_upper: []f64 = &.{},
@@ -47,6 +48,10 @@ pub const BasisState = struct {
     flip_columns: []u32 = &.{},
     dual_candidate_rows: []u32 = &.{},
     dual_candidate_score: []f64 = &.{},
+    published_primal: []f64 = &.{},
+    published_dual: []f64 = &.{},
+    published_reduced_cost: []f64 = &.{},
+    unbounded_ray: []f64 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, rows: usize, cols: usize) !BasisState {
         const total_cols = cols + 2 * rows;
@@ -66,6 +71,7 @@ pub const BasisState = struct {
         self.basic_margin = try allocator.alloc(f64, rows);
         self.ratio_direction = try allocator.alloc(f64, rows);
         self.row_scale = try allocator.alloc(f64, rows);
+        self.column_scale = try allocator.alloc(f64, total_cols);
         self.row_rhs = try allocator.alloc(f64, rows);
         self.col_lower = try allocator.alloc(f64, total_cols);
         self.col_upper = try allocator.alloc(f64, total_cols);
@@ -81,6 +87,10 @@ pub const BasisState = struct {
         self.flip_columns = try allocator.alloc(u32, total_cols);
         self.dual_candidate_rows = try allocator.alloc(u32, rows);
         self.dual_candidate_score = try allocator.alloc(f64, rows);
+        self.published_primal = try allocator.alloc(f64, cols);
+        self.published_dual = try allocator.alloc(f64, rows);
+        self.published_reduced_cost = try allocator.alloc(f64, cols);
+        self.unbounded_ray = try allocator.alloc(f64, cols);
         @memset(self.row_status, .basic);
         @memset(self.col_status, .at_lower);
         @memset(self.basic_index, 0);
@@ -95,6 +105,7 @@ pub const BasisState = struct {
         @memset(self.basic_margin, 0.0);
         @memset(self.ratio_direction, 0.0);
         @memset(self.row_scale, 1.0);
+        @memset(self.column_scale, 1.0);
         @memset(self.row_rhs, 0.0);
         @memset(self.col_lower, 0.0);
         @memset(self.col_upper, std.math.inf(f64));
@@ -110,6 +121,10 @@ pub const BasisState = struct {
         @memset(self.flip_columns, 0);
         @memset(self.dual_candidate_rows, 0);
         @memset(self.dual_candidate_score, 0.0);
+        @memset(self.published_primal, 0.0);
+        @memset(self.published_dual, 0.0);
+        @memset(self.published_reduced_cost, 0.0);
+        @memset(self.unbounded_ray, 0.0);
         return self;
     }
 
@@ -159,6 +174,7 @@ pub const BasisState = struct {
         self.allocator.free(self.basic_margin);
         self.allocator.free(self.ratio_direction);
         self.allocator.free(self.row_scale);
+        self.allocator.free(self.column_scale);
         self.allocator.free(self.row_rhs);
         self.allocator.free(self.col_lower);
         self.allocator.free(self.col_upper);
@@ -174,6 +190,10 @@ pub const BasisState = struct {
         self.allocator.free(self.flip_columns);
         self.allocator.free(self.dual_candidate_rows);
         self.allocator.free(self.dual_candidate_score);
+        self.allocator.free(self.published_primal);
+        self.allocator.free(self.published_dual);
+        self.allocator.free(self.published_reduced_cost);
+        self.allocator.free(self.unbounded_ray);
     }
 };
 

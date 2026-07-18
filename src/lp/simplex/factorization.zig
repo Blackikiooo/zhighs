@@ -92,9 +92,10 @@ pub const Factorization = struct {
         problem_matrix: matrix.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
+        column_scale: []const f64,
         artificial_sign: []const f64,
     ) FactorizationError!void {
-        const basis = self.sparse_basis.assemble(problem_matrix, basic_index, row_scale, artificial_sign) catch |err| return switch (err) {
+        const basis = self.sparse_basis.assemble(problem_matrix, basic_index, row_scale, column_scale, artificial_sign) catch |err| return switch (err) {
             error.DimensionMismatch, error.InvalidBasisColumn => error.DimensionMismatch,
             error.CapacityOverflow, error.OutOfMemory => error.OutOfMemory,
             error.NonFiniteValue => error.NumericalFailure,
@@ -118,23 +119,25 @@ pub const Factorization = struct {
         problem_matrix: matrix.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
+        column_scale: []const f64,
         artificial_sign: []const f64,
     ) FactorizationError!void {
         const n = problem_matrix.num_rows;
         if (n >= self.sparse_dimension_threshold)
-            return self.factorizeSparseBasis(problem_matrix, basic_index, row_scale, artificial_sign);
+            return self.factorizeSparseBasis(problem_matrix, basic_index, row_scale, column_scale, artificial_sign);
         if (self.dense_lu.n != n or self.dense_lu.lu.len != n * n) return error.DimensionMismatch;
         const buffer = self.dense_lu.lu;
         @memset(buffer, 0.0);
-        if (basic_index.len != n or row_scale.len != n or artificial_sign.len != n) return error.DimensionMismatch;
+        if (basic_index.len != n or row_scale.len != n or column_scale.len != problem_matrix.num_cols or artificial_sign.len != n) return error.DimensionMismatch;
         for (basic_index, 0..) |global_column_u32, basis_column| {
             const global_column: usize = global_column_u32;
             if (global_column < problem_matrix.num_cols) {
                 const begin = problem_matrix.col_starts[global_column];
                 const end = problem_matrix.col_starts[global_column + 1];
                 for (problem_matrix.row_indices[begin..end], problem_matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
-                    const scaled = coefficient * row_scale[row_index];
+                    const scaled = coefficient * row_scale[row_index] * column_scale[global_column];
                     if (!std.math.isFinite(scaled)) return error.NumericalFailure;
                     buffer[row_index * n + basis_column] = scaled;
                 }
@@ -162,7 +165,7 @@ pub const Factorization = struct {
             @memset(self.identity_scale, 1.0);
             @memset(self.identity_sign, 1.0);
             const empty_matrix = matrix.CscView.initAssumeValid(n, 0, &[_]usize{0}, &.{}, &.{});
-            return self.factorizeSparseBasis(empty_matrix, self.identity_basic, self.identity_scale, self.identity_sign);
+            return self.factorizeSparseBasis(empty_matrix, self.identity_basic, self.identity_scale, &.{}, self.identity_sign);
         }
         const data = self.allocator.alloc(f64, n * n) catch return error.OutOfMemory;
         @memset(data, 0.0);
@@ -457,7 +460,7 @@ test "sparse backend factors an assembled simplex basis" {
     );
     var factorization = Factorization.init(std.testing.allocator);
     defer factorization.deinit();
-    try factorization.factorizeSparseBasis(problem_matrix, &[_]u32{ 0, 1 }, &[_]f64{ 1, 1 }, &[_]f64{ 1, 1 });
+    try factorization.factorizeSparseBasis(problem_matrix, &[_]u32{ 0, 1 }, &[_]f64{ 1, 1 }, &[_]f64{ 1, 1 }, &[_]f64{ 1, 1 });
     try std.testing.expectEqual(BackendKind.sparse_lu, factorization.backend_kind);
     var rhs = [_]f64{ 6, 7 };
     try factorization.solve(&rhs);

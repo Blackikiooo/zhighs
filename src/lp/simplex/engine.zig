@@ -100,6 +100,8 @@ pub const SimplexEngine = struct {
     numerical: numerical_module.NumericalState = .{},
     iterations: usize = 0,
     objective_value: f64 = 0.0,
+    objective_scale: f64 = 1.0,
+    unbounded_ray_valid: bool = false,
     phase1_needed: bool = false,
     solve_start_ns: ?i96 = null,
     solve_clock_io: ?std.Io = null,
@@ -117,6 +119,8 @@ pub const SimplexEngine = struct {
     current_phase: SolvePhase = .phase_two,
     direction_requires_reinversion: bool = false,
     fresh_factorization_mode: bool = false,
+    reduced_cost_update_count: usize = 0,
+    reduced_cost_refresh_period: usize = 8,
     failure_site: FailureSite = .none,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
@@ -139,7 +143,9 @@ pub const SimplexEngine = struct {
         self.work_used = 0;
         self.rank_repair_count = 0;
         self.fresh_factorization_mode = false;
+        self.reduced_cost_update_count = 0;
         self.failure_site = .none;
+        self.unbounded_ray_valid = false;
         self.numerical.resetAntiCycling();
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
@@ -193,17 +199,16 @@ pub const SimplexEngine = struct {
         }
 
         self.algorithm = .primal_revised;
+        if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+        const crash_feasibility = self.classifyFeasibility(problem);
+        if (crash_feasibility.primal) return self.solvePrimal(problem, control);
+        // A neither-feasible logical crash needs a dedicated dual Phase I
+        // with cost perturbation. Until that policy is available, retain the
+        // artificial primal Phase I as the correctness fallback rather than
+        // reusing the warm-basis repair under assumptions it does not satisfy.
+        self.algorithm = .primal_revised;
         if (self.basis) |*basis| {
-            @memcpy(basis.basic_value, basis.row_rhs);
-            for (0..problem.num_cols) |col| {
-                const initial = basis.primal[col];
-                const begin = problem.matrix.col_starts[col];
-                const end = problem.matrix.col_starts[col + 1];
-                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
-                    const row_index = row.toUsize();
-                    basis.basic_value[row_index] -= basis.row_scale[row_index] * value * initial;
-                }
-            }
             self.phase1_needed = false;
             for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |*value, lower, upper, row| {
                 const logical_col = problem.num_cols + row;
@@ -249,6 +254,32 @@ pub const SimplexEngine = struct {
         }
         if (self.controlledStop(control)) |status| return status;
         return self.solvePrimal(problem, control);
+    }
+
+    /// Materialize the logical crash solution from current nonbasic structural
+    /// values. The basis remains the identity; values may violate logical
+    /// bounds so the caller can choose primal, dual, or artificial Phase I.
+    fn initializeLogicalBasicValues(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        @memcpy(basis.basic_value, basis.row_rhs);
+        for (0..problem.num_cols) |column| {
+            const initial = basis.primal[column];
+            if (initial == 0.0) continue;
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                basis.basic_value[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * initial;
+            }
+        }
+        for (basis.basic_index, basis.basic_value, 0..) |column, value, row| {
+            if (!std.math.isFinite(value)) return .numerical_failure;
+            basis.primal[column] = value;
+            basis.basic_lower[row] = basis.col_lower[column];
+            basis.basic_upper[row] = basis.col_upper[column];
+        }
+        return .optimal;
     }
 
     /// Reoptimize with the existing basis and factorization. The caller must
@@ -303,23 +334,24 @@ pub const SimplexEngine = struct {
         if (basis.num_rows != problem.num_rows or basis.num_structural_cols != problem.num_cols) return false;
         for (problem.col_lower, problem.col_upper, 0..) |lower, upper, column| {
             if (lower > upper) return false;
-            basis.col_lower[column] = lower;
-            basis.col_upper[column] = upper;
+            const scale = basis.column_scale[column];
+            basis.col_lower[column] = lower / scale;
+            basis.col_upper[column] = upper / scale;
             switch (basis.col_status[column]) {
                 .basic => {},
                 .at_lower => {
                     if (!std.math.isFinite(lower)) return false;
-                    basis.primal[column] = lower;
+                    basis.primal[column] = lower / scale;
                 },
                 .at_upper => {
                     if (!std.math.isFinite(upper)) return false;
-                    basis.primal[column] = upper;
+                    basis.primal[column] = upper / scale;
                 },
                 .fixed => {
                     if (lower != upper) return false;
-                    basis.primal[column] = lower;
+                    basis.primal[column] = lower / scale;
                 },
-                .free, .superbasic => basis.primal[column] = @min(@max(0.0, lower), upper),
+                .free, .superbasic => basis.primal[column] = @min(@max(0.0, lower), upper) / scale,
             }
         }
         for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
@@ -344,6 +376,7 @@ pub const SimplexEngine = struct {
             basis.basic_lower[row] = basis.col_lower[column];
             basis.basic_upper[row] = basis.col_upper[column];
         }
+        self.objective_scale = objectiveScale(problem.col_cost);
         return true;
     }
 
@@ -372,6 +405,7 @@ pub const SimplexEngine = struct {
         }
         @memset(basis.residual_work, 0.0);
         for (problem.matrix.row_indices, problem.matrix.values) |row, value| {
+            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
             const row_index = row.toUsize();
             basis.residual_work[row_index] = @max(basis.residual_work[row_index], @abs(value));
         }
@@ -401,7 +435,42 @@ pub const SimplexEngine = struct {
             basis.basic_lower[row] = basis.col_lower[problem.num_cols + row];
             basis.basic_upper[row] = basis.col_upper[problem.num_cols + row];
         }
+        var scaled_matrix_min = std.math.inf(f64);
+        var scaled_matrix_max: f64 = 0.0;
+        for (problem.matrix.row_indices, problem.matrix.values) |row, coefficient| {
+            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            const magnitude = @abs(basis.row_scale[row.toUsize()] * coefficient);
+            if (magnitude != 0.0) scaled_matrix_min = @min(scaled_matrix_min, magnitude);
+            scaled_matrix_max = @max(scaled_matrix_max, magnitude);
+        }
+        const use_column_scaling = scaled_matrix_min < std.math.inf(f64) and scaled_matrix_max / scaled_matrix_min > 1e6;
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            var maximum: f64 = 0.0;
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                maximum = @max(maximum, @abs(basis.row_scale[row.toUsize()] * coefficient));
+            }
+            const scale = if (use_column_scaling) powerOfTwoScale(maximum, 20) else 1.0;
+            basis.column_scale[column] = scale;
+            basis.col_lower[column] = problem.col_lower[column] / scale;
+            basis.col_upper[column] = problem.col_upper[column] / scale;
+            basis.primal[column] /= scale;
+        }
+        self.objective_scale = objectiveScale(problem.col_cost);
         return .optimal;
+    }
+
+    fn powerOfTwoScale(maximum: f64, exponent_limit: comptime_int) f64 {
+        if (maximum == 0.0 or !std.math.isFinite(maximum)) return 1.0;
+        return @exp2(std.math.clamp(@round(-@log2(maximum)), -@as(f64, exponent_limit), @as(f64, exponent_limit)));
+    }
+
+    fn objectiveScale(cost: []const f64) f64 {
+        var maximum: f64 = 0.0;
+        for (cost) |value| maximum = @max(maximum, @abs(value));
+        return powerOfTwoScale(maximum, 15);
     }
 
     /// Restore a validated borrowed basis and rebuild factorization/basic
@@ -724,18 +793,19 @@ pub const SimplexEngine = struct {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
+            const pricing_tolerance = self.scaledDualTolerance(problem);
             const entering = (if (self.numerical.anti_cycling_active)
                 self.pricing.choosePrimalEnteringBland(
                     basis.reduced_cost[0..original_cols],
                     basis.col_status[0..original_cols],
-                    self.numerical.dual_tolerance,
+                    pricing_tolerance,
                 )
             else
                 self.pricing.choosePrimalEnteringWeighted(
                     basis.reduced_cost[0..original_cols],
                     basis.col_status[0..original_cols],
                     basis.col_edge_weight[0..original_cols],
-                    self.numerical.dual_tolerance,
+                    pricing_tolerance,
                 )) orelse {
                 // Never certify dual feasibility from an updated BTRAN chain.
                 // Reinvert the unchanged basis once and price again; a stale
@@ -788,19 +858,32 @@ pub const SimplexEngine = struct {
                 basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
                 self.numerical.observeStep(own_step);
             } else {
+                if (leaving.status == .unbounded)
+                    return self.finishUnbounded(problem, entering.column, entering.direction);
                 if (leaving.status != .optimal) return leaving.status;
+                if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
+                    return .numerical_failure;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) {
                     if (self.failure_site == .none) self.failure_site = .pivot_update;
                     return .numerical_failure;
                 }
                 self.numerical.observeStep(leaving.step);
             }
-            if (self.recomputeReducedCosts(problem) != .optimal) {
+            if ((self.fresh_factorization_mode or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
+                self.recomputeReducedCosts(problem) != .optimal)
+            {
                 self.failure_site = .reduced_cost;
                 return .numerical_failure;
             }
         }
         return .iteration_limit;
+    }
+
+    fn scaledDualTolerance(self: *const SimplexEngine, problem: problem_module.ProblemView) f64 {
+        const basis = if (self.basis) |*value| value else return self.numerical.dual_tolerance;
+        var minimum_column_scale: f64 = 1.0;
+        for (basis.column_scale[0..problem.num_cols]) |scale| minimum_column_scale = @min(minimum_column_scale, scale);
+        return @max(std.math.floatEps(f64), self.numerical.dual_tolerance * self.objective_scale * minimum_column_scale);
     }
 
     fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
@@ -1094,8 +1177,9 @@ pub const SimplexEngine = struct {
             const end = problem.matrix.col_starts[column + 1];
             var alpha: f64 = 0.0;
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                 const row_index = matrix_row.toUsize();
-                alpha += basis.dual_row[row_index] * basis.row_scale[row_index] * coefficient;
+                alpha += basis.dual_row[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
             }
             basis.tableau[column] = alpha;
         }
@@ -1169,11 +1253,15 @@ pub const SimplexEngine = struct {
                 self.numerical.observeStep(own_step);
             } else {
                 if (leaving.status != .optimal) return leaving.status;
+                if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
+                    return .numerical_failure;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
                     return .numerical_failure;
                 self.numerical.observeStep(leaving.step);
             }
-            if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+            if ((self.fresh_factorization_mode or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
+                self.recomputePhaseOneReducedCosts(problem) != .optimal)
+                return .numerical_failure;
         }
         if (self.iterations >= control.max_iterations) return .iteration_limit;
         if (self.recomputeBasicValues(problem) != .optimal) return .numerical_failure;
@@ -1237,7 +1325,8 @@ pub const SimplexEngine = struct {
         var dual_infeasibility: f64 = 0.0;
         var current_objective = problem.objective_offset;
         if (self.basis) |*basis| {
-            for (problem.col_cost, basis.primal[0..problem.num_cols]) |cost, value| current_objective += cost * value;
+            for (problem.col_cost, basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |cost, value, scale|
+                current_objective += cost * value * scale;
             for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
                 primal_infeasibility = @max(primal_infeasibility, @max(lower - value, value - upper));
             }
@@ -1311,11 +1400,75 @@ pub const SimplexEngine = struct {
         const artificial_begin = problem.num_cols + problem.num_rows;
         for (basis.basic_index, 0..) |global_col, row| basis.dual[row] = if (global_col >= artificial_begin) 1.0 else 0.0;
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
-        for (basis.reduced_cost, 0..) |*reduced, column| {
-            reduced.* = if (column >= artificial_begin) 1.0 else 0.0;
-            if (self.fillInternalColumn(problem, column, basis.pivot_direction) != .optimal) return .numerical_failure;
-            for (basis.pivot_direction, basis.dual) |value, dual| reduced.* -= value * dual;
+
+        // Compute c - A^T*y directly from CSC. The previous generic column
+        // loop cleared and dotted a rows-long dense vector for every internal
+        // column, turning sparse Phase-I pricing into O(columns * rows).
+        // Structural columns use one sparse pass; logical and artificial
+        // columns have one known nonzero and are written directly.
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            var reduced: f64 = 0.0;
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+            }
+            basis.reduced_cost[column] = reduced;
         }
+        for (0..problem.num_rows) |row| {
+            basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
+            basis.reduced_cost[artificial_begin + row] = 1.0 - basis.artificial_sign[row] * basis.dual[row];
+        }
+        self.reduced_cost_update_count = 0;
+        return .optimal;
+    }
+
+    /// Update all reduced costs after a primal basis replacement using the
+    /// pivotal row of the old basis: `r' = r - (r_q / alpha_pq) * alpha_p`.
+    /// One BTRAN and one CSC scan replace rebuilding `c_B`, solving for the
+    /// full dual vector, and repricing from scratch. A periodic exact refresh
+    /// bounds accumulated roundoff while keeping the hot path allocation-free.
+    fn updateReducedCostsAfterPrimalPivot(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        entering_col: usize,
+        entering_direction: f64,
+        leaving_row: u32,
+    ) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const row: usize = @intCast(leaving_row);
+        if (row >= problem.num_rows or entering_col >= basis.reduced_cost.len) return .numerical_failure;
+        const actual_pivot = basis.pivot_direction[row] * entering_direction;
+        if (!std.math.isFinite(actual_pivot) or @abs(actual_pivot) <= self.numerical.pivot_tolerance)
+            return .numerical_failure;
+        const theta = basis.reduced_cost[entering_col] / actual_pivot;
+        if (!std.math.isFinite(theta)) return .numerical_failure;
+
+        @memset(basis.residual_work, 0.0);
+        basis.residual_work[row] = 1.0;
+        self.factorization.solveTranspose(basis.residual_work) catch return .numerical_failure;
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            var tableau_entry: f64 = 0.0;
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = matrix_row.toUsize();
+                tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+            }
+            basis.reduced_cost[column] -= theta * tableau_entry;
+        }
+        const artificial_begin = problem.num_cols + problem.num_rows;
+        for (0..problem.num_rows) |logical_row| {
+            const multiplier = theta * basis.residual_work[logical_row];
+            basis.reduced_cost[problem.num_cols + logical_row] -= multiplier;
+            basis.reduced_cost[artificial_begin + logical_row] -= multiplier * basis.artificial_sign[logical_row];
+        }
+        basis.reduced_cost[entering_col] = 0.0;
+        for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+        self.reduced_cost_update_count += 1;
         return .optimal;
     }
 
@@ -1324,23 +1477,25 @@ pub const SimplexEngine = struct {
         const maximize = problem.objective_sense == .maximize;
         for (basis.basic_index, 0..) |global_col, row| {
             basis.dual[row] = if (global_col < problem.num_cols)
-                (if (maximize) -problem.col_cost[global_col] else problem.col_cost[global_col])
+                (if (maximize) -problem.col_cost[global_col] else problem.col_cost[global_col]) * self.objective_scale * basis.column_scale[global_col]
             else
                 0.0;
         }
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
         for (0..problem.num_cols) |col| {
-            var reduced = if (maximize) -problem.col_cost[col] else problem.col_cost[col];
+            var reduced = (if (maximize) -problem.col_cost[col] else problem.col_cost[col]) * self.objective_scale * basis.column_scale[col];
             const begin = problem.matrix.col_starts[col];
             const end = problem.matrix.col_starts[col + 1];
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
                 const row_index = row.toUsize();
-                reduced -= basis.row_scale[row_index] * value * basis.dual[row_index];
+                reduced -= basis.row_scale[row_index] * value * basis.column_scale[col] * basis.dual[row_index];
             }
             basis.reduced_cost[col] = reduced;
         }
         for (0..problem.num_rows) |row| basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
         @memset(basis.reduced_cost[problem.num_cols + problem.num_rows ..], 0.0);
+        self.reduced_cost_update_count = 0;
         return .optimal;
     }
 
@@ -1358,6 +1513,7 @@ pub const SimplexEngine = struct {
             problem.matrix,
             basis.basic_index,
             basis.row_scale,
+            basis.column_scale[0..problem.num_cols],
             basis.artificial_sign,
         );
     }
@@ -1442,8 +1598,14 @@ pub const SimplexEngine = struct {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         @memset(output, 0.0);
         if (column < problem.num_cols) {
-            problem.fillColumn(column, output) catch return .numerical_failure;
-            for (output, basis.row_scale) |*value, scale| value.* *= scale;
+            const column_scale = basis.column_scale[column];
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                output[row_index] = coefficient * basis.row_scale[row_index] * column_scale;
+            }
         } else if (column < problem.num_cols + problem.num_rows) {
             output[column - problem.num_cols] = 1.0;
         } else if (column < problem.num_cols + 2 * problem.num_rows) {
@@ -1473,8 +1635,9 @@ pub const SimplexEngine = struct {
                 const begin = problem.matrix.col_starts[column];
                 const end = problem.matrix.col_starts[column + 1];
                 for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
-                    basis.residual_work[row_index] -= basis.row_scale[row_index] * coefficient * value;
+                    basis.residual_work[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;
                 }
             } else if (column < problem.num_cols + problem.num_rows) {
                 basis.residual_work[column - problem.num_cols] -= value;
@@ -1528,9 +1691,10 @@ pub const SimplexEngine = struct {
                 const begin = problem.matrix.col_starts[column];
                 const end = problem.matrix.col_starts[column + 1];
                 for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
                     if (row_index >= residual.len) return error.NumericalFailure;
-                    residual[row_index] -= basis.row_scale[row_index] * coefficient * value;
+                    residual[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;
                 }
             } else if (column < problem.num_cols + problem.num_rows) {
                 residual[column - problem.num_cols] -= value;
@@ -1561,9 +1725,10 @@ pub const SimplexEngine = struct {
                 const start = problem.matrix.col_starts[column];
                 const end = problem.matrix.col_starts[column + 1];
                 for (problem.matrix.row_indices[start..end], problem.matrix.values[start..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
                     if (row_index >= residual.len) return error.NumericalFailure;
-                    const product = basis.row_scale[row_index] * coefficient * value;
+                    const product = basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;
                     residual[row_index] -= product;
                     magnitude[row_index] += @abs(product);
                 }
@@ -1587,9 +1752,75 @@ pub const SimplexEngine = struct {
         if (self.validateOptimalSolution(problem) != .optimal) return .numerical_failure;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         self.objective_value = problem.objective_offset;
-        for (problem.col_cost, basis.primal[0..problem.num_cols]) |cost, value| self.objective_value += cost * value;
+        for (problem.col_cost, basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |cost, value, scale|
+            self.objective_value += cost * value * scale;
         if (!std.math.isFinite(self.objective_value)) return .numerical_failure;
         return .optimal;
+    }
+
+    /// Construct and validate an original-coordinate primal ray from the
+    /// signed entering direction and current FTRAN column. No finite iterate
+    /// is published as evidence: unboundedness is accepted only when variable
+    /// bounds, row recession directions, and objective improvement all hold.
+    fn finishUnbounded(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        @memset(basis.unbounded_ray, 0.0);
+        if (entering_col < problem.num_cols)
+            basis.unbounded_ray[entering_col] = entering_direction * basis.column_scale[entering_col];
+        for (basis.basic_index, basis.pivot_direction) |column_u32, direction| {
+            const column: usize = @intCast(column_u32);
+            if (column < problem.num_cols)
+                basis.unbounded_ray[column] = -direction * basis.column_scale[column];
+        }
+        if (!self.validateUnboundedRay(problem, basis.unbounded_ray)) return .numerical_failure;
+        self.unbounded_ray_valid = true;
+        return .unbounded;
+    }
+
+    fn validateUnboundedRay(self: *SimplexEngine, problem: problem_module.ProblemView, ray: []const f64) bool {
+        const basis = if (self.basis) |*value| value else return false;
+        if (ray.len != problem.num_cols) return false;
+        var ray_max: f64 = 0.0;
+        for (ray, problem.col_lower, problem.col_upper) |direction, lower, upper| {
+            if (!std.math.isFinite(direction)) return false;
+            ray_max = @max(ray_max, @abs(direction));
+            if (direction > self.numerical.zero_tolerance and std.math.isFinite(upper)) return false;
+            if (direction < -self.numerical.zero_tolerance and std.math.isFinite(lower)) return false;
+        }
+        if (ray_max <= self.numerical.zero_tolerance) return false;
+
+        @memset(basis.rhs_work, 0.0);
+        @memset(basis.residual_work, 0.0);
+        for (0..problem.num_cols) |column| {
+            const direction = ray[column];
+            if (direction == 0.0) continue;
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                const product = coefficient * direction;
+                basis.rhs_work[row_index] += product;
+                basis.residual_work[row_index] += @abs(product);
+            }
+        }
+        for (basis.rhs_work, basis.residual_work, problem.row_lower, problem.row_upper) |direction, magnitude, lower, upper| {
+            const tolerance = self.numerical.residual_tolerance * @max(1.0, magnitude);
+            if (std.math.isFinite(upper) and direction > tolerance) return false;
+            if (std.math.isFinite(lower) and direction < -tolerance) return false;
+        }
+
+        var objective_direction: f64 = 0.0;
+        var objective_magnitude: f64 = 0.0;
+        for (problem.col_cost, ray) |cost, direction| {
+            objective_direction += cost * direction;
+            objective_magnitude += @abs(cost * direction);
+        }
+        const objective_tolerance = self.numerical.dual_tolerance * @max(1.0, objective_magnitude);
+        return if (problem.objective_sense == .minimize)
+            objective_direction < -objective_tolerance
+        else
+            objective_direction > objective_tolerance;
     }
 
     /// Allocation-free KKT feasibility check used before publishing an
@@ -1600,18 +1831,20 @@ pub const SimplexEngine = struct {
         const primal_tolerance = self.numerical.primal_tolerance;
         const dual_tolerance = self.numerical.dual_tolerance;
 
-        for (basis.primal[0..problem.num_cols], problem.col_lower, problem.col_upper) |value, lower, upper| {
+        for (basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols], problem.col_lower, problem.col_upper) |internal, scale, lower, upper| {
+            const value = internal * scale;
             if (!std.math.isFinite(value) or value < lower - primal_tolerance or value > upper + primal_tolerance)
                 return .numerical_failure;
         }
 
         @memset(basis.rhs_work, 0.0);
         for (0..problem.num_cols) |column| {
-            const value = basis.primal[column];
+            const value = basis.primal[column] * basis.column_scale[column];
             if (value == 0.0) continue;
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                 basis.rhs_work[row.toUsize()] += coefficient * value;
             }
         }
@@ -1620,7 +1853,11 @@ pub const SimplexEngine = struct {
                 return .numerical_failure;
         }
 
-        for (basis.reduced_cost[0 .. problem.num_cols + problem.num_rows], basis.col_status[0 .. problem.num_cols + problem.num_rows]) |reduced, status| {
+        for (basis.reduced_cost[0 .. problem.num_cols + problem.num_rows], basis.col_status[0 .. problem.num_cols + problem.num_rows], 0..) |internal_reduced, status, column| {
+            const reduced = if (column < problem.num_cols)
+                internal_reduced / (basis.column_scale[column] * self.objective_scale)
+            else
+                internal_reduced / self.objective_scale;
             if (!std.math.isFinite(reduced)) return .numerical_failure;
             const infeasible = switch (status) {
                 .at_lower => reduced < -dual_tolerance,
@@ -1641,11 +1878,18 @@ pub const SimplexEngine = struct {
     /// Borrow the current engine-owned solution arrays without copying.
     pub fn solutionView(self: *const SimplexEngine, problem: problem_module.ProblemView, status: SolveStatus) ?solution_module.SolutionView {
         const basis = if (self.basis) |*value| value else return null;
+        for (basis.published_primal, basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |*published, internal, scale|
+            published.* = internal * scale;
+        for (basis.published_dual, basis.dual) |*published, internal|
+            published.* = internal / self.objective_scale;
+        for (basis.published_reduced_cost, basis.reduced_cost[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |*published, internal, scale|
+            published.* = internal / (scale * self.objective_scale);
         return .{
             .status = status,
-            .primal = basis.primal[0..problem.num_cols],
-            .dual = basis.dual,
-            .reduced_cost = basis.reduced_cost[0..problem.num_cols],
+            .primal = basis.published_primal,
+            .dual = basis.published_dual,
+            .reduced_cost = basis.published_reduced_cost,
+            .unbounded_ray = if (self.unbounded_ray_valid) basis.unbounded_ray else &.{},
             .objective_value = self.objective_value,
             .iterations = self.iterations,
         };
@@ -1913,7 +2157,11 @@ test "engine detects an unbounded improving structural column" {
     };
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
-    try std.testing.expectEqual(SolveStatus.unbounded, engine.solveProblem(problem, .{}));
+    const status = engine.solveProblem(problem, .{});
+    try std.testing.expectEqual(SolveStatus.unbounded, status);
+    const solution = engine.solutionView(problem, status).?;
+    try std.testing.expectEqual(@as(usize, 1), solution.unbounded_ray.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), solution.unbounded_ray[0], 1e-12);
 }
 
 test "Phase I respects a zero iteration limit" {

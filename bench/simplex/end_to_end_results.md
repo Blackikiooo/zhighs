@@ -61,5 +61,16 @@ pivotal components near the forward-accuracy boundary. Once encountered, the
 solve retains fresh factorizations because returning to intermittent FT updates
 can change later ratio-test decisions on these ill-conditioned bases.
 
-`gas11` remains classified as long-running/unresolved because the local HiGHS
-reference also exceeded the 30-second diagnostic limit.
+`gas11` is now independently certified unbounded. Direct HiGHS 1.14.0 with
+presolve disabled reports Unbounded in 699 iterations and about 0.05 seconds.
+The zhighs run performs 866 iterations in about 0.022 seconds on the same host;
+its published primal ray has maximum bound/row directional violation
+`1.71e-13` and objective direction `-3.600008e7`.
+
+The main speedup is structural rather than allocator-related. Phase-I reduced
+costs previously cleared and dotted a rows-long dense vector for every
+internal column, about 835 million scalar visits on gas11. A direct CSC
+`c - A^T y` pass reduces this to O(nnz + rows + columns). Reduced costs are
+then maintained incrementally with periodic exact sparse refreshes. Model
+coefficients at or below `1e-9` are consistently dropped before scaling,
+matching the HiGHS diagnostic policy for this model.

@@ -91,6 +91,8 @@ pub fn main(init: std.process.Init) !void {
 
     var primal_residual: f64 = std.math.inf(f64);
     var dual_residual: f64 = std.math.inf(f64);
+    var ray_residual: f64 = std.math.inf(f64);
+    var ray_objective: f64 = 0.0;
     if (engine.solutionView(problem, status)) |solution| {
         primal_residual = 0.0;
         dual_residual = 0.0;
@@ -116,6 +118,27 @@ pub fn main(init: std.process.Init) !void {
             };
             dual_residual = @max(dual_residual, current);
         };
+        if (solution.unbounded_ray.len == problem.num_cols) {
+            ray_residual = 0.0;
+            @memset(activity, 0.0);
+            for (0..problem.num_cols) |column| {
+                const direction = solution.unbounded_ray[column];
+                ray_objective += problem.col_cost[column] * direction;
+                if (std.math.isFinite(problem.col_upper[column])) ray_residual = @max(ray_residual, direction);
+                if (std.math.isFinite(problem.col_lower[column])) ray_residual = @max(ray_residual, -direction);
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!zhighs.matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    activity[row.toUsize()] += coefficient * direction;
+                }
+            }
+            for (activity, model.row_lower, model.row_upper) |direction, lower, upper| {
+                if (std.math.isFinite(upper)) ray_residual = @max(ray_residual, direction);
+                if (std.math.isFinite(lower)) ray_residual = @max(ray_residual, -direction);
+            }
+            ray_residual = @max(ray_residual, 0.0);
+        }
     }
 
     const stats = engine.factorization.stats;
@@ -123,8 +146,8 @@ pub fn main(init: std.process.Init) !void {
     const total_ns = parsed_ns + solve_ns;
     const line = try std.fmt.allocPrint(
         allocator,
-        "zhighs\t{s}\t{s}\t{s}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n",
-        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iterations, primal_residual, dual_residual, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.factorization.update_count, parsed_ns, solve_ns, total_ns },
+        "zhighs\t{s}\t{s}\t{s}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{e:.6}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n",
+        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iterations, primal_residual, dual_residual, ray_residual, ray_objective, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.factorization.update_count, parsed_ns, solve_ns, total_ns },
     );
     defer allocator.free(line);
     try std.Io.File.stdout().writeStreamingAll(io_context, line);

@@ -28,12 +28,21 @@
 - [x] 最优解发布前的 primal/dual residual 与人工变量校验。
 - [x] Stalled/degenerate pivot 监控；连续零步长触发 Bland-style
   entering/leaving 与字典序扰动 tie-break，有效移动后退出 fallback。
+- [x] 二次幂 row/objective scaling，并仅在 row-scaled matrix 动态范围超过
+  `1e6` 时启用 column scaling；solution view 还原 primal/dual/reduced cost。
+- [x] 原始坐标下统一 `1e-9` model-coefficient dropping policy，basis assembly、
+  pricing、FTRAN residual 和 certificate validation 使用同一结构。
+- [x] Unbounded primal ray 构造、原坐标发布及 bounds/row/objective 独立验收。
 
 ## 4. Phase I / Phase II 与状态输出
 
 - [x] Artificial variables 和 Phase-I objective。
 - [x] Infeasible/unbounded 判定。
 - [x] Phase-I cleanup 与 Phase-II objective transition。
+- [x] Phase-I reduced cost 使用一次 CSC 扫描，消除逐列 dense clear/dot；
+  primal pivot 后增量维护并每 8 次精确稀疏刷新，病态模式每次刷新。
+- [ ] 实现带 cost perturbation 的专用 dual Phase I，再允许 neither-feasible
+  cold logical crash 走 dual -> primal；现有 warm-basis repair 不满足该前提。
 - [x] Basis status、primal、dual、reduced cost 和模型 solution 回写。
 
 ## 5. 端到端验收
