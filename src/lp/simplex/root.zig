@@ -13,6 +13,7 @@ pub const pricing = @import("pricing.zig");
 pub const ratio_test = @import("ratio_test.zig");
 pub const numerical = @import("numerical.zig");
 pub const dual_phase_one = @import("dual_phase_one.zig");
+pub const crash = @import("crash.zig");
 pub const problem = @import("problem.zig");
 pub const solution = @import("solution.zig");
 pub const engine = @import("engine.zig");

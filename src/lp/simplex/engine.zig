@@ -7,6 +7,7 @@ const pricing_module = @import("pricing.zig");
 const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
+const crash_module = @import("crash.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
@@ -14,6 +15,7 @@ const matrix = @import("matrix");
 
 pub const Algorithm = enum { primal_revised, dual_revised };
 pub const PhaseOneStrategy = enum { primal, dual, automatic };
+pub const CrashStrategy = enum { logical, ltssf, automatic };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -96,12 +98,24 @@ pub const SolveControl = struct {
     /// Cold-start Phase-I policy. `primal` remains the compatibility default
     /// until corpus A/B validation allows deterministic automatic selection.
     phase_one_strategy: PhaseOneStrategy = .primal,
+    /// Cold-start basis construction. Kept logical by default until the
+    /// explicit LTSSF path passes its performance gate.
+    crash_strategy: CrashStrategy = .logical,
+    /// Optional structural-column cap for deterministic crash-prefix A/B.
+    /// Null uses the longest numerically valid prefix within the logical-anchor limit.
+    crash_max_columns: ?usize = null,
 };
 
 pub const SimplexStats = struct {
     phase_one_iterations: usize = 0,
     dual_phase_one_iterations: usize = 0,
     dual_phase_one_fallbacks: usize = 0,
+    crash_attempts: usize = 0,
+    crash_fallbacks: usize = 0,
+    crash_planned_columns: usize = 0,
+    crash_structural_columns: usize = 0,
+    crash_basis_nonzeros: usize = 0,
+    crash_condition_estimate: f64 = 1.0,
     dual_repair_iterations: usize = 0,
     phase_two_iterations: usize = 0,
     phase_one_ns: u64 = 0,
@@ -169,6 +183,7 @@ pub const SimplexEngine = struct {
     basis: ?basis_module.BasisState = null,
     factorization: factorization_module.Factorization,
     dual_phase_one: dual_phase_one_module.DualPhaseOneWorkspace,
+    crash: crash_module.CrashWorkspace,
     pricing: pricing_module.Pricing = .{},
     ratio_test: ratio_module.RatioTest = .{},
     numerical: numerical_module.NumericalState = .{},
@@ -205,17 +220,19 @@ pub const SimplexEngine = struct {
             .allocator = a,
             .factorization = factorization_module.Factorization.init(a),
             .dual_phase_one = dual_phase_one_module.DualPhaseOneWorkspace.init(a),
+            .crash = crash_module.CrashWorkspace.init(a),
         };
     }
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
         self.factorization.deinit();
         self.dual_phase_one.deinit();
+        self.crash.deinit();
     }
 
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes();
+        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes() + self.crash.requestedBytes();
     }
     pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
         return .not_implemented;
@@ -287,20 +304,53 @@ pub const SimplexEngine = struct {
         }
 
         self.algorithm = .primal_revised;
-        if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+        const logical_numerical_state = self.numerical;
+        const logical_pricing_state = self.pricing;
+        var crash_installed = false;
+        const crash_strategy = switch (control.crash_strategy) {
+            .logical => CrashStrategy.logical,
+            .ltssf => CrashStrategy.ltssf,
+            // Corpus A/B currently rejects LTSSF as a default because brandy
+            // falls back and several models regress. Keep automatic pinned to
+            // logical until a later scoring policy clears that gate.
+            .automatic => CrashStrategy.logical,
+        };
+        if (crash_strategy == .ltssf) {
+            self.stats.crash_attempts += 1;
+            crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns);
+            if (!crash_installed) {
+                self.stats.crash_fallbacks += 1;
+                if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
+                self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                self.numerical = logical_numerical_state;
+                self.pricing = logical_pricing_state;
+                self.dual_edge_weights_valid = true;
+                self.observeFactorizationStability();
+            }
+        }
+        if (!crash_installed) {
+            if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+        }
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
         const crash_feasibility = self.classifyFeasibility(problem);
         if (crash_feasibility.primal) return self.solvePrimal(problem, control);
-        const phase_one_strategy = switch (control.phase_one_strategy) {
+        // The artificial primal Phase I columns are tied to the logical
+        // identity. A structural crash must use the general dual Phase I;
+        // failure restores the logical basis before the primal fallback.
+        const phase_one_strategy = if (crash_installed)
+            PhaseOneStrategy.dual
+        else switch (control.phase_one_strategy) {
             .primal => PhaseOneStrategy.primal,
             .dual => PhaseOneStrategy.dual,
             .automatic => self.chooseColdPhaseOneStrategy(problem),
         };
         if (phase_one_strategy == .dual) {
-            const numerical_before_dual_phase_one = self.numerical;
-            const pricing_before_dual_phase_one = self.pricing;
+            const numerical_before_dual_phase_one = if (crash_installed) logical_numerical_state else self.numerical;
+            const pricing_before_dual_phase_one = if (crash_installed) logical_pricing_state else self.pricing;
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
-            if (dual_phase_one_status != .not_implemented) return dual_phase_one_status;
+            if (dual_phase_one_status != .not_implemented and dual_phase_one_status != .numerical_failure)
+                return dual_phase_one_status;
+            if (crash_installed) self.stats.crash_fallbacks += 1;
             self.stats.dual_phase_one_fallbacks += 1;
             // A failed explicit experiment falls back to the frozen logical
             // crash and artificial Phase I, preserving the correctness path.
@@ -308,6 +358,15 @@ pub const SimplexEngine = struct {
             self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
             self.numerical = numerical_before_dual_phase_one;
             self.pricing = pricing_before_dual_phase_one;
+            self.failure_site = .none;
+            self.direction_requires_reinversion = false;
+            self.fresh_factorization_pivots_remaining = 0;
+            self.reduced_cost_update_count = 0;
+            self.dual_candidate_count = 0;
+            self.dual_candidate_cutoff = 0.0;
+            self.dual_hyper_sparse_active = false;
+            self.dual_row_index = null;
+            self.cleanup_active = false;
             self.dual_edge_weights_valid = true;
             self.observeFactorizationStability();
             if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
@@ -386,6 +445,73 @@ pub const SimplexEngine = struct {
             basis.basic_upper[row] = basis.col_upper[column];
         }
         return .optimal;
+    }
+
+    /// Install an LTSSF-style structural crash basis transactionally. The
+    /// caller restores the logical identity on false, so no partial matching
+    /// can escape numerical validation.
+    fn installSparseCrashBasis(self: *SimplexEngine, problem: problem_module.ProblemView, maximum_columns: ?usize) bool {
+        const basis = if (self.basis) |*value| value else return false;
+        const average_column_degree = if (problem.num_cols == 0) 0 else (problem.matrix.values.len + problem.num_cols - 1) / problem.num_cols;
+        const near_singleton_limit: u32 = @intCast(@min(@max(average_column_degree * 2, 4), 32));
+        const plan_view = self.crash.plan(
+            problem.matrix,
+            problem.col_cost,
+            basis.col_lower[0..problem.num_cols],
+            basis.col_upper[0..problem.num_cols],
+            basis.row_scale,
+            basis.column_scale[0..problem.num_cols],
+            near_singleton_limit,
+            self.numerical.pivot_tolerance,
+        ) catch return false;
+        if (plan_view.rows.len == 0) return false;
+        self.stats.crash_planned_columns = plan_view.rows.len;
+
+        // A near-singleton symbolic matching can still be numerically rank
+        // deficient. Validate the longest deterministic prefix first, then
+        // halve it until a safe basis is found. No partial basis is published.
+        // Retain at least one quarter of the logical columns as stable anchors.
+        // A fully structural crash can be perfectly invertible yet leave the
+        // current dual Phase-I update path without a safe reinversion route.
+        const anchored_limit = if (problem.num_rows == 0) 0 else @max(@as(usize, 1), problem.num_rows * 3 / 4);
+        var prefix_count = @min(plan_view.rows.len, maximum_columns orelse anchored_limit);
+        while (prefix_count != 0) : (prefix_count /= 2) {
+            if (self.initializeProblemStorage(problem) != .optimal) return false;
+            var basis_nonzeros = problem.num_rows - prefix_count;
+            for (plan_view.rows[0..prefix_count], plan_view.columns[0..prefix_count]) |row_u32, column_u32| {
+                const row: usize = @intCast(row_u32);
+                const column: usize = @intCast(column_u32);
+                const logical = problem.num_cols + row;
+                const leaving_status = nonbasicStatusForBounds(basis.col_lower[logical], basis.col_upper[logical]);
+                basis.primal[logical] = switch (leaving_status) {
+                    .at_lower, .fixed => basis.col_lower[logical],
+                    .at_upper => basis.col_upper[logical],
+                    .free, .superbasic => 0.0,
+                    .basic => unreachable,
+                };
+                basis.applyPivot(row, column, leaving_status) catch return false;
+                basis.basic_lower[row] = basis.col_lower[column];
+                basis.basic_upper[row] = basis.col_upper[column];
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                for (problem.matrix.values[begin..end]) |coefficient| {
+                    if (matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) basis_nonzeros += 1;
+                }
+            }
+            self.factorizeCurrentBasis(problem) catch continue;
+            if (self.finishRefactorization() != .optimal) continue;
+            const condition = self.factorization.pivotConditionEstimate();
+            if (!std.math.isFinite(condition) or condition > 1e12) continue;
+            if (self.recomputeBasicValuesUnchecked(problem) != .optimal) continue;
+            if (!std.math.isFinite(self.numerical.last_relative_residual) or
+                self.numerical.last_relative_residual > self.numerical.residual_tolerance * 100.0)
+                continue;
+            self.stats.crash_structural_columns = prefix_count;
+            self.stats.crash_basis_nonzeros = basis_nonzeros;
+            self.stats.crash_condition_estimate = condition;
+            return true;
+        }
+        return false;
     }
 
     /// Reoptimize with the existing basis and factorization. The caller must

@@ -37,6 +37,14 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, text, "dual")) .dual else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "primal")) .primal else return error.InvalidArguments
     else
         .primal;
+    const crash_strategy: zhighs.lp.simplex.engine.CrashStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "ltssf")) .ltssf else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "logical")) .logical else return error.InvalidArguments
+    else
+        .logical;
+    const crash_max_columns = if (args.next()) |text| blk: {
+        const value = try std.fmt.parseUnsigned(usize, text, 10);
+        break :blk if (value == 0) null else value;
+    } else null;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -90,6 +98,8 @@ pub fn main(init: std.process.Init) !void {
         .pivot_trace = trace,
         .collect_statistics = collect_statistics,
         .phase_one_strategy = phase_one_strategy,
+        .crash_strategy = crash_strategy,
+        .crash_max_columns = crash_max_columns,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -196,7 +206,7 @@ pub fn main(init: std.process.Init) !void {
     const peak_rss_kb: u64 = @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
     const stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tphase1_iterations={d}\tdual_phase1_iterations={d}\tdual_phase1_fallbacks={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_phase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",
+        "stats\t{s}\tphase1_iterations={d}\tdual_phase1_iterations={d}\tdual_phase1_fallbacks={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_phase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\tcrash_attempts={d}\tcrash_fallbacks={d}\tcrash_planned_columns={d}\tcrash_structural_columns={d}\tcrash_basis_nonzeros={d}\tcrash_condition={e:.6}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",
         .{
             path,
             simplex_stats.phase_one_iterations,
@@ -209,6 +219,12 @@ pub fn main(init: std.process.Init) !void {
             simplex_stats.dual_repair_ns,
             simplex_stats.phase_two_ns,
             simplex_stats.cleanup_ns,
+            simplex_stats.crash_attempts,
+            simplex_stats.crash_fallbacks,
+            simplex_stats.crash_planned_columns,
+            simplex_stats.crash_structural_columns,
+            simplex_stats.crash_basis_nonzeros,
+            simplex_stats.crash_condition_estimate,
             simplex_stats.rebuild_calls,
             simplex_stats.rebuild_ns,
             factor_stats.factorizations,
