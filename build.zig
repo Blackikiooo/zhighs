@@ -166,6 +166,23 @@ pub fn build(b: *std.Build) void {
     const simplex_session_bench_step = b.step("bench-simplex", "Run cold and warm simplex-session benchmarks");
     simplex_session_bench_step.dependOn(&run_simplex_session_bench.step);
 
+    const simplex_end_to_end = b.addExecutable(.{
+        .name = "simplex-end-to-end",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/end_to_end_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const install_simplex_end_to_end = b.addInstallArtifact(simplex_end_to_end, .{});
+    const build_simplex_end_to_end_step = b.step("build-simplex-end-to-end", "Build the MPS-to-simplex acceptance runner");
+    build_simplex_end_to_end_step.dependOn(&install_simplex_end_to_end.step);
+    const run_simplex_end_to_end = b.addRunArtifact(simplex_end_to_end);
+    if (b.args) |args| run_simplex_end_to_end.addArgs(args);
+    const simplex_end_to_end_step = b.step("accept-simplex", "Run one end-to-end simplex acceptance model");
+    simplex_end_to_end_step.dependOn(&run_simplex_end_to_end.step);
+
     const sparse_basis_bench = b.addExecutable(.{
         .name = "sparse-basis-bench",
         .root_module = b.createModule(.{
