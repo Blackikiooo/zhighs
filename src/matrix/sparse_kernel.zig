@@ -83,12 +83,11 @@ pub const MutableSparseKernel = struct {
 
     pub fn deinit(self: *MutableSparseKernel) void {
         inline for (.{
-            "row_head",         "column_head",         "row_count",       "column_count",        "column_maximum",      "column_maximum_dirty",
-            "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value",
-            "row_active",       "column_active",
-            "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous",
-            "entry_row",        "entry_column",        "entry_value",     "row_next",            "row_previous",       "column_next",
-            "column_previous",  "free_next",           "scratch_rows",    "scratch_columns",     "scratch_l",          "scratch_u",
+            "row_head",              "column_head",           "row_count",           "column_count",          "column_maximum",     "column_maximum_dirty",
+            "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active",         "column_active",
+            "row_bucket_first",      "column_bucket_first",   "row_bucket_next",     "row_bucket_previous",   "column_bucket_next", "column_bucket_previous",
+            "entry_row",             "entry_column",          "entry_value",         "row_next",              "row_previous",       "column_next",
+            "column_previous",       "free_next",             "scratch_rows",        "scratch_columns",       "scratch_l",          "scratch_u",
             "scratch_lookup",
         }) |field_name| self.allocator.free(@field(self, field_name));
         self.* = .{ .allocator = self.allocator };
@@ -100,11 +99,12 @@ pub const MutableSparseKernel = struct {
     pub fn requestedBytes(self: *const MutableSparseKernel) usize {
         var total: usize = 0;
         inline for (.{
-            "row_head", "column_head", "row_count", "column_count",
-            "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous",
-            "column_bucket_next", "column_bucket_previous", "entry_row", "entry_column",
-            "row_next", "row_previous", "column_next", "column_previous", "free_next",
-            "scratch_rows", "scratch_columns", "scratch_lookup", "local_candidate_row",
+            "row_head",            "column_head",            "row_count",       "column_count",
+            "row_bucket_first",    "column_bucket_first",    "row_bucket_next", "row_bucket_previous",
+            "column_bucket_next",  "column_bucket_previous", "entry_row",       "entry_column",
+            "row_next",            "row_previous",           "column_next",     "column_previous",
+            "free_next",           "scratch_rows",           "scratch_columns", "scratch_lookup",
+            "local_candidate_row",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         inline for (.{ "row_active", "column_active", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
@@ -114,23 +114,29 @@ pub const MutableSparseKernel = struct {
     }
 
     pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
-        return self.loadImpl(basis, true);
+        return self.loadImpl(basis, true, null, null);
     }
 
     /// Trusted hot-path load for basis views emitted by `SparseBasisBuffers`.
     /// Dimensions, sorted rows and finite nonzero values are not rescanned.
     pub fn loadAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
-        return self.loadImpl(basis, false);
+        return self.loadImpl(basis, false, null, null);
     }
 
-    fn loadImpl(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, comptime validate: bool) KernelError!void {
+    /// Load only the active reduced kernel after symbolic singleton peeling.
+    pub fn loadReducedAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, active_rows: []const bool, active_columns: []const bool) KernelError!void {
+        if (active_rows.len != basis.dimension or active_columns.len != basis.dimension) return error.InvalidBasis;
+        return self.loadImpl(basis, false, active_rows, active_columns);
+    }
+
+    fn loadImpl(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, comptime validate: bool, reduced_rows: ?[]const bool, reduced_columns: ?[]const bool) KernelError!void {
         const n = basis.dimension;
         if (n > std.math.maxInt(u32) or basis.nnz() > std.math.maxInt(u32)) return error.InvalidBasis;
         if (validate and (basis.starts.len != n + 1 or basis.rows.len != basis.values.len)) return error.InvalidBasis;
         try self.ensureDimension(n);
         try self.ensureEntries(@max(basis.nnz(), n));
         self.dimension = n;
-        self.entry_high_water = basis.nnz();
+        self.entry_high_water = 0;
         self.free_head = none;
         self.buckets_ready = false;
         self.cache_column_maxima = n != 0 and basis.nnz() / n > 4;
@@ -143,12 +149,13 @@ pub const MutableSparseKernel = struct {
         @memset(self.column_maximum_dirty[0..n], false);
         @memset(self.local_candidate_dirty[0..n], true);
         @memset(self.local_candidate_valid[0..n], false);
-        @memset(self.row_active[0..n], true);
-        @memset(self.column_active[0..n], true);
+        if (reduced_rows) |mask| @memcpy(self.row_active[0..n], mask) else @memset(self.row_active[0..n], true);
+        if (reduced_columns) |mask| @memcpy(self.column_active[0..n], mask) else @memset(self.column_active[0..n], true);
         @memset(self.row_bucket_first[0 .. n + 1], none);
         @memset(self.column_bucket_first[0 .. n + 1], none);
 
         for (0..n) |column| {
+            if (!self.column_active[column]) continue;
             const begin: usize = @intCast(basis.starts[column]);
             const end: usize = @intCast(basis.starts[column + 1]);
             if (validate and (begin > end or end > basis.nnz())) return error.InvalidBasis;
@@ -156,6 +163,7 @@ pub const MutableSparseKernel = struct {
             for (begin..end) |position| {
                 const row = basis.rows[position].toUsize();
                 const value = basis.values[position];
+                if (!self.row_active[row]) continue;
                 if (validate and (row >= n or !std.math.isFinite(value) or value == 0.0)) return error.InvalidBasis;
                 if (validate) if (previous_row) |previous| if (row <= previous) return error.InvalidBasis;
                 previous_row = row;
@@ -163,7 +171,8 @@ pub const MutableSparseKernel = struct {
                 // Materialize both intrusive views directly: routing the cold
                 // load through the dynamic fill allocator would add free-list,
                 // capacity and bucket branches to every original nonzero.
-                const entry: u32 = @intCast(position);
+                const entry: u32 = @intCast(self.entry_high_water);
+                self.entry_high_water += 1;
                 self.entry_row[entry] = @intCast(row);
                 self.entry_column[entry] = @intCast(column);
                 self.entry_value[entry] = value;
@@ -180,11 +189,11 @@ pub const MutableSparseKernel = struct {
                 self.column_maximum[column] = @max(self.column_maximum[column], @abs(value));
             }
         }
-        for (self.row_count[0..n], self.column_count[0..n]) |row_entries, column_entries|
-            if (row_entries == 0 or column_entries == 0) return error.Singular;
+        for (self.row_count[0..n], self.column_count[0..n], self.row_active[0..n], self.column_active[0..n]) |row_entries, column_entries, row_is_active, column_is_active|
+            if ((row_is_active and row_entries == 0) or (column_is_active and column_entries == 0)) return error.Singular;
         for (0..n) |index| {
-            self.rowBucketInsert(@intCast(index), self.row_count[index]);
-            self.columnBucketInsert(@intCast(index), self.column_count[index]);
+            if (self.row_active[index]) self.rowBucketInsert(@intCast(index), self.row_count[index]);
+            if (self.column_active[index]) self.columnBucketInsert(@intCast(index), self.column_count[index]);
         }
         self.buckets_ready = true;
     }

@@ -68,10 +68,14 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 - [x] Non-allocator INVERT tuning: dead-pivot bucket suppression, direct CSC
   pool load, redundant entry-state removal, theoretical Markowitz lower-bound
   stop, explicit trusted zero-copy entry, and warm no-allocation test.
+- [x] Dual sparse-ordering backends with reduced-kernel dispatch, HiGHS-style
+  bounded row/column Markowitz search, dynamic pre-kernel singleton peeling,
+  and fixed pivot-trace separation of ordering from numerical update cost.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
 - Forrest--Tomlin updates and adaptive reinversion.
-- Hyper-sparse FTRAN/BTRAN.
+- [x] Reachability-based hyper-sparse FTRAN/BTRAN with dense-output adaptive
+  dispatch and an explicit sparse-output API.
 - Retain dense LU only as a small-basis fallback and correctness oracle.
 
 ## Priority 4: pricing and numerical robustness

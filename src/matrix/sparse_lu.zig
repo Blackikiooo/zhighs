@@ -8,8 +8,9 @@
 const std = @import("std");
 const sparse_basis = @import("sparse_basis.zig");
 const sparse_kernel = @import("sparse_kernel.zig");
+const sparse_symbolic = @import("sparse_symbolic.zig");
 
-pub const SparseLuError = sparse_kernel.KernelError || error{ DimensionMismatch, NumericalFailure };
+pub const SparseLuError = sparse_kernel.KernelError || sparse_symbolic.SymbolicError || error{ DimensionMismatch, NumericalFailure };
 
 pub const PivotTrace = struct { rows: []const u32, columns: []const u32 };
 pub const OrderingStrategy = enum { automatic, dod_markowitz, highs_kernel };
@@ -17,6 +18,7 @@ pub const OrderingStrategy = enum { automatic, dod_markowitz, highs_kernel };
 pub const SparseLU = struct {
     allocator: std.mem.Allocator,
     kernel: sparse_kernel.MutableSparseKernel,
+    symbolic: sparse_symbolic.SymbolicWorkspace,
     dimension_capacity: usize = 0,
     factor_capacity: usize = 0,
     dimension: usize = 0,
@@ -59,19 +61,20 @@ pub const SparseLU = struct {
     zero_tolerance: f64 = 1e-14,
 
     pub fn init(allocator: std.mem.Allocator) SparseLU {
-        return .{ .allocator = allocator, .kernel = sparse_kernel.MutableSparseKernel.init(allocator) };
+        return .{ .allocator = allocator, .kernel = sparse_kernel.MutableSparseKernel.init(allocator), .symbolic = sparse_symbolic.SymbolicWorkspace.init(allocator) };
     }
 
     pub fn deinit(self: *SparseLU) void {
         self.kernel.deinit();
+        self.symbolic.deinit();
         inline for (.{
-            "pivot_rows", "pivot_columns", "row_position", "column_position", "pivot_values",
-            "l_starts",   "u_starts",      "l_rows",       "l_values",        "u_columns",
-            "u_values",   "work",           "active",       "hyper_output", "marked",
-            "u_column_starts", "u_column_rows", "u_column_values",
-            "l_row_starts", "l_row_columns", "l_row_values",
+            "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
+            "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
+            "u_values",        "work",          "active",          "hyper_output",    "marked",
+            "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts",    "l_row_columns",
+            "l_row_values",
         }) |field_name| self.allocator.free(@field(self, field_name));
-        self.* = .{ .allocator = self.allocator, .kernel = sparse_kernel.MutableSparseKernel.init(self.allocator) };
+        self.* = .{ .allocator = self.allocator, .kernel = sparse_kernel.MutableSparseKernel.init(self.allocator), .symbolic = sparse_symbolic.SymbolicWorkspace.init(self.allocator) };
     }
 
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
@@ -96,7 +99,6 @@ pub const SparseLU = struct {
         const n = basis.dimension;
         try self.ensureDimension(n);
         try self.ensureFactorCapacity(@max(basis.nnz(), n));
-        if (validate) try self.kernel.load(basis) else try self.kernel.loadAssumeValid(basis);
         self.dimension = n;
         self.l_nonzeros = 0;
         self.u_nonzeros = 0;
@@ -113,36 +115,50 @@ pub const SparseLU = struct {
         self.l_starts[0] = 0;
         self.u_starts[0] = 0;
 
-        var peeling = trace == null;
-        for (0..n) |pivot_index| {
-            const choice = if (trace) |recorded|
-                self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
-            else if (peeling) peel: {
-                if (self.kernel.chooseSingleton()) |singleton| {
-                    self.peeled_pivots += 1;
-                    break :peel singleton;
-                }
-                peeling = false;
+        var first_kernel_pivot: usize = 0;
+        const use_pre_kernel_peeling = trace == null and n >= 192 and basis.nnz() / @max(n, 1) > 4;
+        if (use_pre_kernel_peeling) {
+            const plan = try self.symbolic.planSingletonPrefix(basis);
+            first_kernel_pivot = plan.singleton_pivots;
+            self.peeled_pivots = first_kernel_pivot;
+            @memset(self.row_position[0..n], @as(u32, @intCast(n)));
+            @memset(self.column_position[0..n], @as(u32, @intCast(n)));
+            for (plan.pivot_rows[0..first_kernel_pivot], plan.pivot_columns[0..first_kernel_pivot], 0..) |row, column, position| {
+                self.row_position[row] = @intCast(position);
+                self.column_position[column] = @intCast(position);
+            }
+            for (0..first_kernel_pivot) |position|
+                try self.packSymbolicSingleton(basis, plan, position);
+            try self.kernel.loadReducedAssumeValid(basis, plan.active_rows, plan.active_columns);
+            const shape = self.kernel.shape();
+            self.kernel_dimension = shape.dimension;
+            self.kernel_nonzeros = shape.nonzeros;
+            self.kernel_maximum_row_count = shape.maximum_row_count;
+            self.kernel_maximum_column_count = shape.maximum_column_count;
+            self.selected_ordering = self.selectOrdering(shape);
+        } else {
+            if (validate) try self.kernel.load(basis) else try self.kernel.loadAssumeValid(basis);
+            if (trace == null) {
                 const shape = self.kernel.shape();
                 self.kernel_dimension = shape.dimension;
                 self.kernel_nonzeros = shape.nonzeros;
                 self.kernel_maximum_row_count = shape.maximum_row_count;
                 self.kernel_maximum_column_count = shape.maximum_column_count;
                 self.selected_ordering = self.selectOrdering(shape);
-                break :peel switch (self.selected_ordering) {
-                    .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
-                    .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
-                    .automatic => unreachable,
-                };
-            } else
-                switch (self.selected_ordering) {
-                    // The backend split is deliberately established before
-                    // the HiGHS-style search lands, so dispatch/API changes
-                    // can be verified independently from ordering changes.
-                    .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
-                    .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
-                    .automatic => unreachable,
-                };
+            }
+        }
+
+        for (first_kernel_pivot..n) |pivot_index| {
+            const choice = if (trace) |recorded|
+                self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
+            else switch (self.selected_ordering) {
+                // The backend split is deliberately established before
+                // the HiGHS-style search lands, so dispatch/API changes
+                // can be verified independently from ordering changes.
+                .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
+                .automatic => unreachable,
+            };
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);
             try self.ensureFactorCapacity(@max(self.l_nonzeros + pivot.l_rows.len, self.u_nonzeros + pivot.u_columns.len));
             self.pivot_rows[pivot_index] = pivot.pivot_row;
@@ -160,11 +176,43 @@ pub const SparseLU = struct {
             self.u_starts[pivot_index + 1] = self.u_nonzeros;
             self.inserted_fill += pivot.inserted_fill;
         }
-        if (peeling) {
-            self.kernel_dimension = 0;
-            self.kernel_nonzeros = 0;
-        }
         self.hyper_views_ready = false;
+    }
+
+    fn packSymbolicSingleton(self: *SparseLU, basis: sparse_basis.SparseBasisView, plan: sparse_symbolic.SymbolicPlanView, position: usize) SparseLuError!void {
+        const row = plan.pivot_rows[position];
+        const column = plan.pivot_columns[position];
+        var pivot_value: f64 = 0.0;
+        const column_begin: usize = @intCast(basis.starts[column]);
+        const column_end: usize = @intCast(basis.starts[column + 1]);
+        for (column_begin..column_end) |entry| if (basis.rows[entry].toUsize() == row) {
+            pivot_value = basis.values[entry];
+            break;
+        };
+        if (pivot_value == 0.0 or !std.math.isFinite(pivot_value)) return error.Singular;
+        self.pivot_rows[position] = row;
+        self.pivot_columns[position] = column;
+        self.pivot_values[position] = pivot_value;
+        for (column_begin..column_end) |entry| {
+            const candidate_row: u32 = @intCast(basis.rows[entry].toUsize());
+            if (self.row_position[candidate_row] <= position) continue;
+            try self.ensureFactorCapacity(self.l_nonzeros + 1);
+            self.l_rows[self.l_nonzeros] = candidate_row;
+            self.l_values[self.l_nonzeros] = basis.values[entry] / pivot_value;
+            self.l_nonzeros += 1;
+        }
+        self.l_starts[position + 1] = self.l_nonzeros;
+        const row_begin: usize = @intCast(plan.row_starts[row]);
+        const row_end: usize = @intCast(plan.row_starts[row + 1]);
+        for (plan.row_entries[row_begin..row_end]) |entry| {
+            const candidate_column = plan.entry_columns[entry];
+            if (self.column_position[candidate_column] <= position) continue;
+            try self.ensureFactorCapacity(self.u_nonzeros + 1);
+            self.u_columns[self.u_nonzeros] = candidate_column;
+            self.u_values[self.u_nonzeros] = basis.values[entry];
+            self.u_nonzeros += 1;
+        }
+        self.u_starts[position + 1] = self.u_nonzeros;
     }
 
     /// Solve `B x = rhs` in place using the published row/column permutations.
@@ -317,11 +365,13 @@ pub const SparseLU = struct {
     /// Retained requested bytes for the complete numerical kernel, factors,
     /// permutations and solve workspace. Allocator bookkeeping is excluded.
     pub fn requestedBytes(self: *const SparseLU) usize {
-        var total = self.kernel.requestedBytes();
+        var total = self.kernel.requestedBytes() + self.symbolic.retainedBytes();
         inline for (.{
-            "pivot_rows", "pivot_columns", "row_position", "column_position", "pivot_values",
-            "l_starts", "u_starts", "l_rows", "l_values", "u_columns", "u_values", "work", "active", "hyper_output", "marked",
-            "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts", "l_row_columns", "l_row_values",
+            "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
+            "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
+            "u_values",        "work",          "active",          "hyper_output",    "marked",
+            "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts",    "l_row_columns",
+            "l_row_values",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         return total;
     }
@@ -405,7 +455,9 @@ pub const SparseLU = struct {
             self.work[position] = value;
         } else self.work[position] += value;
     }
-    fn accumulate(self: *SparseLU, position: u32, value: f64) void { self.activate(position, value); }
+    fn accumulate(self: *SparseLU, position: u32, value: f64) void {
+        self.activate(position, value);
+    }
 };
 
 fn grow(current: usize, required: usize) error{Overflow}!usize {

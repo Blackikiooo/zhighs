@@ -33,6 +33,11 @@ pub const SymbolicPlanView = struct {
     singleton_pivots: usize,
     markowitz_pivots: usize,
     remaining_dimension: usize,
+    active_rows: []const bool,
+    active_columns: []const bool,
+    row_starts: []const Offset,
+    row_entries: []const u32,
+    entry_columns: []const u32,
 
     pub inline fn dimension(self: SymbolicPlanView) usize {
         return self.pivot_rows.len;
@@ -94,6 +99,16 @@ pub const SymbolicWorkspace = struct {
     /// The numerical factorizer must apply that kernel pivot and its fill-in
     /// before asking for another choice.
     pub fn plan(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, pivot_threshold: f64) SymbolicError!SymbolicPlanView {
+        return self.planImpl(basis, pivot_threshold, false);
+    }
+
+    /// Return only the fill-free singleton prefix. The active masks and row
+    /// companion describe the reduced kernel without materializing it.
+    pub fn planSingletonPrefix(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView) SymbolicError!SymbolicPlanView {
+        return self.planImpl(basis, 0.1, true);
+    }
+
+    fn planImpl(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, pivot_threshold: f64, comptime singleton_only: bool) SymbolicError!SymbolicPlanView {
         const n = basis.dimension;
         if (basis.starts.len != n + 1 or basis.rows.len != basis.values.len or
             !std.math.isFinite(pivot_threshold) or pivot_threshold <= 0.0 or pivot_threshold > 1.0 or
@@ -134,10 +149,24 @@ pub const SymbolicWorkspace = struct {
             }
 
             if (selected_row == null) {
-                const choice = self.chooseMarkowitz(basis, pivot_threshold) orelse return error.Singular;
-                selected_row = choice.row;
-                selected_column = choice.column;
-                selected_kind = if (self.column_counts[choice.column] == 1) .column_singleton else .markowitz;
+                if (singleton_only) {
+                    const column = self.bucket_first[1];
+                    if (column == none) break;
+                    const begin: usize = @intCast(basis.starts[column]);
+                    const end: usize = @intCast(basis.starts[column + 1]);
+                    for (basis.rows[begin..end]) |row_id| if (self.row_active[row_id.toUsize()]) {
+                        selected_row = @intCast(row_id.toUsize());
+                        selected_column = column;
+                        selected_kind = .column_singleton;
+                        break;
+                    };
+                    if (selected_row == null) return error.Singular;
+                } else {
+                    const choice = self.chooseMarkowitz(basis, pivot_threshold) orelse return error.Singular;
+                    selected_row = choice.row;
+                    selected_column = choice.column;
+                    selected_kind = if (self.column_counts[choice.column] == 1) .column_singleton else .markowitz;
+                }
             }
 
             const row = selected_row.?;
@@ -158,6 +187,11 @@ pub const SymbolicWorkspace = struct {
             .singleton_pivots = singleton_count,
             .markowitz_pivots = markowitz_count,
             .remaining_dimension = n - pivot_count,
+            .active_rows = self.row_active[0..n],
+            .active_columns = self.column_active[0..n],
+            .row_starts = self.row_starts[0 .. n + 1],
+            .row_entries = self.row_entries[0..basis.nnz()],
+            .entry_columns = self.entry_columns[0..basis.nnz()],
         };
     }
 
