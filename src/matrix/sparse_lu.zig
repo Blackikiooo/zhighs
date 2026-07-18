@@ -52,10 +52,20 @@ pub const SparseLU = struct {
     }
 
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
+        return self.factorizeImpl(basis, true);
+    }
+
+    /// Zero-copy trusted reinversion entry for canonical engine-owned basis
+    /// CSC. Workspace and factor capacities are retained across calls.
+    pub fn factorizeAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
+        return self.factorizeImpl(basis, false);
+    }
+
+    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool) SparseLuError!void {
         const n = basis.dimension;
         try self.ensureDimension(n);
         try self.ensureFactorCapacity(@max(basis.nnz(), n));
-        try self.kernel.load(basis);
+        if (validate) try self.kernel.load(basis) else try self.kernel.loadAssumeValid(basis);
         self.dimension = n;
         self.l_nonzeros = 0;
         self.u_nonzeros = 0;
@@ -259,4 +269,32 @@ test "sparse LU matches original products across deterministic sparse bases" {
             try std.testing.expectApproxEqAbs(original[column], product, 1e-10);
         }
     }
+}
+
+test "warm reinversion and solves perform no allocator calls" {
+    const foundation = @import("foundation");
+    const RowId = foundation.RowId;
+    const Offset = foundation.HUInt;
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 3,
+        .starts = &[_]Offset{ 0, 2, 4, 6 },
+        .rows = &[_]RowId{
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(1),
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(2),
+            RowId.fromUsizeAssumeValid(1), RowId.fromUsizeAssumeValid(2),
+        },
+        .values = &[_]f64{ 2, 1, 1, 2, 3, 4 },
+    };
+    var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var lu = SparseLU.init(counted.allocator());
+    defer lu.deinit();
+    try lu.factorize(basis);
+    const allocations = counted.allocations;
+    const resizes = counted.resize_index;
+    try lu.factorizeAssumeValid(basis);
+    var rhs = [_]f64{ 1, 2, 3 };
+    try lu.solve(&rhs);
+    try lu.solveTranspose(&rhs);
+    try std.testing.expectEqual(allocations, counted.allocations);
+    try std.testing.expectEqual(resizes, counted.resize_index);
 }

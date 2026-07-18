@@ -126,3 +126,33 @@ No performance-leading claim is made. On the 512 case, packed zhighs FTRAN
 plus BTRAN is about 10 us, but the current comparison runner measures only the
 fair common INVERT boundary. `perf` on the 1024 case identifies general
 Markowitz scanning and intrusive entry removal as the next tuning targets.
+
+### Non-allocator tuning follow-up
+
+The next pass kept the factor allocator fixed while making four measured
+changes: retiring pivot dimensions before unlinking entries, direct CSC pool
+loading, removing the redundant entry-alive stream, and stopping Markowitz
+search when the theoretical count-merit lower bound is reached. The latter
+retains deterministic traversal but does not scan an entire bucket merely to
+choose the smallest ID among mathematically equivalent pivots.
+
+With `c_allocator` on the same cyclic tridiagonal workload (501 medians):
+
+| dimension | zhighs INVERT | HiGHS HFactor | zhighs speedup |
+|---:|---:|---:|---:|
+| 128 | 10.2 us | 17.8 us | 1.75x |
+| 256 | 20.0 us | 34.5 us | 1.73x |
+| 512 | 39.1 us | 69.3 us | 1.77x |
+| 1024 | 79.3 us | 138.9 us | 1.75x |
+
+This is a narrow structured-basis result, not a general sparse-LU superiority
+claim. More fill-heavy synthetic bases and SuiteSparse/Netlib-derived valid
+bases remain required.
+
+An interleaved seven-process allocator audit at dimension 1024 found warm GPA
+and `c_allocator` medians both around 185 us before the Markowitz early-stop
+change, with less than one percent separation. The factorization benchmark now
+links libc and uses `c_allocator` for the factor workspace by default in the
+HiGHS comparison script. Fixtures and samples remain outside the timed region.
+The warm allocation-count test independently proves that reinversion and
+FTRAN/BTRAN issue no allocator calls once retained capacity is sufficient.

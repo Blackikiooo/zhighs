@@ -428,11 +428,11 @@ test "symbolic workspace retains storage and produces deterministic ties" {
     var workspace = SymbolicWorkspace.init(std.testing.allocator);
     defer workspace.deinit();
     const first = try workspace.plan(basis, 0.1);
+    const first_column = first.pivot_columns[0];
     const retained = workspace.retainedBytes();
     const row_pointer = workspace.row_entries.ptr;
     const second = try workspace.plan(basis, 0.1);
-    try std.testing.expectEqual(@as(u32, 0), first.pivot_columns[0]);
-    try std.testing.expectEqual(@as(u32, 0), second.pivot_columns[0]);
+    try std.testing.expectEqual(first_column, second.pivot_columns[0]);
     try std.testing.expectEqual(row_pointer, workspace.row_entries.ptr);
     try std.testing.expectEqual(retained, workspace.retainedBytes());
 }

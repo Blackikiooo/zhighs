@@ -65,6 +65,9 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 - [x] Mutable SoA kernel matrix, recycled fill slots, row/column count-bucket
   updates, repeated numerical threshold Markowitz, packed L/U, and
   allocation-free FTRAN/BTRAN MVP.
+- [x] Non-allocator INVERT tuning: dead-pivot bucket suppression, direct CSC
+  pool load, redundant entry-state removal, theoretical Markowitz lower-bound
+  stop, explicit trusted zero-copy entry, and warm no-allocation test.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
 - Forrest--Tomlin updates and adaptive reinversion.

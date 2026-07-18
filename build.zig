@@ -189,6 +189,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/simplex/sparse_lu_bench.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{.{ .name = "zhighs", .module = mod }},
         }),
     });

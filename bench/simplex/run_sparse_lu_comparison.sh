@@ -19,9 +19,9 @@ for dimension in 128 256 512 1024; do
   # Alternate order by dimension to reduce systematic thermal/order bias.
   if (( dimension == 256 || dimension == 1024 )); then
     zig-out/bin/highs-sparse-lu-bench "$dimension" "$REPEATS"
-    zig-out/bin/sparse-lu-bench "$dimension" "$REPEATS"
+    ZHIGHS_LU_ALLOCATOR=c zig-out/bin/sparse-lu-bench "$dimension" "$REPEATS"
   else
-    zig-out/bin/sparse-lu-bench "$dimension" "$REPEATS"
+    ZHIGHS_LU_ALLOCATOR=c zig-out/bin/sparse-lu-bench "$dimension" "$REPEATS"
     zig-out/bin/highs-sparse-lu-bench "$dimension" "$REPEATS"
   fi
 done

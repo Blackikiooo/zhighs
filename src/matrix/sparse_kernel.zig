@@ -58,7 +58,6 @@ pub const MutableSparseKernel = struct {
     column_next: []u32 = &.{},
     column_previous: []u32 = &.{},
     free_next: []u32 = &.{},
-    entry_alive: []bool = &.{},
 
     scratch_rows: []u32 = &.{},
     scratch_columns: []u32 = &.{},
@@ -74,20 +73,29 @@ pub const MutableSparseKernel = struct {
             "row_head",         "column_head",         "row_count",       "column_count",        "row_active",         "column_active",
             "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous",
             "entry_row",        "entry_column",        "entry_value",     "row_next",            "row_previous",       "column_next",
-            "column_previous",  "free_next",           "entry_alive",     "scratch_rows",        "scratch_columns",    "scratch_l",
-            "scratch_u",
+            "column_previous",  "free_next",           "scratch_rows",    "scratch_columns",     "scratch_l",          "scratch_u",
         }) |field_name| self.allocator.free(@field(self, field_name));
         self.* = .{ .allocator = self.allocator };
     }
 
     pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
+        return self.loadImpl(basis, true);
+    }
+
+    /// Trusted hot-path load for basis views emitted by `SparseBasisBuffers`.
+    /// Dimensions, sorted rows and finite nonzero values are not rescanned.
+    pub fn loadAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
+        return self.loadImpl(basis, false);
+    }
+
+    fn loadImpl(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, comptime validate: bool) KernelError!void {
         const n = basis.dimension;
-        if (basis.starts.len != n + 1 or basis.rows.len != basis.values.len or
-            n > std.math.maxInt(u32) or basis.nnz() > std.math.maxInt(u32)) return error.InvalidBasis;
+        if (n > std.math.maxInt(u32) or basis.nnz() > std.math.maxInt(u32)) return error.InvalidBasis;
+        if (validate and (basis.starts.len != n + 1 or basis.rows.len != basis.values.len)) return error.InvalidBasis;
         try self.ensureDimension(n);
         try self.ensureEntries(@max(basis.nnz(), n));
         self.dimension = n;
-        self.entry_high_water = 0;
+        self.entry_high_water = basis.nnz();
         self.free_head = none;
         self.buckets_ready = false;
         @memset(self.row_head[0..n], none);
@@ -98,20 +106,36 @@ pub const MutableSparseKernel = struct {
         @memset(self.column_active[0..n], true);
         @memset(self.row_bucket_first[0 .. n + 1], none);
         @memset(self.column_bucket_first[0 .. n + 1], none);
-        @memset(self.entry_alive, false);
 
         for (0..n) |column| {
             const begin: usize = @intCast(basis.starts[column]);
             const end: usize = @intCast(basis.starts[column + 1]);
-            if (begin > end or end > basis.nnz()) return error.InvalidBasis;
+            if (validate and (begin > end or end > basis.nnz())) return error.InvalidBasis;
             var previous_row: ?usize = null;
             for (begin..end) |position| {
                 const row = basis.rows[position].toUsize();
                 const value = basis.values[position];
-                if (row >= n or !std.math.isFinite(value) or value == 0.0) return error.InvalidBasis;
-                if (previous_row) |previous| if (row <= previous) return error.InvalidBasis;
+                if (validate and (row >= n or !std.math.isFinite(value) or value == 0.0)) return error.InvalidBasis;
+                if (validate) if (previous_row) |previous| if (row <= previous) return error.InvalidBasis;
                 previous_row = row;
-                _ = try self.insert(@intCast(row), @intCast(column), value);
+                // Initial CSC positions are already unique dense pool IDs.
+                // Materialize both intrusive views directly: routing the cold
+                // load through the dynamic fill allocator would add free-list,
+                // capacity and bucket branches to every original nonzero.
+                const entry: u32 = @intCast(position);
+                self.entry_row[entry] = @intCast(row);
+                self.entry_column[entry] = @intCast(column);
+                self.entry_value[entry] = value;
+                self.row_previous[entry] = none;
+                self.row_next[entry] = self.row_head[row];
+                if (self.row_head[row] != none) self.row_previous[self.row_head[row]] = entry;
+                self.row_head[row] = entry;
+                self.column_previous[entry] = none;
+                self.column_next[entry] = self.column_head[column];
+                if (self.column_head[column] != none) self.column_previous[self.column_head[column]] = entry;
+                self.column_head[column] = entry;
+                self.row_count[row] += 1;
+                self.column_count[column] += 1;
             }
         }
         for (self.row_count[0..n], self.column_count[0..n]) |row_entries, column_entries|
@@ -151,6 +175,9 @@ pub const MutableSparseKernel = struct {
             };
         }
         var best: ?PivotChoice = null;
+        var minimum_row_count: usize = 2;
+        while (minimum_row_count <= self.dimension and self.row_bucket_first[minimum_row_count] == none) : (minimum_row_count += 1) {}
+        if (minimum_row_count > self.dimension) return null;
         var count: usize = 1;
         while (count <= self.dimension) : (count += 1) {
             if (best != null and count - 1 > best.?.merit) break;
@@ -172,6 +199,8 @@ pub const MutableSparseKernel = struct {
                     if (best == null or merit < best.?.merit or
                         (merit == best.?.merit and (column < best.?.column or (column == best.?.column and row < best.?.row))))
                         best = .{ .row = row, .column = @intCast(column), .value = value, .merit = merit };
+                    const lower_bound = @as(u64, @intCast(count - 1)) * @as(u64, @intCast(minimum_row_count - 1));
+                    if (best.?.merit == lower_bound) return best;
                 }
             }
         }
@@ -233,6 +262,14 @@ pub const MutableSparseKernel = struct {
         }
 
         var removed_entries: usize = 0;
+        // Retire the pivot dimensions before unlinking their entries. Their
+        // own counts are dead after this pivot, so moving them through every
+        // intermediate count bucket is wasted work. Neighboring active rows
+        // and columns still relocate exactly once per removed entry.
+        self.rowBucketRemove(choice.row, self.row_count[choice.row]);
+        self.columnBucketRemove(choice.column, self.column_count[choice.column]);
+        self.row_active[choice.row] = false;
+        self.column_active[choice.column] = false;
         entry = self.row_head[choice.row];
         while (entry != none) {
             const next = self.row_next[entry];
@@ -247,10 +284,6 @@ pub const MutableSparseKernel = struct {
             removed_entries += 1;
             entry = next;
         }
-        self.row_active[choice.row] = false;
-        self.column_active[choice.column] = false;
-        self.rowBucketRemove(choice.row, self.row_count[choice.row]);
-        self.columnBucketRemove(choice.column, self.column_count[choice.column]);
         return .{
             .pivot_row = choice.row,
             .pivot_column = choice.column,
@@ -292,7 +325,6 @@ pub const MutableSparseKernel = struct {
         self.entry_row[entry] = row;
         self.entry_column[entry] = column;
         self.entry_value[entry] = value;
-        self.entry_alive[entry] = true;
         self.row_previous[entry] = none;
         self.row_next[entry] = self.row_head[row];
         if (self.row_head[row] != none) self.row_previous[self.row_head[row]] = entry;
@@ -315,7 +347,6 @@ pub const MutableSparseKernel = struct {
     }
 
     fn remove(self: *MutableSparseKernel, entry: u32) void {
-        if (!self.entry_alive[entry]) return;
         const row = self.entry_row[entry];
         const column = self.entry_column[entry];
         const row_prev = self.row_previous[entry];
@@ -326,17 +357,20 @@ pub const MutableSparseKernel = struct {
         const col_after = self.column_next[entry];
         if (col_prev == none) self.column_head[column] = col_after else self.column_next[col_prev] = col_after;
         if (col_after != none) self.column_previous[col_after] = col_prev;
-        if (self.buckets_ready) {
+        if (self.buckets_ready and self.row_active[row]) {
             self.rowBucketRemove(row, self.row_count[row]);
+        }
+        if (self.buckets_ready and self.column_active[column]) {
             self.columnBucketRemove(column, self.column_count[column]);
         }
         self.row_count[row] -= 1;
         self.column_count[column] -= 1;
-        if (self.buckets_ready) {
+        if (self.buckets_ready and self.row_active[row]) {
             self.rowBucketInsert(row, self.row_count[row]);
+        }
+        if (self.buckets_ready and self.column_active[column]) {
             self.columnBucketInsert(column, self.column_count[column]);
         }
-        self.entry_alive[entry] = false;
         self.free_next[entry] = self.free_head;
         self.free_head = entry;
     }
@@ -354,7 +388,7 @@ pub const MutableSparseKernel = struct {
     fn ensureEntries(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.entry_capacity) return;
         const capacity = grow(self.entry_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "entry_row", "entry_column", "entry_value", "row_next", "row_previous", "column_next", "column_previous", "free_next", "entry_alive" }) |field_name|
+        inline for (.{ "entry_row", "entry_column", "entry_value", "row_next", "row_previous", "column_next", "column_previous", "free_next" }) |field_name|
             @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
         self.entry_capacity = capacity;
     }
