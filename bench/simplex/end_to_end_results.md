@@ -43,8 +43,9 @@ the records. Models including `forest6`, `sc205`, `scagr7`, `scrs8`, and
 `lotfi` consequently changed from false zero-RHS results to the same status
 and objective as HiGHS.
 
-After the parser and numerical fixes, 39 of 40 models match the available
-HiGHS reference. The four former numerical failures now finish as follows:
+After the parser and numerical fixes, all 40 models in the frozen corpus match
+the HiGHS reference status, and all optimal objectives pass the acceptance
+tolerance. The four former numerical failures now finish as follows:
 
 | model | status | objective | iterations | primal / dual residual |
 |---|---:|---:|---:|---:|
@@ -74,3 +75,30 @@ internal column, about 835 million scalar visits on gas11. A direct CSC
 then maintained incrementally with periodic exact sparse refreshes. Model
 coefficients at or below `1e-9` are consistently dropped before scaling,
 matching the HiGHS diagnostic policy for this model.
+
+## Frozen pre-optimization gate
+
+The 2026-07-18 baseline uses zhighs commit `ceeee07`, Zig 0.16.0 ReleaseFast,
+and HiGHS commit `de09bbad9f` built with GCC 13.3.0 using `-O3 -march=native
+-DNDEBUG -flto`. It was captured under WSL2 on an Intel i9-10900KF. Absolute
+times are diagnostic and are not correctness thresholds.
+
+- `end_to_end_corpus.lock.tsv` pins all 40 model SHA-256 digests, expected
+  statuses, and optimal objectives.
+- `end_to_end_trace.lock.tsv` pins pivot-event counts and trace digests for
+  `gas11`, `brandy`, `sc105`, and `scsd1`.
+- `end_to_end_baseline.tsv` records status, objective, iterations, residuals,
+  factorization lifecycle, and complete solve time for zhighs and HiGHS.
+
+Run the complete correctness gate with:
+
+```sh
+bench/simplex/run_end_to_end_corpus.sh
+```
+
+The command validates corpus hashes and the HiGHS commit, builds both runners,
+checks every status and optimal objective, enforces `1e-7` primal/dual residual
+limits for optimal zhighs solutions, validates the `gas11` unbounded ray, and
+checks the four pinned pivot traces. Any unexpected result returns a non-zero
+exit status. Set `VERIFY_TRACES=0` only for an explicitly requested status-only
+diagnostic run; it is not valid for the commit gate.

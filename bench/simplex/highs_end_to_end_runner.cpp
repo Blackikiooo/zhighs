@@ -13,7 +13,9 @@ int main(int argc, char** argv) {
   highs.setOptionValue("presolve", "off");
   highs.setOptionValue("parallel", "off");
   const auto read_started = std::chrono::steady_clock::now();
-  if (highs.readModel(argv[1]) != HighsStatus::kOk) return 3;
+  // HiGHS may return kWarning for a usable model, for example when tiny
+  // coefficients are ignored. Only a real read error invalidates the run.
+  if (highs.readModel(argv[1]) == HighsStatus::kError) return 3;
   const auto solve_started = std::chrono::steady_clock::now();
   const auto read_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(solve_started - read_started).count();
   if (highs.run() == HighsStatus::kError) return 4;
