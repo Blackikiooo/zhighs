@@ -171,3 +171,23 @@ singletons), seven independent 501-sample ReleaseFast/native runs measured a
 from 1502 to 1488 and inserted fill from 288 to 276; the solve residual remained
 2.24e-12. This is a shape-specific result, not a general high-fill superiority
 claim; the gate retains the eight-candidate policy outside the validated shape.
+
+### Symbolic-load fusion and pivot retirement
+
+The singleton planner now publishes its final active row/column degrees to the
+mutable kernel. Reduced loading keeps the cache-friendly CSC traversal but
+copies those degrees instead of issuing two scattered count increments for
+every retained entry. A row-major direct-load experiment was rejected because
+its loss of column locality outweighed the entries it skipped.
+
+Numerical elimination now uses separate retirement paths for the completed
+pivot row and column. Each path updates only the surviving intrusive view and
+live count; Schur zero removal is branch-free while buckets are detached. A
+generation-marked lookup is built whenever a Schur row probes at least two U
+columns, avoiding repeated linked-list searches.
+
+On the same brandy basis, seven interleaved 501-sample runs measured 51.7 us for
+zhighs versus 65.8 us for HiGHS HFactor, so zhighs used 21.4% less INVERT time.
+Factor nonzeros, fill, requested bytes, and the 2.24e-12 residual were unchanged.
+The other four Netlib bases and the cyclic synthetic corpus also improved or
+remained within run-to-run noise.

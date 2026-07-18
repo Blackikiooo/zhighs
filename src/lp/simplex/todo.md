@@ -75,7 +75,11 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
   repair, cost-gated adaptive bounded-Markowitz search windows, and a
   shape-gated single-candidate frontier for compact high-fill peeled kernels.
 - [x] Generation-marked dense lookup for sparse Schur row accumulation, with
-  O(n) clearing required only on u32 generation wraparound.
+  O(n) clearing required only on u32 generation wraparound. Two or more U
+  probes now select the lookup path instead of repeatedly chasing row lists.
+- [x] Singleton/reduced-load fusion reuses symbolic active degrees while
+  retaining CSC-local materialization. Pivot retirement uses row/column-specific
+  unlink paths that do not update dead intrusive lists or dead counts.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
 - [x] SparseLU is integrated as the large-basis factorization backend with a

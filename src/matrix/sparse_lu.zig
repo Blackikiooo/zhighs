@@ -173,7 +173,13 @@ pub const SparseLU = struct {
             }
             for (0..first_kernel_pivot) |position|
                 try self.packSymbolicSingleton(basis, plan, position);
-            try self.kernel.loadReducedAssumeValid(basis, plan.active_rows, plan.active_columns);
+            try self.kernel.loadReducedSymbolicAssumeValid(
+                basis,
+                plan.active_rows,
+                plan.active_columns,
+                plan.row_counts,
+                plan.column_counts,
+            );
             const shape = self.kernel.shape();
             self.kernel_dimension = shape.dimension;
             self.kernel_nonzeros = shape.nonzeros;

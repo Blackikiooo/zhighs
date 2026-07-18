@@ -177,22 +177,48 @@ pub const MutableSparseKernel = struct {
     }
 
     pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
-        return self.loadImpl(basis, true, null, null);
+        return self.loadImpl(basis, true, null, null, false, &.{}, &.{});
     }
 
     /// Trusted hot-path load for basis views emitted by `SparseBasisBuffers`.
     /// Dimensions, sorted rows and finite nonzero values are not rescanned.
     pub fn loadAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
-        return self.loadImpl(basis, false, null, null);
+        return self.loadImpl(basis, false, null, null, false, &.{}, &.{});
     }
 
     /// Load only the active reduced kernel after symbolic singleton peeling.
     pub fn loadReducedAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, active_rows: []const bool, active_columns: []const bool) KernelError!void {
         if (active_rows.len != basis.dimension or active_columns.len != basis.dimension) return error.InvalidBasis;
-        return self.loadImpl(basis, false, active_rows, active_columns);
+        return self.loadImpl(basis, false, active_rows, active_columns, false, &.{}, &.{});
     }
 
-    fn loadImpl(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, comptime validate: bool, reduced_rows: ?[]const bool, reduced_columns: ?[]const bool) KernelError!void {
+    /// Load a singleton-reduced CSC while reusing the exact active degrees
+    /// already maintained by the symbolic planner. CSC materialization remains
+    /// column-local, but avoids two count writes per retained entry.
+    pub fn loadReducedSymbolicAssumeValid(
+        self: *MutableSparseKernel,
+        basis: sparse_basis.SparseBasisView,
+        active_rows: []const bool,
+        active_columns: []const bool,
+        row_counts: []const u32,
+        column_counts: []const u32,
+    ) KernelError!void {
+        const n = basis.dimension;
+        if (active_rows.len != n or active_columns.len != n or row_counts.len != n or column_counts.len != n)
+            return error.InvalidBasis;
+        return self.loadImpl(basis, false, active_rows, active_columns, true, row_counts, column_counts);
+    }
+
+    fn loadImpl(
+        self: *MutableSparseKernel,
+        basis: sparse_basis.SparseBasisView,
+        comptime validate: bool,
+        reduced_rows: ?[]const bool,
+        reduced_columns: ?[]const bool,
+        comptime reuse_symbolic_counts: bool,
+        symbolic_row_counts: []const u32,
+        symbolic_column_counts: []const u32,
+    ) KernelError!void {
         const n = basis.dimension;
         if (n > std.math.maxInt(u32) or basis.nnz() > std.math.maxInt(u32)) return error.InvalidBasis;
         if (validate and (basis.starts.len != n + 1 or basis.rows.len != basis.values.len)) return error.InvalidBasis;
@@ -213,8 +239,13 @@ pub const MutableSparseKernel = struct {
         self.markowitz_window_improvements = 0;
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..n], none);
-        @memset(self.row_count[0..n], 0);
-        @memset(self.column_count[0..n], 0);
+        if (reuse_symbolic_counts) {
+            @memcpy(self.row_count[0..n], symbolic_row_counts);
+            @memcpy(self.column_count[0..n], symbolic_column_counts);
+        } else {
+            @memset(self.row_count[0..n], 0);
+            @memset(self.column_count[0..n], 0);
+        }
         @memset(self.column_maximum[0..n], 0.0);
         @memset(self.column_maximum_dirty[0..n], false);
         @memset(self.local_candidate_dirty[0..n], true);
@@ -256,8 +287,10 @@ pub const MutableSparseKernel = struct {
                 self.column_next[entry] = self.column_head[column];
                 if (self.column_head[column] != none) self.column_previous[self.column_head[column]] = entry;
                 self.column_head[column] = entry;
-                self.row_count[row] += 1;
-                self.column_count[column] += 1;
+                if (!reuse_symbolic_counts) {
+                    self.row_count[row] += 1;
+                    self.column_count[column] += 1;
+                }
                 self.column_maximum[column] = @max(self.column_maximum[column], @abs(value));
             }
         }
@@ -577,7 +610,9 @@ pub const MutableSparseKernel = struct {
 
         var inserted_fill: usize = 0;
         for (self.scratch_rows[0..l_count], self.scratch_l[0..l_count]) |row, multiplier| {
-            const use_lookup = u_count >= 8 and self.row_count[row] >= 8;
+            // Two or more U probes amortize one traversal of the target row.
+            // Generation marks avoid clearing the dense lookup between rows.
+            const use_lookup = u_count >= 2;
             var generation: u32 = 0;
             if (use_lookup) {
                 generation = self.nextLookupGeneration();
@@ -596,7 +631,7 @@ pub const MutableSparseKernel = struct {
                 if (existing_entry) |existing| {
                     const updated = self.entry_value[existing] - delta;
                     if (!std.math.isFinite(updated)) return error.Singular;
-                    if (@abs(updated) <= zero_tolerance) self.remove(existing) else {
+                    if (@abs(updated) <= zero_tolerance) self.removeUnbucketed(existing) else {
                         self.entry_value[existing] = updated;
                         if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
                         if (self.cache_local_candidates) self.local_candidate_dirty[column] = true;
@@ -618,17 +653,21 @@ pub const MutableSparseKernel = struct {
         entry = self.row_head[choice.row];
         while (entry != none) {
             const next = self.row_next[entry];
-            self.remove(entry);
+            self.removePivotRowEntry(entry);
             removed_entries += 1;
             entry = next;
         }
+        self.row_head[choice.row] = none;
+        self.row_count[choice.row] = 0;
         entry = self.column_head[choice.column];
         while (entry != none) {
             const next = self.column_next[entry];
-            self.remove(entry);
+            self.removePivotColumnEntry(entry);
             removed_entries += 1;
             entry = next;
         }
+        self.column_head[choice.column] = none;
+        self.column_count[choice.column] = 0;
         for (self.scratch_rows[0..l_count]) |row|
             self.rowBucketInsert(row, self.row_count[row]);
         for (self.scratch_columns[0..u_count]) |column|
@@ -742,7 +781,10 @@ pub const MutableSparseKernel = struct {
         return entry;
     }
 
-    fn remove(self: *MutableSparseKernel, entry: u32) void {
+    /// Remove a Schur entry while all affected dimensions are detached from
+    /// buckets. Keeping this hot path branch-free avoids repeated active-state
+    /// and bucket checks inside the numerical update.
+    fn removeUnbucketed(self: *MutableSparseKernel, entry: u32) void {
         const row = self.entry_row[entry];
         const column = self.entry_column[entry];
         if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
@@ -755,20 +797,40 @@ pub const MutableSparseKernel = struct {
         const col_after = self.column_next[entry];
         if (col_prev == none) self.column_head[column] = col_after else self.column_next[col_prev] = col_after;
         if (col_after != none) self.column_previous[col_after] = col_prev;
-        if (self.buckets_ready and self.row_active[row]) {
-            self.rowBucketRemove(row, self.row_count[row]);
-        }
-        if (self.buckets_ready and self.column_active[column]) {
-            self.columnBucketRemove(column, self.column_count[column]);
-        }
         self.row_count[row] -= 1;
         self.column_count[column] -= 1;
-        if (self.buckets_ready and self.row_active[row]) {
-            self.rowBucketInsert(row, self.row_count[row]);
+        self.releaseEntry(entry);
+    }
+
+    /// Retire one entry from the completed pivot row. The entire row list is
+    /// discarded, so only its column links and live column count are touched.
+    fn removePivotRowEntry(self: *MutableSparseKernel, entry: u32) void {
+        const column = self.entry_column[entry];
+        if (self.column_active[column]) {
+            if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
+            if (self.cache_local_candidates) self.local_candidate_dirty[column] = true;
+            self.column_count[column] -= 1;
         }
-        if (self.buckets_ready and self.column_active[column]) {
-            self.columnBucketInsert(column, self.column_count[column]);
-        }
+        const previous = self.column_previous[entry];
+        const next = self.column_next[entry];
+        if (previous == none) self.column_head[column] = next else self.column_next[previous] = next;
+        if (next != none) self.column_previous[next] = previous;
+        self.releaseEntry(entry);
+    }
+
+    /// Retire one entry from the completed pivot column. Its column links are
+    /// already dead, so only the live row list and row count are updated.
+    fn removePivotColumnEntry(self: *MutableSparseKernel, entry: u32) void {
+        const row = self.entry_row[entry];
+        const previous = self.row_previous[entry];
+        const next = self.row_next[entry];
+        if (previous == none) self.row_head[row] = next else self.row_next[previous] = next;
+        if (next != none) self.row_previous[next] = previous;
+        self.row_count[row] -= 1;
+        self.releaseEntry(entry);
+    }
+
+    inline fn releaseEntry(self: *MutableSparseKernel, entry: u32) void {
         self.free_next[entry] = self.free_head;
         self.free_head = entry;
     }
@@ -885,6 +947,32 @@ test "mutable kernel inserts fill and updates row column counts" {
     try std.testing.expectEqual(@as(usize, 1), result.inserted_fill);
     try std.testing.expectEqual(@as(usize, 4), kernel.activeEntries());
     try std.testing.expect(kernel.choosePivot(0.1) != null);
+}
+
+test "symbolic degree reuse matches ordinary reduced load" {
+    const RowId = foundation.RowId;
+    const Offset = foundation.HUInt;
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = 3,
+        .starts = &[_]Offset{ 0, 2, 4, 6 },
+        .rows = &[_]RowId{
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(1),
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(2),
+            RowId.fromUsizeAssumeValid(1), RowId.fromUsizeAssumeValid(2),
+        },
+        .values = &[_]f64{ 2, 1, 1, 2, 3, 4 },
+    };
+    const active = [_]bool{ false, true, true };
+    const counts = [_]u32{ 0, 1, 2 };
+    var ordinary = MutableSparseKernel.init(std.testing.allocator);
+    defer ordinary.deinit();
+    var fused = MutableSparseKernel.init(std.testing.allocator);
+    defer fused.deinit();
+    try ordinary.loadReducedAssumeValid(basis, &active, &active);
+    try fused.loadReducedSymbolicAssumeValid(basis, &active, &active, &counts, &counts);
+
+    try std.testing.expectEqual(ordinary.shape(), fused.shape());
+    try std.testing.expectEqual(ordinary.choosePivot(0.1).?, fused.choosePivot(0.1).?);
 }
 
 test "Markowitz search budget adapts only after stable windows" {
