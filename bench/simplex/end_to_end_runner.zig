@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     else
         .primal;
     const crash_strategy: zhighs.lp.simplex.engine.CrashStrategy = if (args.next()) |text|
-        if (std.mem.eql(u8, text, "ltssf")) .ltssf else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "logical")) .logical else return error.InvalidArguments
+        if (std.mem.eql(u8, text, "ltssf")) .ltssf else if (std.mem.eql(u8, text, "bixby")) .bixby else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "logical")) .logical else return error.InvalidArguments
     else
         .logical;
     const crash_max_columns = if (args.next()) |text| blk: {

@@ -15,7 +15,7 @@ const matrix = @import("matrix");
 
 pub const Algorithm = enum { primal_revised, dual_revised };
 pub const PhaseOneStrategy = enum { primal, dual, automatic };
-pub const CrashStrategy = enum { logical, ltssf, automatic };
+pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -310,14 +310,15 @@ pub const SimplexEngine = struct {
         const crash_strategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
-            // Corpus A/B currently rejects LTSSF as a default because brandy
-            // falls back and several models regress. Keep automatic pinned to
-            // logical until a later scoring policy clears that gate.
+            .bixby => CrashStrategy.bixby,
+            // Corpus A/B rejects both sparse crash policies as a universal
+            // default: Bixby benefits scsd1 but still regresses brandy. Keep
+            // automatic pinned to logical until a broader policy clears it.
             .automatic => CrashStrategy.logical,
         };
-        if (crash_strategy == .ltssf) {
+        if (crash_strategy == .ltssf or crash_strategy == .bixby) {
             self.stats.crash_attempts += 1;
-            crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns);
+            crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns, if (crash_strategy == .bixby) .bixby else .ltssf);
             if (!crash_installed) {
                 self.stats.crash_fallbacks += 1;
                 if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
@@ -447,10 +448,15 @@ pub const SimplexEngine = struct {
         return .optimal;
     }
 
-    /// Install an LTSSF-style structural crash basis transactionally. The
-    /// caller restores the logical identity on false, so no partial matching
+    /// Install a sparse structural crash basis transactionally. The caller
+    /// restores the logical identity on false, so no partially matched basis
     /// can escape numerical validation.
-    fn installSparseCrashBasis(self: *SimplexEngine, problem: problem_module.ProblemView, maximum_columns: ?usize) bool {
+    fn installSparseCrashBasis(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        maximum_columns: ?usize,
+        scoring: crash_module.CrashScoring,
+    ) bool {
         const basis = if (self.basis) |*value| value else return false;
         const average_column_degree = if (problem.num_cols == 0) 0 else (problem.matrix.values.len + problem.num_cols - 1) / problem.num_cols;
         const near_singleton_limit: u32 = @intCast(@min(@max(average_column_degree * 2, 4), 32));
@@ -463,6 +469,7 @@ pub const SimplexEngine = struct {
             basis.column_scale[0..problem.num_cols],
             near_singleton_limit,
             self.numerical.pivot_tolerance,
+            scoring,
         ) catch return false;
         if (plan_view.rows.len == 0) return false;
         self.stats.crash_planned_columns = plan_view.rows.len;

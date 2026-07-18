@@ -12,6 +12,7 @@ pub const CrashPlanView = struct {
     rows: []const u32,
     columns: []const u32,
 };
+pub const CrashScoring = enum { ltssf, bixby };
 
 pub const CrashWorkspace = struct {
     allocator: std.mem.Allocator,
@@ -42,9 +43,8 @@ pub const CrashWorkspace = struct {
         self.* = .{ .allocator = self.allocator };
     }
 
-    /// Build a deterministic LTSSF-style matching. Degree is the primary
-    /// score; bound compatibility, cost, row degree, pivot magnitude and ids
-    /// break ties in that order. No allocation occurs after capacity growth.
+    /// Build a deterministic sparse structural matching with the requested
+    /// scoring policy. No allocation occurs after workspace capacity growth.
     pub fn plan(
         self: *CrashWorkspace,
         csc: matrix.CscView,
@@ -55,6 +55,7 @@ pub const CrashWorkspace = struct {
         column_scale: []const f64,
         near_singleton_limit: u32,
         pivot_tolerance: f64,
+        scoring: CrashScoring,
     ) !CrashPlanView {
         if (cost.len != csc.num_cols or lower.len != csc.num_cols or upper.len != csc.num_cols or
             row_scale.len != csc.num_rows or column_scale.len != csc.num_cols)
@@ -128,7 +129,7 @@ pub const CrashWorkspace = struct {
                     .row_degree = row_degree[row],
                     .pivot_magnitude = pivot_magnitude,
                 };
-                if (best == null or candidate.betterThan(best.?)) best = candidate;
+                if (best == null or candidate.betterThan(best.?, scoring)) best = candidate;
             }
             const chosen = best orelse break;
             self.selected_rows[selected_count] = @intCast(chosen.row);
@@ -189,12 +190,26 @@ pub const CrashWorkspace = struct {
         row_degree: u32,
         pivot_magnitude: f64,
 
-        fn betterThan(self: Candidate, other: Candidate) bool {
-            if (self.degree != other.degree) return self.degree < other.degree;
-            if (self.bound_penalty != other.bound_penalty) return self.bound_penalty < other.bound_penalty;
-            if (self.cost != other.cost) return self.cost < other.cost;
-            if (self.row_degree != other.row_degree) return self.row_degree < other.row_degree;
-            if (self.pivot_magnitude != other.pivot_magnitude) return self.pivot_magnitude > other.pivot_magnitude;
+        fn betterThan(self: Candidate, other: Candidate, scoring: CrashScoring) bool {
+            if (scoring == .ltssf) {
+                if (self.degree != other.degree) return self.degree < other.degree;
+                if (self.bound_penalty != other.bound_penalty) return self.bound_penalty < other.bound_penalty;
+                if (self.cost != other.cost) return self.cost < other.cost;
+                if (self.row_degree != other.row_degree) return self.row_degree < other.row_degree;
+                if (self.pivot_magnitude != other.pivot_magnitude) return self.pivot_magnitude > other.pivot_magnitude;
+            } else {
+                // Bixby-style merit rewards a strong pivot in a sparse row and
+                // column, with bound/cost compatibility acting as a penalty.
+                const self_fill = @as(f64, @floatFromInt(self.degree)) * @as(f64, @floatFromInt(self.row_degree));
+                const other_fill = @as(f64, @floatFromInt(other.degree)) * @as(f64, @floatFromInt(other.row_degree));
+                const self_merit = self.pivot_magnitude /
+                    (@sqrt(self_fill) * (1.0 + self.cost) * (1.0 + @as(f64, @floatFromInt(self.bound_penalty))));
+                const other_merit = other.pivot_magnitude /
+                    (@sqrt(other_fill) * (1.0 + other.cost) * (1.0 + @as(f64, @floatFromInt(other.bound_penalty))));
+                if (self_merit != other_merit) return self_merit > other_merit;
+                if (self.degree != other.degree) return self.degree < other.degree;
+                if (self.row_degree != other.row_degree) return self.row_degree < other.row_degree;
+            }
             if (self.column != other.column) return self.column < other.column;
             return self.row < other.row;
         }
@@ -218,8 +233,31 @@ test "crash planner peels a triangular structural basis" {
     );
     var workspace = CrashWorkspace.init(std.testing.allocator);
     defer workspace.deinit();
-    const plan_view = try workspace.plan(view, &[_]f64{ 0, 0, 0 }, &[_]f64{ 0, 0, 0 }, &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 1, 1, 1 }, 2, 1e-12);
+    const plan_view = try workspace.plan(view, &[_]f64{ 0, 0, 0 }, &[_]f64{ 0, 0, 0 }, &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 1, 1, 1 }, 2, 1e-12, .ltssf);
     try std.testing.expectEqual(@as(usize, 3), plan_view.rows.len);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, plan_view.rows);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, plan_view.columns);
+}
+
+test "bixby scoring can prefer pivot quality over a singleton" {
+    const foundation = @import("foundation");
+    const view = matrix.CscView.initAssumeValid(
+        2,
+        2,
+        &[_]usize{ 0, 1, 3 },
+        &[_]foundation.RowId{ foundation.RowId.fromUsize(0), foundation.RowId.fromUsize(0), foundation.RowId.fromUsize(1) },
+        &[_]f64{ 0.1, 0.2, 10.0 },
+    );
+    var workspace = CrashWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    const costs = [_]f64{ 0, 0 };
+    const lower = [_]f64{ 0, 0 };
+    const upper = [_]f64{ std.math.inf(f64), std.math.inf(f64) };
+    const scales = [_]f64{ 1, 1 };
+
+    const ltssf = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .ltssf);
+    try std.testing.expectEqual(@as(u32, 0), ltssf.columns[0]);
+    const bixby = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .bixby);
+    try std.testing.expectEqual(@as(u32, 1), bixby.columns[0]);
+    try std.testing.expectEqual(@as(u32, 1), bixby.rows[0]);
 }
