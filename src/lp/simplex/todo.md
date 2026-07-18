@@ -59,7 +59,10 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
   compile-time target prefetch policy, w32/w64 tests, and a standalone
   perf/disassembly benchmark. Design and fair HiGHS comparison rules are in
   `docs/sparse-basis-design.md`.
-- Reusable symbolic workspace and sparse LU with Markowitz pivoting.
+- [x] Reusable row-entry symbolic workspace, count buckets, fill-free singleton
+  elimination, and deterministic threshold Markowitz selection for the first
+  kernel pivot. Later pivots correctly wait for numerical fill updates.
+- Mutable kernel matrix, numerical fill updates, and sparse LU factor output.
 - Forrest--Tomlin updates and adaptive reinversion.
 - Hyper-sparse FTRAN/BTRAN.
 - Retain dense LU only as a small-basis fallback and correctness oracle.

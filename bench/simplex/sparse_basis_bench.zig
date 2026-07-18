@@ -88,4 +88,29 @@ pub fn main(init: std.process.Init) !void {
         buffers.starts_capacity * @sizeOf(zhighs.foundation.HUInt) + buffers.entry_capacity * (@sizeOf(zhighs.foundation.RowId) + @sizeOf(f64)),
         checksum,
     });
+
+    var symbolic = zhighs.matrix.SymbolicWorkspace.init(allocator);
+    defer symbolic.deinit();
+    const assembled = buffers.view();
+    _ = try symbolic.plan(assembled, 0.1);
+    checksum = 0.0;
+    for (samples) |*sample| {
+        const started = nowNs();
+        const plan = try symbolic.plan(assembled, 0.1);
+        sample.* = @intCast(nowNs() - started);
+        checksum += @floatFromInt(plan.pivot_rows[0] + plan.pivot_columns[0]);
+        std.mem.doNotOptimizeAway(plan.pivot_rows.ptr);
+    }
+    std.mem.sort(u64, samples, {}, std.sort.asc(u64));
+    const symbolic_median = samples[samples.len / 2];
+    std.debug.print("zhighs-symbolic,{d},{d},{d},{d},{d:.3},{d},{d:.17}\n", .{
+        dimension,
+        nnz,
+        repetitions,
+        symbolic_median,
+        (@as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(symbolic_median))) *
+            (@as(f64, std.time.ns_per_s) / (1024.0 * 1024.0 * 1024.0)),
+        symbolic.retainedBytes(),
+        checksum,
+    });
 }

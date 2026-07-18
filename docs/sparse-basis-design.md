@@ -70,15 +70,28 @@ rather than timing arbitrary square slices that may be rank deficient.
 
 ## Next implementation stages
 
-1. Reusable symbolic workspace: row counts, column counts, permutations and
-   count-linked lists in SoA storage.
-2. Singleton row/column elimination before the Markowitz kernel.
-3. Threshold Markowitz pivoting with deterministic ties and rank-deficiency
-   reporting.
-4. Packed sparse L/U plus row-wise companion views required by BTRAN.
-5. Dense/sparse FTRAN and BTRAN selected by measured RHS density.
-6. Dense-LU oracle comparison, iterative refinement and residual gates.
-7. Forrest--Tomlin updates after clean reinversion and solve benchmarks.
+Completed initial symbolic layer:
+
+- Retaining CSC-to-row-entry companion construction without duplicating values.
+- Incremental active row/column counts, intrusive column-count buckets and a
+  monotonic singleton-row queue.
+- Fill-free row/column singleton elimination.
+- Threshold Markowitz kernel-pivot selection with deterministic ties.
+
+The symbolic API deliberately stops after the first non-singleton pivot.
+Selecting later pivots before numerical elimination would ignore fill-in and
+updated values, producing an invalid order. The next numerical layer must
+apply the selected pivot, update the Schur complement and bucket membership,
+then request the next choice.
+
+Remaining stages:
+
+1. Mutable sparse kernel matrix and packed L/U output streams.
+2. Numerical pivot application, fill insertion and threshold re-evaluation.
+3. Rank-deficiency repair and permutation publication.
+4. Dense/sparse FTRAN and BTRAN selected by measured RHS density.
+5. Dense-LU oracle comparison, iterative refinement and residual gates.
+6. Forrest--Tomlin updates after clean reinversion and solve benchmarks.
 
 The existing dense LU remains the small-basis fallback and correctness oracle
 until the sparse backend passes every numerical and end-to-end gate.
