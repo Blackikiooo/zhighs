@@ -397,6 +397,21 @@ pub const SparseLU = struct {
         return self.dimension + self.l_nonzeros + self.u_nonzeros;
     }
 
+    /// Cheap stability signal matching DenseLU's policy boundary. This is a
+    /// pivot spread indicator, not a formal condition-number estimate.
+    pub fn pivotConditionEstimate(self: *const SparseLU) f64 {
+        if (self.dimension == 0) return 1.0;
+        var minimum = std.math.inf(f64);
+        var maximum: f64 = 0.0;
+        for (self.pivot_values[0..self.dimension]) |pivot| {
+            const magnitude = @abs(pivot);
+            minimum = @min(minimum, magnitude);
+            maximum = @max(maximum, magnitude);
+        }
+        if (minimum <= 0.0 or !std.math.isFinite(minimum) or !std.math.isFinite(maximum)) return std.math.inf(f64);
+        return maximum / minimum;
+    }
+
     /// Retained requested bytes for the complete numerical kernel, factors,
     /// permutations and solve workspace. Allocator bookkeeping is excluded.
     pub fn requestedBytes(self: *const SparseLU) usize {

@@ -1066,30 +1066,12 @@ pub const SimplexEngine = struct {
 
     fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
-        const n = problem.num_rows;
-        const buffer = self.factorization.mutableBasisBuffer(n) catch return .numerical_failure;
-        @memset(buffer, 0.0);
-        for (basis.basic_index, 0..) |global_col, basis_col| {
-            if (global_col < basis.num_structural_cols) {
-                const col: usize = @intCast(global_col);
-                const begin = problem.matrix.col_starts[col];
-                const end = problem.matrix.col_starts[col + 1];
-                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
-                    const row_index = row.toUsize();
-                    buffer[row_index * n + basis_col] = basis.row_scale[row_index] * value;
-                }
-            } else {
-                const internal = @as(usize, @intCast(global_col)) - basis.num_structural_cols;
-                if (internal < n) {
-                    buffer[internal * n + basis_col] = 1.0;
-                } else {
-                    const artificial_row = internal - n;
-                    if (artificial_row >= n) return .numerical_failure;
-                    buffer[artificial_row * n + basis_col] = basis.artificial_sign[artificial_row];
-                }
-            }
-        }
-        self.factorization.refactorizeInPlace() catch return .numerical_failure;
+        self.factorization.factorizeBasis(
+            problem.matrix,
+            basis.basic_index,
+            basis.row_scale,
+            basis.artificial_sign,
+        ) catch return .numerical_failure;
         self.numerical.markRefactorized();
         self.observeFactorizationStability();
         self.dual_edge_weights_valid = false;
@@ -1100,7 +1082,7 @@ pub const SimplexEngine = struct {
     }
 
     fn observeFactorizationStability(self: *SimplexEngine) void {
-        self.numerical.pivot_condition_estimate = self.factorization.dense_lu.pivotConditionEstimate();
+        self.numerical.pivot_condition_estimate = self.factorization.pivotConditionEstimate();
         if (!std.math.isFinite(self.numerical.pivot_condition_estimate) or self.numerical.pivot_condition_estimate > 1e12)
             self.numerical.numerical_warning = true;
     }

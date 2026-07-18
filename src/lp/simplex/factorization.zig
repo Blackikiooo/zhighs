@@ -8,9 +8,9 @@ const std = @import("std");
 const matrix = @import("matrix");
 
 pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singular, NumericalFailure, OutOfMemory };
-/// Selected numeric kernel. Sparse LU is intentionally a separate future
-/// backend rather than being embedded in simplex orchestration.
-pub const BackendKind = enum { dense_lu };
+/// Selected base factorization. Updates are applied above either backend and
+/// are cleared whenever a new base factorization is installed.
+pub const BackendKind = enum { dense_lu, sparse_lu };
 pub const ReinversionReason = enum { update_limit, update_growth };
 pub const FactorizationStats = struct {
     factorizations: usize = 0,
@@ -34,6 +34,8 @@ pub const Factorization = struct {
     allocator: std.mem.Allocator,
     update_count: usize = 0,
     dense_lu: matrix.DenseLU,
+    sparse_lu: matrix.SparseLU,
+    sparse_basis: matrix.SparseBasisBuffers,
     eta_values: []f64 = &.{},
     eta_rows: []u32 = &.{},
     eta_count: usize = 0,
@@ -46,10 +48,17 @@ pub const Factorization = struct {
     maximum_update_growth: f64 = 1.0,
 
     pub fn init(allocator: std.mem.Allocator) Factorization {
-        return .{ .allocator = allocator, .dense_lu = matrix.DenseLU.init(allocator) };
+        return .{
+            .allocator = allocator,
+            .dense_lu = matrix.DenseLU.init(allocator),
+            .sparse_lu = matrix.SparseLU.init(allocator),
+            .sparse_basis = matrix.SparseBasisBuffers.init(allocator),
+        };
     }
     pub fn deinit(self: *Factorization) void {
         self.dense_lu.deinit();
+        self.sparse_lu.deinit();
+        self.sparse_basis.deinit();
         self.allocator.free(self.eta_values);
         self.allocator.free(self.eta_rows);
     }
@@ -61,7 +70,75 @@ pub const Factorization = struct {
             error.OutOfMemory => error.OutOfMemory,
         };
         try self.prepareEtaStorage(n);
+        self.backend_kind = .dense_lu;
         self.stats.factorizations += 1;
+    }
+
+    /// Assemble and factorize the current simplex basis directly as CSC. The
+    /// retained buffers make subsequent reinversions allocation-free whenever
+    /// their previous capacities are sufficient.
+    pub fn factorizeSparseBasis(
+        self: *Factorization,
+        problem_matrix: matrix.CscView,
+        basic_index: []const u32,
+        row_scale: []const f64,
+        artificial_sign: []const f64,
+    ) FactorizationError!void {
+        const basis = self.sparse_basis.assemble(problem_matrix, basic_index, row_scale, artificial_sign) catch |err| return switch (err) {
+            error.DimensionMismatch, error.InvalidBasisColumn => error.DimensionMismatch,
+            error.CapacityOverflow, error.OutOfMemory => error.OutOfMemory,
+            error.NonFiniteValue => error.NumericalFailure,
+        };
+        self.sparse_lu.factorizeAssumeValid(basis) catch |err| return switch (err) {
+            error.DimensionMismatch => error.DimensionMismatch,
+            error.Singular => error.Singular,
+            error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+            error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+        };
+        try self.prepareEtaStorage(problem_matrix.num_rows);
+        self.backend_kind = .sparse_lu;
+        self.stats.factorizations += 1;
+    }
+
+    /// Production basis reinversion policy. Small bases retain the dense
+    /// oracle because its contiguous kernel is cheaper than sparse metadata;
+    /// larger bases assemble CSC directly for SparseLU.
+    pub fn factorizeBasis(
+        self: *Factorization,
+        problem_matrix: matrix.CscView,
+        basic_index: []const u32,
+        row_scale: []const f64,
+        artificial_sign: []const f64,
+    ) FactorizationError!void {
+        const n = problem_matrix.num_rows;
+        if (n >= 64)
+            return self.factorizeSparseBasis(problem_matrix, basic_index, row_scale, artificial_sign);
+        if (self.dense_lu.n != n or self.dense_lu.lu.len != n * n) return error.DimensionMismatch;
+        const buffer = self.dense_lu.lu;
+        @memset(buffer, 0.0);
+        if (basic_index.len != n or row_scale.len != n or artificial_sign.len != n) return error.DimensionMismatch;
+        for (basic_index, 0..) |global_column_u32, basis_column| {
+            const global_column: usize = global_column_u32;
+            if (global_column < problem_matrix.num_cols) {
+                const begin = problem_matrix.col_starts[global_column];
+                const end = problem_matrix.col_starts[global_column + 1];
+                for (problem_matrix.row_indices[begin..end], problem_matrix.values[begin..end]) |row, coefficient| {
+                    const row_index = row.toUsize();
+                    const scaled = coefficient * row_scale[row_index];
+                    if (!std.math.isFinite(scaled)) return error.NumericalFailure;
+                    buffer[row_index * n + basis_column] = scaled;
+                }
+            } else {
+                const internal = global_column - problem_matrix.num_cols;
+                if (internal >= 2 * n) return error.DimensionMismatch;
+                const row = if (internal < n) internal else internal - n;
+                const value = if (internal < n) 1.0 else artificial_sign[row];
+                if (!std.math.isFinite(value) or value == 0.0) return error.NumericalFailure;
+                buffer[row * n + basis_column] = value;
+            }
+        }
+        self.backend_kind = .dense_lu;
+        return self.refactorizeInPlace();
     }
 
     /// Build and factorize an identity basis without an intermediate matrix
@@ -77,6 +154,7 @@ pub const Factorization = struct {
             error.OutOfMemory => error.OutOfMemory,
         };
         try self.prepareEtaStorage(n);
+        self.backend_kind = .dense_lu;
         self.stats.factorizations += 1;
     }
 
@@ -86,6 +164,7 @@ pub const Factorization = struct {
     }
 
     pub fn refactorizeInPlace(self: *Factorization) FactorizationError!void {
+        if (self.backend_kind != .dense_lu) return error.NotImplemented;
         self.dense_lu.refactorizeInPlace() catch |err| return switch (err) {
             error.DimensionMismatch => error.DimensionMismatch,
             error.Singular => error.Singular,
@@ -99,12 +178,20 @@ pub const Factorization = struct {
     }
     pub fn solve(self: *Factorization, rhs: []f64) FactorizationError!void {
         self.stats.ftran_calls += 1;
-        self.dense_lu.solve(rhs) catch |err| return switch (err) {
-            error.DimensionMismatch => error.DimensionMismatch,
-            error.Singular => error.Singular,
-            error.NumericalFailure => error.NumericalFailure,
-            error.OutOfMemory => error.OutOfMemory,
-        };
+        switch (self.backend_kind) {
+            .dense_lu => self.dense_lu.solve(rhs) catch |err| return switch (err) {
+                error.DimensionMismatch => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure => error.NumericalFailure,
+                error.OutOfMemory => error.OutOfMemory,
+            },
+            .sparse_lu => self.sparse_lu.solve(rhs) catch |err| return switch (err) {
+                error.DimensionMismatch => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+            },
+        }
         for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
     }
     pub fn solveTranspose(self: *Factorization, rhs: []f64) FactorizationError!void {
@@ -114,12 +201,20 @@ pub const Factorization = struct {
             update_index -= 1;
             self.applyEtaInverseTranspose(update_index, rhs);
         }
-        self.dense_lu.solveTranspose(rhs) catch |err| return switch (err) {
-            error.DimensionMismatch => error.DimensionMismatch,
-            error.Singular => error.Singular,
-            error.NumericalFailure => error.NumericalFailure,
-            error.OutOfMemory => error.OutOfMemory,
-        };
+        switch (self.backend_kind) {
+            .dense_lu => self.dense_lu.solveTranspose(rhs) catch |err| return switch (err) {
+                error.DimensionMismatch => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure => error.NumericalFailure,
+                error.OutOfMemory => error.OutOfMemory,
+            },
+            .sparse_lu => self.sparse_lu.solveTranspose(rhs) catch |err| return switch (err) {
+                error.DimensionMismatch => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+            },
+        }
     }
     pub fn update(self: *Factorization, update_view: PivotUpdateView) FactorizationError!void {
         if (update_view.direction.len != self.dimension or update_view.leaving_row >= self.dimension) return error.DimensionMismatch;
@@ -170,6 +265,13 @@ pub const Factorization = struct {
             .update_limit => self.stats.update_limit_reinversions += 1,
             .update_growth => self.stats.update_growth_reinversions += 1,
         }
+    }
+
+    pub fn pivotConditionEstimate(self: *const Factorization) f64 {
+        return switch (self.backend_kind) {
+            .dense_lu => self.dense_lu.pivotConditionEstimate(),
+            .sparse_lu => self.sparse_lu.pivotConditionEstimate(),
+        };
     }
 
     fn prepareEtaStorage(self: *Factorization, dimension: usize) FactorizationError!void {
@@ -277,4 +379,32 @@ test "factorization update rejects non-finite direction entries" {
         .entering_col = 0,
         .direction = &[_]f64{ 1, std.math.nan(f64) },
     }));
+}
+
+test "sparse backend factors an assembled simplex basis" {
+    const foundation = @import("foundation");
+    const rows = [_]foundation.RowId{
+        foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+        foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+    };
+    const problem_matrix = matrix.CscView.initAssumeValid(
+        2,
+        2,
+        &[_]usize{ 0, 2, 4 },
+        &rows,
+        &[_]f64{ 4, 1, 2, 3 },
+    );
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeSparseBasis(problem_matrix, &[_]u32{ 0, 1 }, &[_]f64{ 1, 1 }, &[_]f64{ 1, 1 });
+    try std.testing.expectEqual(BackendKind.sparse_lu, factorization.backend_kind);
+    var rhs = [_]f64{ 6, 7 };
+    try factorization.solve(&rhs);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.4), rhs[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.2), rhs[1], 1e-12);
+    var transpose_rhs = [_]f64{ 5, 8 };
+    try factorization.solveTranspose(&transpose_rhs);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.7), transpose_rhs[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.2), transpose_rhs[1], 1e-12);
+    try std.testing.expect(factorization.pivotConditionEstimate() >= 1.0);
 }
