@@ -80,7 +80,12 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
         defer fields.deinit(allocator);
         if (fields.items.len == 0) continue;
         const first = fields.items[0];
-        if (sectionKeyword(first)) |next| {
+        // Section names are legal set names in their own data sections. In
+        // particular, `RHS ROW VALUE` is the conventional RHS-set spelling;
+        // only a header-shaped record may change parser state.
+        const header_shaped = fields.items.len == 1 or std.ascii.eqlIgnoreCase(first, "NAME") or
+            std.ascii.eqlIgnoreCase(first, "OBJNAME");
+        if (header_shaped) if (sectionKeyword(first)) |next| {
             section = next;
             switch (next) {
                 .rows => saw_rows = true,
@@ -90,7 +95,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
             }
             if (std.ascii.eqlIgnoreCase(first, "NAME") and fields.items.len >= 2) parser.builder.name = fields.items[1];
             continue;
-        }
+        };
         switch (section) {
             .obj_sense => try parseObjectiveSense(&parser, fields.items),
             .rows => try parseRow(&parser, fields.items),
@@ -280,11 +285,17 @@ fn addColumnPair(parser: *Parser, column: usize, row_name: []const u8, number: [
 }
 
 fn parseRhs(parser: *Parser, fields: []const []const u8) types.IoError!void {
-    if (fields.len != 3 and fields.len != 5) return error.InvalidSyntax;
-    if (parser.rhs_set == null) parser.rhs_set = fields[0];
-    if (!std.mem.eql(u8, parser.rhs_set.?, fields[0])) return;
-    try setRhsPair(parser, fields[1], fields[2]);
-    if (fields.len == 5) try setRhsPair(parser, fields[3], fields[4]);
+    const offset: usize = switch (fields.len) {
+        2, 4 => 0,
+        3, 5 => 1,
+        else => return error.InvalidSyntax,
+    };
+    if (offset == 1) {
+        if (parser.rhs_set == null) parser.rhs_set = fields[0];
+        if (!std.mem.eql(u8, parser.rhs_set.?, fields[0])) return;
+    }
+    try setRhsPair(parser, fields[offset], fields[offset + 1]);
+    if (fields.len - offset == 4) try setRhsPair(parser, fields[offset + 2], fields[offset + 3]);
 }
 
 fn setRhsPair(parser: *Parser, row_name: []const u8, number: []const u8) types.IoError!void {
@@ -306,11 +317,17 @@ fn setRhsPair(parser: *Parser, row_name: []const u8, number: []const u8) types.I
 }
 
 fn parseRanges(parser: *Parser, fields: []const []const u8) types.IoError!void {
-    if (fields.len != 3 and fields.len != 5) return error.InvalidSyntax;
-    if (parser.ranges_set == null) parser.ranges_set = fields[0];
-    if (!std.mem.eql(u8, parser.ranges_set.?, fields[0])) return;
-    try setRangePair(parser, fields[1], fields[2]);
-    if (fields.len == 5) try setRangePair(parser, fields[3], fields[4]);
+    const offset: usize = switch (fields.len) {
+        2, 4 => 0,
+        3, 5 => 1,
+        else => return error.InvalidSyntax,
+    };
+    if (offset == 1) {
+        if (parser.ranges_set == null) parser.ranges_set = fields[0];
+        if (!std.mem.eql(u8, parser.ranges_set.?, fields[0])) return;
+    }
+    try setRangePair(parser, fields[offset], fields[offset + 1]);
+    if (fields.len - offset == 4) try setRangePair(parser, fields[offset + 2], fields[offset + 3]);
 }
 
 fn setRangePair(parser: *Parser, row_name: []const u8, number: []const u8) types.IoError!void {
@@ -432,4 +449,44 @@ test "parses free MPS objective rows integer markers RHS and bounds" {
     try std.testing.expectEqual(@as(usize, 2), model.matrix.nnz());
     try std.testing.expectEqual(types.VariableType.binary, model.col_type[1]);
     try std.testing.expectEqual(@as(f64, -7.0), model.row_lower[0]);
+}
+
+test "section keywords remain valid RHS and RANGES set names" {
+    const input =
+        \\NAME KEYWORD_SETS
+        \\ROWS
+        \\ N OBJ
+        \\ G DEMAND
+        \\COLUMNS
+        \\ X OBJ 1 DEMAND 1
+        \\RHS
+        \\ RHS DEMAND 7
+        \\RANGES
+        \\ RANGES DEMAND 2
+        \\ENDATA
+    ;
+    var model = try parse(std.testing.allocator, input, "fallback", .{});
+    defer model.deinit();
+    try std.testing.expectEqual(@as(f64, 7.0), model.row_lower[0]);
+    try std.testing.expectEqual(@as(f64, 9.0), model.row_upper[0]);
+}
+
+test "fixed MPS accepts an omitted RHS set name" {
+    const input =
+        \\NAME FIXED_RHS
+        \\ROWS
+        \\ N OBJ
+        \\ G FIRST
+        \\ L SECOND
+        \\COLUMNS
+        \\ X OBJ 1 FIRST 1
+        \\ X SECOND 1
+        \\RHS
+        \\ FIRST 7 SECOND 9
+        \\ENDATA
+    ;
+    var model = try parse(std.testing.allocator, input, "fallback", .{});
+    defer model.deinit();
+    try std.testing.expectEqual(@as(f64, 7.0), model.row_lower[0]);
+    try std.testing.expectEqual(@as(f64, 9.0), model.row_upper[1]);
 }

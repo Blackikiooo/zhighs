@@ -33,3 +33,18 @@ Run the deterministic smoke corpus with:
 ```sh
 bench/simplex/run_end_to_end_corpus.sh
 ```
+
+## Expanded local Netlib pass
+
+The 40-model SoPlex LP corpus exposed two fixed-MPS compatibility defects:
+section keywords such as `RHS` are legal set names, and a traditional fixed
+record may omit the RHS/RANGES set field. Both are now parsed without losing
+the records. Models including `forest6`, `sc205`, `scagr7`, `scrs8`, and
+`lotfi` consequently changed from false zero-RHS results to the same status
+and objective as HiGHS.
+
+After these fixes, 35 of 40 models match the available HiGHS reference.
+`blend`, `grow7`, `scsd1`, and `vtp-base` remain numerical failures even with
+reinversion after every pivot, which excludes FT update accumulation. `gas11`
+is classified as long-running because the local HiGHS reference also exceeded
+the 30-second diagnostic limit.

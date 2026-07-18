@@ -47,6 +47,23 @@ pub fn main(init: std.process.Init) !void {
         .objective_sense = if (model.objective_sense == .minimize) .minimize else .maximize,
         .objective_offset = model.objective_offset,
     };
+    if (trace_enabled) {
+        var nonzero_costs: usize = 0;
+        var nonzero_row_bounds: usize = 0;
+        for (model.col_cost) |value| if (value != 0.0) {
+            nonzero_costs += 1;
+        };
+        for (model.row_lower, model.row_upper) |lower, upper| if ((std.math.isFinite(lower) and lower != 0.0) or
+            (std.math.isFinite(upper) and upper != 0.0))
+        {
+            nonzero_row_bounds += 1;
+        };
+        const meta = try std.fmt.allocPrint(allocator, "model\t{s}\tcost_nz={d}\tbound_nz={d}\n", .{
+            @tagName(model.objective_sense), nonzero_costs, nonzero_row_bounds,
+        });
+        defer allocator.free(meta);
+        try std.Io.File.stderr().writeStreamingAll(io_context, meta);
+    }
     var engine = zhighs.lp.simplex.engine.SimplexEngine.init(allocator);
     defer engine.deinit();
     engine.numerical.max_update_count = max_updates;
@@ -60,10 +77,9 @@ pub fn main(init: std.process.Init) !void {
     const status = engine.solveProblem(problem, .{ .max_iterations = max_iterations, .pivot_trace = trace });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
-        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
-            event.iteration,          event.entering_column, event.leaving_column, event.leaving_row,
-            event.pivot,              event.step,            event.update_count,   event.ftran_relative_residual,
-            event.condition_estimate,
+        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
+            @tagName(event.phase), event.iteration, event.entering_column, event.leaving_column,          event.leaving_row,
+            event.pivot,           event.step,      event.update_count,    event.ftran_relative_residual, event.condition_estimate,
         });
         defer allocator.free(trace_line);
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);

@@ -30,6 +30,7 @@ pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data:
 pub const LogLevel = enum { off, iterations };
 pub const SolveStatus = solution_module.SolveStatus;
 pub const PivotTraceEvent = struct {
+    phase: SolvePhase,
     iteration: usize,
     entering_column: u32,
     leaving_column: u32,
@@ -101,6 +102,7 @@ pub const SimplexEngine = struct {
     rank_repair_count: usize = 0,
     pivot_trace_count: usize = 0,
     active_pivot_trace: []PivotTraceEvent = &.{},
+    current_phase: SolvePhase = .phase_two,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -588,6 +590,7 @@ pub const SimplexEngine = struct {
         for (basis.basic_index, basis.basic_value) |global_col, value| basis.primal[global_col] = value;
         if (self.pivot_trace_count < self.active_pivot_trace.len) {
             self.active_pivot_trace[self.pivot_trace_count] = .{
+                .phase = self.current_phase,
                 .iteration = self.iterations,
                 .entering_column = @intCast(entering_col),
                 .leaving_column = leaving_col,
@@ -648,6 +651,15 @@ pub const SimplexEngine = struct {
                     basis.col_edge_weight[0..original_cols],
                     self.numerical.dual_tolerance,
                 )) orelse {
+                // Never certify dual feasibility from an updated BTRAN chain.
+                // Reinvert the unchanged basis once and price again; a stale
+                // transpose solve can otherwise publish a false optimum.
+                if (self.factorization.update_count != 0) {
+                    self.factorization.recordReinversion(.solve_residual);
+                    if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                    if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    continue;
+                }
                 return self.finishOptimal(problem);
             };
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
@@ -1015,7 +1027,15 @@ pub const SimplexEngine = struct {
                 basis.col_status,
                 basis.col_edge_weight,
                 self.numerical.dual_tolerance,
-            ) orelse break;
+            ) orelse {
+                if (self.factorization.update_count != 0) {
+                    self.factorization.recordReinversion(.solve_residual);
+                    if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                    if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+                    continue;
+                }
+                break;
+            };
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
             if (entering.direction < 0) {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
@@ -1078,6 +1098,7 @@ pub const SimplexEngine = struct {
     }
 
     fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, phase: SolvePhase) ?SolveStatus {
+        self.current_phase = phase;
         if (self.controlledStop(control)) |status| return status;
         const callback_due = control.iteration_callback != null and
             self.work_used % @max(control.callback_interval_work, 1) == 0;
