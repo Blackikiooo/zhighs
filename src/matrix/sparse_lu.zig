@@ -180,6 +180,7 @@ pub const SparseLU = struct {
             self.kernel_maximum_row_count = shape.maximum_row_count;
             self.kernel_maximum_column_count = shape.maximum_column_count;
             self.selected_ordering = self.selectOrdering(shape);
+            self.kernel.setMarkowitzSearchBudget(self.markowitzSearchBudget(shape));
         } else {
             if (validate) try self.kernel.load(basis) else try self.kernel.loadAssumeValid(basis);
             if (trace == null or repair_trace) {
@@ -189,6 +190,7 @@ pub const SparseLU = struct {
                 self.kernel_maximum_row_count = shape.maximum_row_count;
                 self.kernel_maximum_column_count = shape.maximum_column_count;
                 self.selected_ordering = self.selectOrdering(shape);
+                self.kernel.setMarkowitzSearchBudget(self.markowitzSearchBudget(shape));
             }
         }
 
@@ -566,6 +568,19 @@ pub const SparseLU = struct {
         };
     }
 
+    /// Compact high-fill kernels left after a long singleton prefix benefit
+    /// from taking the first threshold-safe low-degree frontier candidate.
+    /// This DOD cost gate avoids paying for a wider HiGHS-style search whose
+    /// additional candidates empirically increase both latency and fill.
+    fn markowitzSearchBudget(self: *const SparseLU, shape: sparse_kernel.KernelShape) usize {
+        if (self.selected_ordering == .highs_kernel and
+            self.peeled_pivots >= self.dimension - self.peeled_pivots and
+            shape.dimension <= 128 and shape.nonzeros / @max(shape.dimension, 1) > 4 and
+            shape.maximum_row_count <= 64 and shape.maximum_column_count <= 64)
+            return 1;
+        return 8;
+    }
+
     fn ensureDimension(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
@@ -863,6 +878,28 @@ test "sparse ordering backends can be forced without changing the public factors
         try lu.solve(&rhs);
         try std.testing.expectApproxEqAbs(@as(f64, 1.375), rhs[0], 1e-12);
     }
+}
+
+test "compact peeled high fill kernel gates Markowitz search effort" {
+    var lu = SparseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    lu.dimension = 220;
+    lu.peeled_pivots = 130;
+    lu.selected_ordering = .highs_kernel;
+
+    const compact = sparse_kernel.KernelShape{
+        .dimension = 90,
+        .nonzeros = 636,
+        .maximum_row_count = 26,
+        .maximum_column_count = 23,
+    };
+    try std.testing.expectEqual(@as(usize, 1), lu.markowitzSearchBudget(compact));
+
+    lu.selected_ordering = .dod_markowitz;
+    try std.testing.expectEqual(@as(usize, 8), lu.markowitzSearchBudget(compact));
+    lu.selected_ordering = .highs_kernel;
+    lu.peeled_pivots = 100;
+    try std.testing.expectEqual(@as(usize, 8), lu.markowitzSearchBudget(compact));
 }
 
 test "sparse LU matches original products across deterministic sparse bases" {

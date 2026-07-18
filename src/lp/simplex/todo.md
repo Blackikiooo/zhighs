@@ -72,7 +72,8 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
   bounded row/column Markowitz search, dynamic pre-kernel singleton peeling,
   and fixed pivot-trace separation of ordering from numerical update cost.
 - [x] Numerically validated pivot-trace prefix replay with automatic suffix
-  repair, plus cost-gated adaptive bounded-Markowitz search windows.
+  repair, cost-gated adaptive bounded-Markowitz search windows, and a
+  shape-gated single-candidate frontier for compact high-fill peeled kernels.
 - [x] Generation-marked dense lookup for sparse Schur row accumulation, with
   O(n) clearing required only on u32 generation wraparound.
 - Integrate sparse LU behind the factorization backend with dense fallback,

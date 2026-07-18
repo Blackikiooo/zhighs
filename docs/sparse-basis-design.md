@@ -156,3 +156,18 @@ links libc and uses `c_allocator` for the factor workspace by default in the
 HiGHS comparison script. Fixtures and samples remain outside the timed region.
 The warm allocation-count test independently proves that reinversion and
 FTRAN/BTRAN issue no allocator calls once retained capacity is sufficient.
+
+### Compact high-fill pivot frontier
+
+For kernels reduced to at most 128 rows by a majority singleton prefix, with more
+than four entries per active column and maximum row/column degree at most 64,
+the bounded search now accepts the first threshold-safe low-degree frontier
+candidate. This is a DOD cost gate rather than the fixed eight-member HiGHS
+search: widening the brandy frontier increased both search time and fill.
+
+On the Netlib brandy simplex basis (220 rows, 1242 basis entries, 130 peeled
+singletons), seven independent 501-sample ReleaseFast/native runs measured a
+61.1 us zhighs median versus 66.2 us for HiGHS HFactor. Factor nonzeros fell
+from 1502 to 1488 and inserted fill from 288 to 276; the solve residual remained
+2.24e-12. This is a shape-specific result, not a general high-fill superiority
+claim; the gate retains the eight-candidate policy outside the validated shape.

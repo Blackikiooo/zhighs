@@ -440,6 +440,14 @@ pub const MutableSparseKernel = struct {
         return best;
     }
 
+    /// Set the number of low-degree row/column frontier members inspected by
+    /// the bounded search. Shape-aware callers may reduce this for compact,
+    /// already-peeled kernels where extra candidates cost more than the fill
+    /// they avoid; numerical threshold checks remain unchanged.
+    pub fn setMarkowitzSearchBudget(self: *MutableSparseKernel, limit: usize) void {
+        self.markowitz_search_limit = @max(limit, 1);
+    }
+
     /// Feed the measured search result back into the bounded Markowitz budget.
     /// A wider search is justified only when candidates found in the second
     /// half of the current budget repeatedly improve merit. The fixed
