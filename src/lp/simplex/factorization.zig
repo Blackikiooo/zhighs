@@ -11,7 +11,7 @@ pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singula
 /// Selected base factorization. Updates are applied above either backend and
 /// are cleared whenever a new base factorization is installed.
 pub const BackendKind = enum { dense_lu, sparse_lu };
-pub const ReinversionReason = enum { update_limit, update_growth, solve_residual };
+pub const ReinversionReason = enum { update_limit, update_growth, solve_residual, small_pivot };
 pub const FactorizationStats = struct {
     factorizations: usize = 0,
     ftran_calls: usize = 0,
@@ -22,6 +22,7 @@ pub const FactorizationStats = struct {
     update_limit_reinversions: usize = 0,
     update_growth_reinversions: usize = 0,
     solve_residual_reinversions: usize = 0,
+    small_pivot_reinversions: usize = 0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -47,6 +48,7 @@ pub const Factorization = struct {
     eta_capacity: usize = 64,
     dimension: usize = 0,
     backend_kind: BackendKind = .dense_lu,
+    sparse_dimension_threshold: usize = 64,
     stats: FactorizationStats = .{},
     /// Largest max(|d|)/|d[p]| observed since reinversion. This inexpensive
     /// signal estimates how strongly an update can amplify solve error.
@@ -119,7 +121,7 @@ pub const Factorization = struct {
         artificial_sign: []const f64,
     ) FactorizationError!void {
         const n = problem_matrix.num_rows;
-        if (n >= 64)
+        if (n >= self.sparse_dimension_threshold)
             return self.factorizeSparseBasis(problem_matrix, basic_index, row_scale, artificial_sign);
         if (self.dense_lu.n != n or self.dense_lu.lu.len != n * n) return error.DimensionMismatch;
         const buffer = self.dense_lu.lu;
@@ -152,7 +154,7 @@ pub const Factorization = struct {
     /// Build and factorize an identity basis without an intermediate matrix
     /// copy. Used by the canonical slack-basis crash initializer.
     pub fn factorizeIdentity(self: *Factorization, n: usize) FactorizationError!void {
-        if (n >= 64) {
+        if (n >= self.sparse_dimension_threshold) {
             self.identity_basic = self.allocator.realloc(self.identity_basic, n) catch return error.OutOfMemory;
             self.identity_scale = self.allocator.realloc(self.identity_scale, n) catch return error.OutOfMemory;
             self.identity_sign = self.allocator.realloc(self.identity_sign, n) catch return error.OutOfMemory;
@@ -315,6 +317,7 @@ pub const Factorization = struct {
             .update_limit => self.stats.update_limit_reinversions += 1,
             .update_growth => self.stats.update_growth_reinversions += 1,
             .solve_residual => self.stats.solve_residual_reinversions += 1,
+            .small_pivot => self.stats.small_pivot_reinversions += 1,
         }
     }
 

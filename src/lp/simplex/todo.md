@@ -46,7 +46,9 @@
   artificial/bounded Phase I 保留 Devex/Harris，目标切换时清除 Bland fallback。
 - [x] 修复 fixed-MPS 中 `RHS`/`RANGES` 同名 set 与省略 set field 导致的
   约束静默丢失；本地 40 模型扩展 corpus 已有 35 个匹配 HiGHS。
-- [ ] 修复 `grow7`、`blend`、`scsd1` 和 `vtp-base` 的非 FT 数值失败。
+- [x] 修复 `grow7`、`blend`、`scsd1` 和 `vtp-base` 的非 FT 数值失败：
+  FTRAN 使用 `|a_q| + |B||x|` 后向误差尺度；小 pivot 在换基前以 fresh
+  factorization 重算，并在强病态 basis 上切换到本次 solve 的安全模式。
 - [ ] Netlib 和 Mittelmann 完整求解结果与 HiGHS/CLP 对比。
 - [ ] 汇总 objective、status、iteration count 和 residual。
 - [ ] 汇总 reinversion 次数、原因和 FT chain 长度。

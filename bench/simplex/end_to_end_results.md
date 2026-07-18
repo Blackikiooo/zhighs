@@ -43,8 +43,23 @@ the records. Models including `forest6`, `sc205`, `scagr7`, `scrs8`, and
 `lotfi` consequently changed from false zero-RHS results to the same status
 and objective as HiGHS.
 
-After these fixes, 35 of 40 models match the available HiGHS reference.
-`blend`, `grow7`, `scsd1`, and `vtp-base` remain numerical failures even with
-reinversion after every pivot, which excludes FT update accumulation. `gas11`
-is classified as long-running because the local HiGHS reference also exceeded
-the 30-second diagnostic limit.
+After the parser and numerical fixes, 39 of 40 models match the available
+HiGHS reference. The four former numerical failures now finish as follows:
+
+| model | status | objective | iterations | primal / dual residual |
+|---|---:|---:|---:|---:|
+| blend | optimal | -30.81214984582824 | 1416 | 5.68e-14 / 8.60e-16 |
+| grow7 | optimal | -47787811.8147115 | 394 | 9.37e-10 / 1.06e-13 |
+| scsd1 | optimal | 8.666666674333367 | 559 | 5.55e-17 / 1.49e-8 |
+| vtp-base | optimal | 129831.46246136136 | 718 | 1.23e-11 / 2.18e-11 |
+
+`grow7` exposed an incorrectly scaled FTRAN residual: `||a_q-Bx||/||a_q||`
+rejects a backward-stable solve when large `B*x` terms cancel. The fused
+residual traversal now accumulates `|a_q| + |B||x|` without allocation.
+`blend` and `scsd1` additionally require fresh-factorization validation for
+pivotal components near the forward-accuracy boundary. Once encountered, the
+solve retains fresh factorizations because returning to intermittent FT updates
+can change later ratio-test decisions on these ill-conditioned bases.
+
+`gas11` remains classified as long-running/unresolved because the local HiGHS
+reference also exceeded the 30-second diagnostic limit.

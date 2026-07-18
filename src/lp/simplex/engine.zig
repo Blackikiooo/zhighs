@@ -29,6 +29,18 @@ pub const IterationCallback = *const fn (event: ProgressEventView, user_data: ?*
 pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data: ?*anyopaque) void;
 pub const LogLevel = enum { off, iterations };
 pub const SolveStatus = solution_module.SolveStatus;
+pub const FailureSite = enum {
+    none,
+    direction_column,
+    direction_solve,
+    direction_refactor,
+    direction_refinement,
+    pivot_update,
+    pivot_factorization,
+    pivot_edge_weights,
+    reduced_cost,
+    optimality_check,
+};
 pub const PivotTraceEvent = struct {
     phase: SolvePhase,
     iteration: usize,
@@ -103,6 +115,9 @@ pub const SimplexEngine = struct {
     pivot_trace_count: usize = 0,
     active_pivot_trace: []PivotTraceEvent = &.{},
     current_phase: SolvePhase = .phase_two,
+    direction_requires_reinversion: bool = false,
+    fresh_factorization_mode: bool = false,
+    failure_site: FailureSite = .none,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -123,6 +138,8 @@ pub const SimplexEngine = struct {
         self.startSolveClock(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
+        self.fresh_factorization_mode = false;
+        self.failure_site = .none;
         self.numerical.resetAntiCycling();
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
@@ -306,12 +323,13 @@ pub const SimplexEngine = struct {
             }
         }
         for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
-            const new_scale: f64 = if (std.math.isFinite(upper)) 1.0 else if (std.math.isFinite(lower)) -1.0 else 0.0;
-            if (new_scale != basis.row_scale[row]) return false;
-            basis.row_rhs[row] = if (new_scale > 0.0) upper else if (new_scale < 0.0) -lower else 0.0;
+            const sign: f64 = if (std.math.isFinite(upper)) 1.0 else if (std.math.isFinite(lower)) -1.0 else 0.0;
+            if (std.math.sign(basis.row_scale[row]) != sign) return false;
+            const magnitude = @abs(basis.row_scale[row]);
+            basis.row_rhs[row] = if (sign > 0.0) upper * magnitude else if (sign < 0.0) -lower * magnitude else 0.0;
             const logical = problem.num_cols + row;
             basis.col_lower[logical] = 0.0;
-            basis.col_upper[logical] = if (new_scale > 0.0 and std.math.isFinite(lower)) upper - lower else std.math.inf(f64);
+            basis.col_upper[logical] = if (sign > 0.0 and std.math.isFinite(lower)) (upper - lower) * magnitude else std.math.inf(f64);
             switch (basis.col_status[logical]) {
                 .basic => {},
                 .at_lower, .fixed => basis.primal[logical] = basis.col_lower[logical],
@@ -352,16 +370,26 @@ pub const SimplexEngine = struct {
             basis.col_lower[col] = lower;
             basis.col_upper[col] = upper;
         }
+        @memset(basis.residual_work, 0.0);
+        for (problem.matrix.row_indices, problem.matrix.values) |row, value| {
+            const row_index = row.toUsize();
+            basis.residual_work[row_index] = @max(basis.residual_work[row_index], @abs(value));
+        }
         for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
             if (lower > upper) return .infeasible;
+            const maximum = basis.residual_work[row];
+            const magnitude = if (maximum == 0.0)
+                1.0
+            else
+                @exp2(std.math.clamp(@round(-@log2(maximum)), -20.0, 20.0));
             if (std.math.isFinite(upper)) {
-                basis.row_scale[row] = 1.0;
-                basis.row_rhs[row] = upper;
+                basis.row_scale[row] = magnitude;
+                basis.row_rhs[row] = upper * magnitude;
                 basis.col_lower[problem.num_cols + row] = 0.0;
-                basis.col_upper[problem.num_cols + row] = if (std.math.isFinite(lower)) upper - lower else std.math.inf(f64);
+                basis.col_upper[problem.num_cols + row] = if (std.math.isFinite(lower)) (upper - lower) * magnitude else std.math.inf(f64);
             } else if (std.math.isFinite(lower)) {
-                basis.row_scale[row] = -1.0;
-                basis.row_rhs[row] = -lower;
+                basis.row_scale[row] = -magnitude;
+                basis.row_rhs[row] = -lower * magnitude;
                 basis.col_lower[problem.num_cols + row] = 0.0;
                 basis.col_upper[problem.num_cols + row] = std.math.inf(f64);
             } else {
@@ -469,14 +497,40 @@ pub const SimplexEngine = struct {
     /// engine-owned SoA workspace without allocating or copying model data.
     pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
-        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
-        self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+        self.direction_requires_reinversion = false;
+        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
+            self.failure_site = .direction_column;
+            return .numerical_failure;
+        }
+        self.factorization.solveForUpdate(basis.pivot_direction) catch {
+            self.failure_site = .direction_solve;
+            return .numerical_failure;
+        };
         if (!self.directionResidualAcceptable(problem, entering_col)) {
             self.factorization.recordReinversion(.solve_residual);
-            if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+            if (self.refactorizeBasis(problem) != .optimal) {
+                self.failure_site = .direction_refactor;
+                return .numerical_failure;
+            }
             if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
             self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
-            if (!self.directionResidualAcceptable(problem, entering_col)) return .numerical_failure;
+            var refinement_step: usize = 0;
+            while (!self.directionResidualAcceptable(problem, entering_col)) : (refinement_step += 1) {
+                if (refinement_step >= self.numerical.max_refinement_steps) {
+                    self.failure_site = .direction_refinement;
+                    return .numerical_failure;
+                }
+                self.factorization.solve(basis.residual_work) catch {
+                    self.failure_site = .direction_refinement;
+                    return .numerical_failure;
+                };
+                for (basis.pivot_direction, basis.residual_work) |*value, correction| value.* += correction;
+                self.numerical.refinement_count += 1;
+                // The captured partial aq predates refinement. Force a fresh
+                // base factorization after this pivot instead of publishing an
+                // FT update from inconsistent capture state.
+                self.direction_requires_reinversion = true;
+            }
         }
         return .optimal;
     }
@@ -487,12 +541,23 @@ pub const SimplexEngine = struct {
     fn directionResidualAcceptable(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) bool {
         const basis = if (self.basis) |*value| value else return false;
         if (self.fillInternalColumn(problem, entering_col, basis.residual_work) != .optimal) return false;
-        var rhs_scale: f64 = 0.0;
-        for (basis.residual_work) |value| rhs_scale = @max(rhs_scale, @abs(value));
-        self.subtractBasisProduct(problem, basis.pivot_direction, basis.residual_work) catch return false;
+        for (basis.rhs_work, basis.residual_work) |*magnitude, rhs| magnitude.* = @abs(rhs);
+        self.subtractBasisProductWithMagnitude(
+            problem,
+            basis.pivot_direction,
+            basis.residual_work,
+            basis.rhs_work,
+        ) catch return false;
         var residual_max: f64 = 0.0;
+        var equation_scale: f64 = 0.0;
         for (basis.residual_work) |value| residual_max = @max(residual_max, @abs(value));
-        const relative = residual_max / @max(1.0, rhs_scale);
+        for (basis.rhs_work) |value| equation_scale = @max(equation_scale, value);
+        // Measure normwise backward error. Dividing only by |a_q| rejects a
+        // backward-stable solve whenever a poorly scaled basis produces a
+        // large x whose B*x terms cancel. |a_q| + |B|*|x| is the natural
+        // scale of the equations and is also what iterative refinement can
+        // meaningfully improve.
+        const relative = residual_max / @max(1.0, equation_scale);
         self.numerical.last_ftran_relative_residual = relative;
         self.numerical.max_ftran_relative_residual = @max(self.numerical.max_ftran_relative_residual, relative);
         return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
@@ -553,6 +618,19 @@ pub const SimplexEngine = struct {
         return .{ .status = .optimal, .row = row, .step = best_step, .bound = bound };
     }
 
+    /// Forward-error guard for a pivotal entry extracted from an updated
+    /// FTRAN. `sqrt(epsilon)` is the boundary where cancellation can leave
+    /// fewer than half the significand bits. The unit floor also catches an
+    /// entire entering column that is small before column equilibration.
+    fn pivotNeedsFreshFactorization(self: *const SimplexEngine, leaving_row: u32) bool {
+        const basis = if (self.basis) |*value| value else return true;
+        const row: usize = @intCast(leaving_row);
+        if (row >= basis.pivot_direction.len) return true;
+        var maximum: f64 = 0.0;
+        for (basis.pivot_direction) |value| maximum = @max(maximum, @abs(value));
+        return @abs(basis.pivot_direction[row]) <= @sqrt(std.math.floatEps(f64)) * @max(1.0, maximum);
+    }
+
     /// Apply one primal pivot and rebuild the dense basis factorization in
     /// existing storage. This is allocation-free; update factorizations can
     /// replace the reinversion later without changing the state transition.
@@ -570,6 +648,7 @@ pub const SimplexEngine = struct {
         }
         self.dual_row_index = null;
         const update_succeeded = blk: {
+            if (self.direction_requires_reinversion or self.fresh_factorization_mode) break :blk false;
             self.factorization.update(.{
                 .leaving_row = @intCast(leaving_row),
                 .entering_col = @intCast(entering_col),
@@ -578,6 +657,7 @@ pub const SimplexEngine = struct {
             }) catch break :blk false;
             break :blk true;
         };
+        self.direction_requires_reinversion = false;
         self.numerical.observePivot(pivot);
         for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= step * direction;
         const entering_value = basis.primal[entering_col] + entering_direction * step;
@@ -605,8 +685,11 @@ pub const SimplexEngine = struct {
         }
         const reinversion_reason = self.factorization.reinversionReason(self.numerical.max_update_count);
         if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
-        if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor())
-            return self.refactorizeBasis(problem);
+        if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor()) {
+            const status = self.refactorizeBasis(problem);
+            if (status != .optimal and self.failure_site == .none) self.failure_site = .pivot_update;
+            return status;
+        }
         return .optimal;
     }
 
@@ -633,7 +716,10 @@ pub const SimplexEngine = struct {
     }
 
     fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
-        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+        if (self.recomputeReducedCosts(problem) != .optimal) {
+            self.failure_site = .reduced_cost;
+            return .numerical_failure;
+        }
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -657,16 +743,41 @@ pub const SimplexEngine = struct {
                 if (self.factorization.update_count != 0) {
                     self.factorization.recordReinversion(.solve_residual);
                     if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
-                    if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    if (self.recomputeReducedCosts(problem) != .optimal) {
+                        self.failure_site = .reduced_cost;
+                        return .numerical_failure;
+                    }
                     continue;
                 }
-                return self.finishOptimal(problem);
+                const status = self.finishOptimal(problem);
+                if (status == .numerical_failure) self.failure_site = .optimality_check;
+                return status;
             };
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
             if (entering.direction < 0) {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
             }
-            const leaving = self.chooseLeaving();
+            var leaving = self.chooseLeaving();
+            // Backward error bounds the full solve but not a tiny pivotal
+            // component's forward error. Recompute suspicious pivots from a
+            // fresh basis before mutating basis membership.
+            if (leaving.status == .optimal and self.factorization.update_count != 0 and
+                self.pivotNeedsFreshFactorization(leaving.row.?))
+            {
+                // Once a basis exposes a component at the forward-accuracy
+                // boundary, occasional FT updates can steer later ratio tests
+                // onto a different numerical path. Keep reinverting for the
+                // remainder of this solve until column equilibration provides
+                // a stronger scale model.
+                self.fresh_factorization_mode = true;
+                self.factorization.recordReinversion(.small_pivot);
+                if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
+                if (entering.direction < 0) {
+                    for (basis.pivot_direction) |*value| value.* = -value.*;
+                }
+                leaving = self.chooseLeaving();
+            }
             const own_step = if (entering.direction > 0)
                 basis.col_upper[entering.column] - basis.primal[entering.column]
             else
@@ -678,10 +789,16 @@ pub const SimplexEngine = struct {
                 self.numerical.observeStep(own_step);
             } else {
                 if (leaving.status != .optimal) return leaving.status;
-                if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) return .numerical_failure;
+                if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) {
+                    if (self.failure_site == .none) self.failure_site = .pivot_update;
+                    return .numerical_failure;
+                }
                 self.numerical.observeStep(leaving.step);
             }
-            if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+            if (self.recomputeReducedCosts(problem) != .optimal) {
+                self.failure_site = .reduced_cost;
+                return .numerical_failure;
+            }
         }
         return .iteration_limit;
     }
@@ -1228,7 +1345,10 @@ pub const SimplexEngine = struct {
     }
 
     fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
-        self.factorizeCurrentBasis(problem) catch return .numerical_failure;
+        self.factorizeCurrentBasis(problem) catch {
+            self.failure_site = .pivot_factorization;
+            return .numerical_failure;
+        };
         return self.finishRefactorization();
     }
 
@@ -1247,8 +1367,10 @@ pub const SimplexEngine = struct {
         self.observeFactorizationStability();
         self.dual_edge_weights_valid = false;
         self.dual_row_index = null;
-        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
+            self.failure_site = .pivot_edge_weights;
             return .numerical_failure;
+        }
         return .optimal;
     }
 
@@ -1416,6 +1538,46 @@ pub const SimplexEngine = struct {
                 const row = column - problem.num_cols - problem.num_rows;
                 residual[row] -= basis.artificial_sign[row] * value;
             } else return error.NumericalFailure;
+        }
+    }
+
+    /// Subtract `B*x` and accumulate `|B|*|x|` in the same sparse traversal.
+    /// The magnitude output lets FTRAN use a scale-aware backward-error test
+    /// without constructing a dense basis or making another matrix pass.
+    fn subtractBasisProductWithMagnitude(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        x: []const f64,
+        residual: []f64,
+        magnitude: []f64,
+    ) !void {
+        const basis = if (self.basis) |*value| value else return error.NumericalFailure;
+        if (x.len != problem.num_rows or residual.len != problem.num_rows or magnitude.len != problem.num_rows)
+            return error.NumericalFailure;
+        for (basis.basic_index, x) |global_col, value| {
+            if (!std.math.isFinite(value)) return error.NumericalFailure;
+            const column: usize = @intCast(global_col);
+            if (column < problem.num_cols) {
+                const start = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                for (problem.matrix.row_indices[start..end], problem.matrix.values[start..end]) |row, coefficient| {
+                    const row_index = row.toUsize();
+                    if (row_index >= residual.len) return error.NumericalFailure;
+                    const product = basis.row_scale[row_index] * coefficient * value;
+                    residual[row_index] -= product;
+                    magnitude[row_index] += @abs(product);
+                }
+            } else if (column < problem.num_cols + problem.num_rows) {
+                const row = column - problem.num_cols;
+                residual[row] -= value;
+                magnitude[row] += @abs(value);
+            } else {
+                const row = column - problem.num_cols - problem.num_rows;
+                if (row >= residual.len) return error.NumericalFailure;
+                const product = basis.artificial_sign[row] * value;
+                residual[row] -= product;
+                magnitude[row] += @abs(product);
+            }
         }
     }
 
