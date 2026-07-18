@@ -30,6 +30,8 @@ pub const SparseLU = struct {
     peeled_pivots: usize = 0,
     kernel_dimension: usize = 0,
     kernel_nonzeros: usize = 0,
+    kernel_maximum_row_count: u32 = 0,
+    kernel_maximum_column_count: u32 = 0,
 
     pivot_rows: []u32 = &.{},
     pivot_columns: []u32 = &.{},
@@ -102,7 +104,12 @@ pub const SparseLU = struct {
         self.peeled_pivots = 0;
         self.kernel_dimension = n;
         self.kernel_nonzeros = basis.nnz();
-        self.selected_ordering = self.selectOrdering(basis);
+        self.kernel_maximum_row_count = 0;
+        self.kernel_maximum_column_count = 0;
+        self.selected_ordering = switch (self.ordering_strategy) {
+            .automatic => .dod_markowitz,
+            else => |forced| forced,
+        };
         self.l_starts[0] = 0;
         self.u_starts[0] = 0;
 
@@ -116,8 +123,12 @@ pub const SparseLU = struct {
                     break :peel singleton;
                 }
                 peeling = false;
-                self.kernel_dimension = n - pivot_index;
-                self.kernel_nonzeros = self.kernel.activeEntries();
+                const shape = self.kernel.shape();
+                self.kernel_dimension = shape.dimension;
+                self.kernel_nonzeros = shape.nonzeros;
+                self.kernel_maximum_row_count = shape.maximum_row_count;
+                self.kernel_maximum_column_count = shape.maximum_column_count;
+                self.selected_ordering = self.selectOrdering(shape);
                 break :peel switch (self.selected_ordering) {
                     .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
                     .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
@@ -315,9 +326,14 @@ pub const SparseLU = struct {
         return total;
     }
 
-    fn selectOrdering(self: *const SparseLU, _: sparse_basis.SparseBasisView) OrderingStrategy {
+    fn selectOrdering(self: *const SparseLU, shape: sparse_kernel.KernelShape) OrderingStrategy {
         return switch (self.ordering_strategy) {
-            .automatic => .dod_markowitz,
+            .automatic => if (self.peeled_pivots >= self.dimension - self.peeled_pivots and
+                shape.nonzeros / @max(shape.dimension, 1) > 4 and
+                shape.maximum_row_count <= 64 and shape.maximum_column_count <= 64)
+                .highs_kernel
+            else
+                .dod_markowitz,
             else => |forced| forced,
         };
     }

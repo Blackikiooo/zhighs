@@ -69,6 +69,12 @@ pub fn main(init: std.process.Init) !void {
         sample.* = @intCast(nowNs() - began);
     }
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
+    const normal_peeled_pivots = lu.peeled_pivots;
+    const normal_kernel_dimension = lu.kernel_dimension;
+    const normal_kernel_nonzeros = lu.kernel_nonzeros;
+    const normal_maximum_row_count = lu.kernel_maximum_row_count;
+    const normal_maximum_column_count = lu.kernel_maximum_column_count;
+    const normal_ordering = lu.selected_ordering;
     const replay_samples = try allocator.alloc(u64, repeats);
     defer allocator.free(replay_samples);
     for (replay_samples) |*sample| {
@@ -90,8 +96,9 @@ pub fn main(init: std.process.Init) !void {
             if (rows[entry].toUsize() == row) { product += values[entry] * rhs[column]; };
         residual = @max(residual, @abs(product - original[row]));
     }
-    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{e},{d}\n", .{
-        path, n, nnz, lu.peeled_pivots, lu.kernel_dimension, lu.kernel_nonzeros,
+    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{d},{d},{s},{d},{d},{d},{d},{e},{d}\n", .{
+        path, n, nnz, normal_peeled_pivots, normal_kernel_dimension, normal_kernel_nonzeros,
+        normal_maximum_row_count, normal_maximum_column_count, @tagName(normal_ordering),
         lu.factorNonzeros(), lu.inserted_fill, samples[repeats / 2], replay_samples[repeats / 2], residual, lu.requestedBytes(),
     });
 }

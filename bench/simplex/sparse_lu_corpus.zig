@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
     const original = try allocator.alloc(f64, n);
     defer allocator.free(original);
 
-    std.debug.print("family,dimension,basis_nnz,status,factor_nnz,fill,invert_ns,max_residual,requested_bytes,peak_rss_kb\n", .{});
+    std.debug.print("family,dimension,basis_nnz,status,peeled,kernel_dim,kernel_nnz,max_row,max_col,ordering,factor_nnz,fill,invert_ns,max_residual,requested_bytes,peak_rss_kb\n", .{});
     inline for (std.meta.tags(Family)) |family| {
         var nnz: usize = 0;
         for (0..n) |column| {
@@ -110,13 +110,18 @@ pub fn main(init: std.process.Init) !void {
                 saved.* = value.*;
             }
             try lu.solve(rhs);
-            std.debug.print("{s},{d},{d},ok,{d},{d},{d},{e},{d},{d}\n", .{
-                @tagName(family), n, nnz, lu.factorNonzeros(), lu.inserted_fill, elapsed,
+            std.debug.print("{s},{d},{d},ok,{d},{d},{d},{d},{d},{s},{d},{d},{d},{e},{d},{d}\n", .{
+                @tagName(family), n, nnz, lu.peeled_pivots, lu.kernel_dimension, lu.kernel_nonzeros,
+                lu.kernel_maximum_row_count, lu.kernel_maximum_column_count, @tagName(lu.selected_ordering),
+                lu.factorNonzeros(), lu.inserted_fill, elapsed,
                 residual(basis, rhs, original), lu.requestedBytes(), peakRssKb(),
             });
         } else |err| {
             if (family != .rank_deficient or err != error.Singular) return err;
-            std.debug.print("{s},{d},{d},expected-singular,0,0,{d},0,0,{d}\n", .{ @tagName(family), n, nnz, elapsed, peakRssKb() });
+            std.debug.print("{s},{d},{d},expected-singular,{d},{d},{d},{d},{d},{s},0,0,{d},0,0,{d}\n", .{
+                @tagName(family), n, nnz, lu.peeled_pivots, lu.kernel_dimension, lu.kernel_nonzeros,
+                lu.kernel_maximum_row_count, lu.kernel_maximum_column_count, @tagName(lu.selected_ordering), elapsed, peakRssKb(),
+            });
         }
     }
 }

@@ -14,6 +14,7 @@ const none = std.math.maxInt(u32);
 pub const KernelError = error{ InvalidBasis, Singular, OutOfMemory, CapacityOverflow };
 
 pub const PivotChoice = struct { row: u32, column: u32, value: f64, merit: u64 };
+pub const KernelShape = struct { dimension: usize, nonzeros: usize, maximum_row_count: u32, maximum_column_count: u32 };
 
 /// Borrowed elimination data valid until the next kernel mutation.
 pub const PivotView = struct {
@@ -496,6 +497,22 @@ pub const MutableSparseKernel = struct {
         var total: usize = 0;
         for (self.row_count[0..self.dimension]) |count| total += count;
         return total;
+    }
+
+    pub fn shape(self: *const MutableSparseKernel) KernelShape {
+        var nonzeros: usize = 0;
+        var maximum_row_count: u32 = 0;
+        var maximum_column_count: u32 = 0;
+        var active_dimension: usize = 0;
+        for (0..self.dimension) |index| {
+            if (self.row_active[index]) {
+                active_dimension += 1;
+                nonzeros += self.row_count[index];
+                maximum_row_count = @max(maximum_row_count, self.row_count[index]);
+            }
+            if (self.column_active[index]) maximum_column_count = @max(maximum_column_count, self.column_count[index]);
+        }
+        return .{ .dimension = active_dimension, .nonzeros = nonzeros, .maximum_row_count = maximum_row_count, .maximum_column_count = maximum_column_count };
     }
 
     fn find(self: *const MutableSparseKernel, row: u32, column: u32) ?u32 {
