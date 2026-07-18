@@ -73,6 +73,8 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
   and fixed pivot-trace separation of ordering from numerical update cost.
 - [x] Numerically validated pivot-trace prefix replay with automatic suffix
   repair, plus cost-gated adaptive bounded-Markowitz search windows.
+- [x] Generation-marked dense lookup for sparse Schur row accumulation, with
+  O(n) clearing required only on u32 generation wraparound.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
 - Forrest--Tomlin updates and adaptive reinversion.

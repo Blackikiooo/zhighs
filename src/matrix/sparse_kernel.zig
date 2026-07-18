@@ -93,6 +93,8 @@ pub const MutableSparseKernel = struct {
     scratch_l: []f64 = &.{},
     scratch_u: []f64 = &.{},
     scratch_lookup: []u32 = &.{},
+    scratch_lookup_generation: []u32 = &.{},
+    lookup_generation: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) MutableSparseKernel {
         return .{ .allocator = allocator };
@@ -100,12 +102,12 @@ pub const MutableSparseKernel = struct {
 
     pub fn deinit(self: *MutableSparseKernel) void {
         inline for (.{
-            "row_head",              "column_head",           "row_count",           "column_count",          "column_maximum",     "column_maximum_dirty",
-            "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active",         "column_active",
-            "row_bucket_first",      "column_bucket_first",   "row_bucket_next",     "row_bucket_previous",   "column_bucket_next", "column_bucket_previous",
-            "entry_row",             "entry_column",          "entry_value",         "row_next",              "row_previous",       "column_next",
-            "column_previous",       "free_next",             "scratch_rows",        "scratch_columns",       "scratch_l",          "scratch_u",
-            "scratch_lookup",
+            "row_head",              "column_head",               "row_count",           "column_count",          "column_maximum",     "column_maximum_dirty",
+            "local_candidate_dirty", "local_candidate_valid",     "local_candidate_row", "local_candidate_value", "row_active",         "column_active",
+            "row_bucket_first",      "column_bucket_first",       "row_bucket_next",     "row_bucket_previous",   "column_bucket_next", "column_bucket_previous",
+            "entry_row",             "entry_column",              "entry_value",         "row_next",              "row_previous",       "column_next",
+            "column_previous",       "free_next",                 "scratch_rows",        "scratch_columns",       "scratch_l",          "scratch_u",
+            "scratch_lookup",        "scratch_lookup_generation",
         }) |field_name| self.allocator.free(@field(self, field_name));
         self.* = .{ .allocator = self.allocator };
     }
@@ -116,12 +118,12 @@ pub const MutableSparseKernel = struct {
     pub fn requestedBytes(self: *const MutableSparseKernel) usize {
         var total: usize = 0;
         inline for (.{
-            "row_head",            "column_head",            "row_count",       "column_count",
-            "row_bucket_first",    "column_bucket_first",    "row_bucket_next", "row_bucket_previous",
-            "column_bucket_next",  "column_bucket_previous", "entry_row",       "entry_column",
-            "row_next",            "row_previous",           "column_next",     "column_previous",
-            "free_next",           "scratch_rows",           "scratch_columns", "scratch_lookup",
-            "local_candidate_row",
+            "row_head",            "column_head",               "row_count",       "column_count",
+            "row_bucket_first",    "column_bucket_first",       "row_bucket_next", "row_bucket_previous",
+            "column_bucket_next",  "column_bucket_previous",    "entry_row",       "entry_column",
+            "row_next",            "row_previous",              "column_next",     "column_previous",
+            "free_next",           "scratch_rows",              "scratch_columns", "scratch_lookup",
+            "local_candidate_row", "scratch_lookup_generation",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         inline for (.{ "row_active", "column_active", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
@@ -172,6 +174,8 @@ pub const MutableSparseKernel = struct {
         @memset(self.column_maximum_dirty[0..n], false);
         @memset(self.local_candidate_dirty[0..n], true);
         @memset(self.local_candidate_valid[0..n], false);
+        @memset(self.scratch_lookup_generation[0..n], 0);
+        self.lookup_generation = 0;
         if (reduced_rows) |mask| @memcpy(self.row_active[0..n], mask) else @memset(self.row_active[0..n], true);
         if (reduced_columns) |mask| @memcpy(self.column_active[0..n], mask) else @memset(self.column_active[0..n], true);
         @memset(self.row_bucket_first[0 .. n + 1], none);
@@ -521,16 +525,19 @@ pub const MutableSparseKernel = struct {
         var inserted_fill: usize = 0;
         for (self.scratch_rows[0..l_count], self.scratch_l[0..l_count]) |row, multiplier| {
             const use_lookup = u_count >= 8 and self.row_count[row] >= 8;
+            var generation: u32 = 0;
             if (use_lookup) {
-                for (self.scratch_columns[0..u_count]) |column| self.scratch_lookup[column] = none;
+                generation = self.nextLookupGeneration();
                 entry = self.row_head[row];
-                while (entry != none) : (entry = self.row_next[entry])
+                while (entry != none) : (entry = self.row_next[entry]) {
                     self.scratch_lookup[self.entry_column[entry]] = entry;
+                    self.scratch_lookup_generation[self.entry_column[entry]] = generation;
+                }
             }
             for (self.scratch_columns[0..u_count], self.scratch_u[0..u_count]) |column, upper| {
                 const delta = multiplier * upper;
                 const existing_entry = if (use_lookup)
-                    (if (self.scratch_lookup[column] == none) null else self.scratch_lookup[column])
+                    (if (self.scratch_lookup_generation[column] == generation) self.scratch_lookup[column] else null)
                 else
                     self.find(row, column);
                 if (existing_entry) |existing| {
@@ -622,6 +629,17 @@ pub const MutableSparseKernel = struct {
         return null;
     }
 
+    /// Begin a new logical sparse-lookup row without clearing its dense index
+    /// array. A full O(n) clear occurs only after the u32 generation wraps.
+    fn nextLookupGeneration(self: *MutableSparseKernel) u32 {
+        self.lookup_generation +%= 1;
+        if (self.lookup_generation == 0) {
+            @memset(self.scratch_lookup_generation[0..self.dimension], 0);
+            self.lookup_generation = 1;
+        }
+        return self.lookup_generation;
+    }
+
     fn columnMaximum(self: *MutableSparseKernel, column: usize) f64 {
         if (self.cache_column_maxima and !self.column_maximum_dirty[column]) return self.column_maximum[column];
         var maximum: f64 = 0.0;
@@ -705,7 +723,7 @@ pub const MutableSparseKernel = struct {
     fn ensureDimension(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u", "scratch_lookup" }) |field_name|
+        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u", "scratch_lookup", "scratch_lookup_generation" }) |field_name|
             @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
         self.row_bucket_first = self.allocator.realloc(self.row_bucket_first, capacity + 1) catch return error.OutOfMemory;
         self.column_bucket_first = self.allocator.realloc(self.column_bucket_first, capacity + 1) catch return error.OutOfMemory;
