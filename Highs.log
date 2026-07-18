@@ -1,0 +1,34 @@
+Running HiGHS 1.14.0 (git hash: de09bbad9f): Copyright (c) 2026 under MIT licence terms
+Command line parsed using CLI11 2.5.0: Copyright (c) 2017-2025 University of Cincinnati
+Set option presolve to "off"
+Set option solver to "simplex"
+Set option parallel to "off"
+Set option time_limit to 15
+Number of MI entries in BOUNDS section is 224
+WARNING: LP matrix packed vector contains 12 |value| in [9.999e-10, 9.999e-10] less than or equal to 1e-09: ignored
+LP gas11 has 459 rows; 862 cols; 2154 nonzeros
+Coefficient ranges:
+  Matrix  [1e-09, 3e+02]
+  Cost    [1e-03, 2e+10]
+  Bound   [3e-01, 4e+03]
+  RHS     [3e-14, 9e+04]
+WARNING: Problem has some excessively large costs
+WARNING: Problem has some excessively small row bounds
+WARNING:    Consider scaling the objective by 1e-5, or setting the user_objective_scale option to -15
+Solving LP without presolve or useful basis
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0    -5.3639012715e+05 Ph1: 409(6.37781e+07); Du: 187(536.4)    0.0044651031s
+        485    -1.2266388309e+04     0.018987179s
+        691     5.9117064787e+13 Pr: 0(0); Du: 39(3.275e+12)     0.045340061s
+Using primal simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+        691     5.9117063545e+13 Pr: 0(0); Du: 39(1.55795e+11)     0.046965837s
+        699    -6.8414055774e+09 Pr: 0(0); Du: 53(2.61335e+08)     0.048802137s
+
+Model name          : gas11
+Model status        : Unbounded
+Simplex   iterations: 699
+Objective value     : -6.8414055774e+09
+P-D objective error :  7.2863033701e-13
+HiGHS run time      :          0.05
