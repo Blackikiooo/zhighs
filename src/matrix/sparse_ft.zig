@@ -149,13 +149,26 @@ pub const SparseForrestTomlin = struct {
 
     pub fn retainedBytes(self: *const SparseForrestTomlin) usize {
         var total: usize = 0;
-        inline for (.{
-            "pivot_ids",         "pivot_values",      "pivot_lookup",      "column_head",
-            "row_head",          "entry_row",         "entry_column",      "entry_value",
-            "column_next",       "column_previous",   "row_next",          "row_previous",
-            "free_next",         "correction_starts", "correction_pivots", "correction_indices",
-            "correction_values", "work",              "captured_aq",       "captured_ep",
-        }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        total += std.mem.sliceAsBytes(self.pivot_ids).len;
+        total += std.mem.sliceAsBytes(self.pivot_values).len;
+        total += std.mem.sliceAsBytes(self.pivot_lookup).len;
+        total += std.mem.sliceAsBytes(self.column_head).len;
+        total += std.mem.sliceAsBytes(self.row_head).len;
+        total += std.mem.sliceAsBytes(self.entry_row).len;
+        total += std.mem.sliceAsBytes(self.entry_column).len;
+        total += std.mem.sliceAsBytes(self.entry_value).len;
+        total += std.mem.sliceAsBytes(self.column_next).len;
+        total += std.mem.sliceAsBytes(self.column_previous).len;
+        total += std.mem.sliceAsBytes(self.row_next).len;
+        total += std.mem.sliceAsBytes(self.row_previous).len;
+        total += std.mem.sliceAsBytes(self.free_next).len;
+        total += std.mem.sliceAsBytes(self.correction_starts).len;
+        total += std.mem.sliceAsBytes(self.correction_pivots).len;
+        total += std.mem.sliceAsBytes(self.correction_indices).len;
+        total += std.mem.sliceAsBytes(self.correction_values).len;
+        total += std.mem.sliceAsBytes(self.work).len;
+        total += std.mem.sliceAsBytes(self.captured_aq).len;
+        total += std.mem.sliceAsBytes(self.captured_ep).len;
         return total;
     }
 
@@ -325,22 +338,36 @@ pub const SparseForrestTomlin = struct {
     fn ensureDimension(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.work.len) return;
         const capacity = grow(self.work.len, required) catch return error.CapacityOverflow;
-        inline for (.{ "pivot_lookup", "row_head", "work", "captured_aq", "captured_ep" }) |name|
-            @field(self, name) = self.allocator.realloc(@field(self, name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.pivot_lookup, capacity);
+        try self.resizeRetained(&self.row_head, capacity);
+        try self.resizeRetained(&self.work, capacity);
+        try self.resizeRetained(&self.captured_aq, capacity);
+        try self.resizeRetained(&self.captured_ep, capacity);
     }
     fn ensureLogical(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.logical_capacity) return;
         const capacity = grow(self.logical_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "pivot_ids", "pivot_values", "column_head" }) |name|
-            @field(self, name) = self.allocator.realloc(@field(self, name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.pivot_ids, capacity);
+        try self.resizeRetained(&self.pivot_values, capacity);
+        try self.resizeRetained(&self.column_head, capacity);
         self.logical_capacity = capacity;
     }
     fn ensureEntries(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.entry_capacity) return;
         const capacity = grow(self.entry_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "entry_row", "entry_column", "entry_value", "column_next", "column_previous", "row_next", "row_previous", "free_next" }) |name|
-            @field(self, name) = self.allocator.realloc(@field(self, name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.entry_row, capacity);
+        try self.resizeRetained(&self.entry_column, capacity);
+        try self.resizeRetained(&self.entry_value, capacity);
+        try self.resizeRetained(&self.column_next, capacity);
+        try self.resizeRetained(&self.column_previous, capacity);
+        try self.resizeRetained(&self.row_next, capacity);
+        try self.resizeRetained(&self.row_previous, capacity);
+        try self.resizeRetained(&self.free_next, capacity);
         self.entry_capacity = capacity;
+    }
+
+    fn resizeRetained(self: *SparseForrestTomlin, slice: anytype, capacity: usize) FtError!void {
+        slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
     fn ensureCorrections(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.correction_capacity) return;

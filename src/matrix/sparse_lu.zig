@@ -530,13 +530,27 @@ pub const SparseLU = struct {
     /// permutations and solve workspace. Allocator bookkeeping is excluded.
     pub fn requestedBytes(self: *const SparseLU) usize {
         var total = self.kernel.requestedBytes() + self.symbolic.retainedBytes() + self.ft.retainedBytes();
-        inline for (.{
-            "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
-            "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
-            "u_values",        "work",          "active",          "hyper_output",    "marked",
-            "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts",    "l_row_columns",
-            "l_row_values",
-        }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        total += std.mem.sliceAsBytes(self.pivot_rows).len;
+        total += std.mem.sliceAsBytes(self.pivot_columns).len;
+        total += std.mem.sliceAsBytes(self.row_position).len;
+        total += std.mem.sliceAsBytes(self.column_position).len;
+        total += std.mem.sliceAsBytes(self.pivot_values).len;
+        total += std.mem.sliceAsBytes(self.l_starts).len;
+        total += std.mem.sliceAsBytes(self.u_starts).len;
+        total += std.mem.sliceAsBytes(self.l_rows).len;
+        total += std.mem.sliceAsBytes(self.l_values).len;
+        total += std.mem.sliceAsBytes(self.u_columns).len;
+        total += std.mem.sliceAsBytes(self.u_values).len;
+        total += std.mem.sliceAsBytes(self.work).len;
+        total += std.mem.sliceAsBytes(self.active).len;
+        total += std.mem.sliceAsBytes(self.hyper_output).len;
+        total += std.mem.sliceAsBytes(self.marked).len;
+        total += std.mem.sliceAsBytes(self.u_column_starts).len;
+        total += std.mem.sliceAsBytes(self.u_column_rows).len;
+        total += std.mem.sliceAsBytes(self.u_column_values).len;
+        total += std.mem.sliceAsBytes(self.l_row_starts).len;
+        total += std.mem.sliceAsBytes(self.l_row_columns).len;
+        total += std.mem.sliceAsBytes(self.l_row_values).len;
         return total;
     }
 
@@ -555,8 +569,15 @@ pub const SparseLU = struct {
     fn ensureDimension(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "pivot_rows", "pivot_columns", "row_position", "column_position", "pivot_values", "work", "active", "hyper_output", "marked" }) |field_name|
-            @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.pivot_rows, capacity);
+        try self.resizeRetained(&self.pivot_columns, capacity);
+        try self.resizeRetained(&self.row_position, capacity);
+        try self.resizeRetained(&self.column_position, capacity);
+        try self.resizeRetained(&self.pivot_values, capacity);
+        try self.resizeRetained(&self.work, capacity);
+        try self.resizeRetained(&self.active, capacity);
+        try self.resizeRetained(&self.hyper_output, capacity);
+        try self.resizeRetained(&self.marked, capacity);
         self.l_starts = self.allocator.realloc(self.l_starts, capacity + 1) catch return error.OutOfMemory;
         self.u_starts = self.allocator.realloc(self.u_starts, capacity + 1) catch return error.OutOfMemory;
         self.u_column_starts = self.allocator.realloc(self.u_column_starts, capacity + 1) catch return error.OutOfMemory;
@@ -567,9 +588,19 @@ pub const SparseLU = struct {
     fn ensureFactorCapacity(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.factor_capacity) return;
         const capacity = grow(self.factor_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "l_rows", "l_values", "u_columns", "u_values", "u_column_rows", "u_column_values", "l_row_columns", "l_row_values" }) |field_name|
-            @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.l_rows, capacity);
+        try self.resizeRetained(&self.l_values, capacity);
+        try self.resizeRetained(&self.u_columns, capacity);
+        try self.resizeRetained(&self.u_values, capacity);
+        try self.resizeRetained(&self.u_column_rows, capacity);
+        try self.resizeRetained(&self.u_column_values, capacity);
+        try self.resizeRetained(&self.l_row_columns, capacity);
+        try self.resizeRetained(&self.l_row_values, capacity);
         self.factor_capacity = capacity;
+    }
+
+    fn resizeRetained(self: *SparseLU, slice: anytype, capacity: usize) SparseLuError!void {
+        slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
 
     fn buildHyperViews(self: *SparseLU) void {

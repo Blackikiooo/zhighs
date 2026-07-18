@@ -141,18 +141,38 @@ pub const MutableSparseKernel = struct {
     /// is the stable, cross-allocator number used beside process peak RSS.
     pub fn requestedBytes(self: *const MutableSparseKernel) usize {
         var total: usize = 0;
-        inline for (.{
-            "row_head",            "column_head",               "row_count",       "column_count",
-            "row_bucket_first",    "column_bucket_first",       "row_bucket_next", "row_bucket_previous",
-            "column_bucket_next",  "column_bucket_previous",    "entry_row",       "entry_column",
-            "row_next",            "row_previous",              "column_next",     "column_previous",
-            "free_next",           "scratch_rows",              "scratch_columns", "scratch_lookup",
-            "local_candidate_row", "scratch_lookup_generation",
-        }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "row_active", "column_active", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid" }) |name|
-            total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "entry_value", "scratch_l", "scratch_u", "column_maximum", "local_candidate_value" }) |name|
-            total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
+        total += std.mem.sliceAsBytes(self.row_head).len;
+        total += std.mem.sliceAsBytes(self.column_head).len;
+        total += std.mem.sliceAsBytes(self.row_count).len;
+        total += std.mem.sliceAsBytes(self.column_count).len;
+        total += std.mem.sliceAsBytes(self.column_maximum).len;
+        total += std.mem.sliceAsBytes(self.column_maximum_dirty).len;
+        total += std.mem.sliceAsBytes(self.local_candidate_dirty).len;
+        total += std.mem.sliceAsBytes(self.local_candidate_valid).len;
+        total += std.mem.sliceAsBytes(self.local_candidate_row).len;
+        total += std.mem.sliceAsBytes(self.local_candidate_value).len;
+        total += std.mem.sliceAsBytes(self.row_active).len;
+        total += std.mem.sliceAsBytes(self.column_active).len;
+        total += std.mem.sliceAsBytes(self.row_bucket_first).len;
+        total += std.mem.sliceAsBytes(self.column_bucket_first).len;
+        total += std.mem.sliceAsBytes(self.row_bucket_next).len;
+        total += std.mem.sliceAsBytes(self.row_bucket_previous).len;
+        total += std.mem.sliceAsBytes(self.column_bucket_next).len;
+        total += std.mem.sliceAsBytes(self.column_bucket_previous).len;
+        total += std.mem.sliceAsBytes(self.entry_row).len;
+        total += std.mem.sliceAsBytes(self.entry_column).len;
+        total += std.mem.sliceAsBytes(self.entry_value).len;
+        total += std.mem.sliceAsBytes(self.row_next).len;
+        total += std.mem.sliceAsBytes(self.row_previous).len;
+        total += std.mem.sliceAsBytes(self.column_next).len;
+        total += std.mem.sliceAsBytes(self.column_previous).len;
+        total += std.mem.sliceAsBytes(self.free_next).len;
+        total += std.mem.sliceAsBytes(self.scratch_rows).len;
+        total += std.mem.sliceAsBytes(self.scratch_columns).len;
+        total += std.mem.sliceAsBytes(self.scratch_l).len;
+        total += std.mem.sliceAsBytes(self.scratch_u).len;
+        total += std.mem.sliceAsBytes(self.scratch_lookup).len;
+        total += std.mem.sliceAsBytes(self.scratch_lookup_generation).len;
         return total;
     }
 
@@ -748,8 +768,28 @@ pub const MutableSparseKernel = struct {
     fn ensureDimension(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u", "scratch_lookup", "scratch_lookup_generation" }) |field_name|
-            @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.row_head, capacity);
+        try self.resizeRetained(&self.column_head, capacity);
+        try self.resizeRetained(&self.row_count, capacity);
+        try self.resizeRetained(&self.column_count, capacity);
+        try self.resizeRetained(&self.column_maximum, capacity);
+        try self.resizeRetained(&self.column_maximum_dirty, capacity);
+        try self.resizeRetained(&self.local_candidate_dirty, capacity);
+        try self.resizeRetained(&self.local_candidate_valid, capacity);
+        try self.resizeRetained(&self.local_candidate_row, capacity);
+        try self.resizeRetained(&self.local_candidate_value, capacity);
+        try self.resizeRetained(&self.row_active, capacity);
+        try self.resizeRetained(&self.column_active, capacity);
+        try self.resizeRetained(&self.row_bucket_next, capacity);
+        try self.resizeRetained(&self.row_bucket_previous, capacity);
+        try self.resizeRetained(&self.column_bucket_next, capacity);
+        try self.resizeRetained(&self.column_bucket_previous, capacity);
+        try self.resizeRetained(&self.scratch_rows, capacity);
+        try self.resizeRetained(&self.scratch_columns, capacity);
+        try self.resizeRetained(&self.scratch_l, capacity);
+        try self.resizeRetained(&self.scratch_u, capacity);
+        try self.resizeRetained(&self.scratch_lookup, capacity);
+        try self.resizeRetained(&self.scratch_lookup_generation, capacity);
         self.row_bucket_first = self.allocator.realloc(self.row_bucket_first, capacity + 1) catch return error.OutOfMemory;
         self.column_bucket_first = self.allocator.realloc(self.column_bucket_first, capacity + 1) catch return error.OutOfMemory;
         self.dimension_capacity = capacity;
@@ -758,9 +798,19 @@ pub const MutableSparseKernel = struct {
     fn ensureEntries(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.entry_capacity) return;
         const capacity = grow(self.entry_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "entry_row", "entry_column", "entry_value", "row_next", "row_previous", "column_next", "column_previous", "free_next" }) |field_name|
-            @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
+        try self.resizeRetained(&self.entry_row, capacity);
+        try self.resizeRetained(&self.entry_column, capacity);
+        try self.resizeRetained(&self.entry_value, capacity);
+        try self.resizeRetained(&self.row_next, capacity);
+        try self.resizeRetained(&self.row_previous, capacity);
+        try self.resizeRetained(&self.column_next, capacity);
+        try self.resizeRetained(&self.column_previous, capacity);
+        try self.resizeRetained(&self.free_next, capacity);
         self.entry_capacity = capacity;
+    }
+
+    fn resizeRetained(self: *MutableSparseKernel, slice: anytype, capacity: usize) KernelError!void {
+        slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
 
     fn rowBucketInsert(self: *MutableSparseKernel, row: u32, count: u32) void {
