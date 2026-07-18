@@ -36,11 +36,14 @@ pub const MutableSparseKernel = struct {
     entry_high_water: usize = 0,
     free_head: u32 = none,
     buckets_ready: bool = false,
+    cache_column_maxima: bool = false,
 
     row_head: []u32 = &.{},
     column_head: []u32 = &.{},
     row_count: []u32 = &.{},
     column_count: []u32 = &.{},
+    column_maximum: []f64 = &.{},
+    column_maximum_dirty: []bool = &.{},
     row_active: []bool = &.{},
     column_active: []bool = &.{},
     row_bucket_first: []u32 = &.{},
@@ -70,7 +73,8 @@ pub const MutableSparseKernel = struct {
 
     pub fn deinit(self: *MutableSparseKernel) void {
         inline for (.{
-            "row_head",         "column_head",         "row_count",       "column_count",        "row_active",         "column_active",
+            "row_head",         "column_head",         "row_count",       "column_count",        "column_maximum",      "column_maximum_dirty",
+            "row_active",       "column_active",
             "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous",
             "entry_row",        "entry_column",        "entry_value",     "row_next",            "row_previous",       "column_next",
             "column_previous",  "free_next",           "scratch_rows",    "scratch_columns",     "scratch_l",          "scratch_u",
@@ -90,9 +94,9 @@ pub const MutableSparseKernel = struct {
             "row_next", "row_previous", "column_next", "column_previous", "free_next",
             "scratch_rows", "scratch_columns",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "row_active", "column_active" }) |name|
+        inline for (.{ "row_active", "column_active", "column_maximum_dirty" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "entry_value", "scratch_l", "scratch_u" }) |name|
+        inline for (.{ "entry_value", "scratch_l", "scratch_u", "column_maximum" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         return total;
     }
@@ -117,10 +121,13 @@ pub const MutableSparseKernel = struct {
         self.entry_high_water = basis.nnz();
         self.free_head = none;
         self.buckets_ready = false;
+        self.cache_column_maxima = n != 0 and basis.nnz() / n > 4;
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..n], none);
         @memset(self.row_count[0..n], 0);
         @memset(self.column_count[0..n], 0);
+        @memset(self.column_maximum[0..n], 0.0);
+        @memset(self.column_maximum_dirty[0..n], false);
         @memset(self.row_active[0..n], true);
         @memset(self.column_active[0..n], true);
         @memset(self.row_bucket_first[0 .. n + 1], none);
@@ -155,6 +162,7 @@ pub const MutableSparseKernel = struct {
                 self.column_head[column] = entry;
                 self.row_count[row] += 1;
                 self.column_count[column] += 1;
+                self.column_maximum[column] = @max(self.column_maximum[column], @abs(value));
             }
         }
         for (self.row_count[0..n], self.column_count[0..n]) |row_entries, column_entries|
@@ -169,13 +177,14 @@ pub const MutableSparseKernel = struct {
     /// Threshold Markowitz over the current numerical kernel. Column maxima
     /// are recomputed after every fill update, so pivot eligibility never uses
     /// stale pre-elimination values.
-    pub fn choosePivot(self: *const MutableSparseKernel, threshold: f64) ?PivotChoice {
+    pub fn choosePivot(self: *MutableSparseKernel, threshold: f64) ?PivotChoice {
         if (!std.math.isFinite(threshold) or threshold <= 0.0 or threshold > 1.0) return null;
         // Singleton pivots create no fill and their sole entry is necessarily
         // the column maximum. Bypass both floating-point threshold scans and
-        // the general Markowitz loop; deterministic ID selection keeps runs
-        // and factor layouts reproducible despite intrusive-list order.
-        if (self.lowestBucketMember(self.row_bucket_first[1], self.row_bucket_next)) |row| {
+        // the general Markowitz loop. Small kernels retain lowest-ID tie
+        // breaking; larger kernels take the deterministic bucket head and
+        // avoid a repeated scan that becomes quadratic across many singletons.
+        if (self.singletonMember(self.row_bucket_first[1], self.row_bucket_next)) |row| {
             const entry = self.row_head[row];
             if (entry != none) return .{
                 .row = row,
@@ -184,7 +193,7 @@ pub const MutableSparseKernel = struct {
                 .merit = 0,
             };
         }
-        if (self.lowestBucketMember(self.column_bucket_first[1], self.column_bucket_next)) |column| {
+        if (self.singletonMember(self.column_bucket_first[1], self.column_bucket_next)) |column| {
             const entry = self.column_head[column];
             if (entry != none) return .{
                 .row = self.entry_row[entry],
@@ -203,13 +212,10 @@ pub const MutableSparseKernel = struct {
             var bucket_column = self.column_bucket_first[count];
             while (bucket_column != none) : (bucket_column = self.column_bucket_next[bucket_column]) {
                 const column: usize = bucket_column;
-                var maximum: f64 = 0.0;
-                var entry = self.column_head[column];
-                while (entry != none) : (entry = self.column_next[entry])
-                    maximum = @max(maximum, @abs(self.entry_value[entry]));
+                const maximum = self.columnMaximum(column);
                 if (maximum == 0.0 or !std.math.isFinite(maximum)) continue;
                 const minimum = threshold * maximum;
-                entry = self.column_head[column];
+                var entry = self.column_head[column];
                 while (entry != none) : (entry = self.column_next[entry]) {
                     const value = self.entry_value[entry];
                     if (@abs(value) < minimum) continue;
@@ -226,8 +232,9 @@ pub const MutableSparseKernel = struct {
         return best;
     }
 
-    fn lowestBucketMember(_: *const MutableSparseKernel, first: u32, next: []const u32) ?u32 {
+    fn singletonMember(self: *const MutableSparseKernel, first: u32, next: []const u32) ?u32 {
         if (first == none) return null;
+        if (self.dimension >= 128) return first;
         var lowest = first;
         var current = next[first];
         while (current != none) : (current = next[current]) lowest = @min(lowest, current);
@@ -272,7 +279,10 @@ pub const MutableSparseKernel = struct {
                 if (self.find(row, column)) |existing| {
                     const updated = self.entry_value[existing] - delta;
                     if (!std.math.isFinite(updated)) return error.Singular;
-                    if (@abs(updated) <= zero_tolerance) self.remove(existing) else self.entry_value[existing] = updated;
+                    if (@abs(updated) <= zero_tolerance) self.remove(existing) else {
+                        self.entry_value[existing] = updated;
+                        if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
+                    }
                 } else if (@abs(delta) > zero_tolerance) {
                     _ = try self.insert(row, column, -delta);
                     inserted_fill += 1;
@@ -323,10 +333,27 @@ pub const MutableSparseKernel = struct {
     }
 
     fn find(self: *const MutableSparseKernel, row: u32, column: u32) ?u32 {
-        var entry = self.row_head[row];
-        while (entry != none) : (entry = self.row_next[entry])
-            if (self.entry_column[entry] == column) return entry;
+        if (self.row_count[row] <= self.column_count[column]) {
+            var entry = self.row_head[row];
+            while (entry != none) : (entry = self.row_next[entry])
+                if (self.entry_column[entry] == column) return entry;
+        } else {
+            var entry = self.column_head[column];
+            while (entry != none) : (entry = self.column_next[entry])
+                if (self.entry_row[entry] == row) return entry;
+        }
         return null;
+    }
+
+    fn columnMaximum(self: *MutableSparseKernel, column: usize) f64 {
+        if (self.cache_column_maxima and !self.column_maximum_dirty[column]) return self.column_maximum[column];
+        var maximum: f64 = 0.0;
+        var entry = self.column_head[column];
+        while (entry != none) : (entry = self.column_next[entry])
+            maximum = @max(maximum, @abs(self.entry_value[entry]));
+        self.column_maximum[column] = maximum;
+        if (self.cache_column_maxima) self.column_maximum_dirty[column] = false;
+        return maximum;
     }
 
     fn insert(self: *MutableSparseKernel, row: u32, column: u32, value: f64) KernelError!u32 {
@@ -344,6 +371,7 @@ pub const MutableSparseKernel = struct {
         self.entry_row[entry] = row;
         self.entry_column[entry] = column;
         self.entry_value[entry] = value;
+        if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
         self.row_previous[entry] = none;
         self.row_next[entry] = self.row_head[row];
         if (self.row_head[row] != none) self.row_previous[self.row_head[row]] = entry;
@@ -368,6 +396,7 @@ pub const MutableSparseKernel = struct {
     fn remove(self: *MutableSparseKernel, entry: u32) void {
         const row = self.entry_row[entry];
         const column = self.entry_column[entry];
+        if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
         const row_prev = self.row_previous[entry];
         const row_after = self.row_next[entry];
         if (row_prev == none) self.row_head[row] = row_after else self.row_next[row_prev] = row_after;
@@ -397,7 +426,7 @@ pub const MutableSparseKernel = struct {
     fn ensureDimension(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "row_head", "column_head", "row_count", "column_count", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u" }) |field_name|
+        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u" }) |field_name|
             @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
         self.row_bucket_first = self.allocator.realloc(self.row_bucket_first, capacity + 1) catch return error.OutOfMemory;
         self.column_bucket_first = self.allocator.realloc(self.column_bucket_first, capacity + 1) catch return error.OutOfMemory;
