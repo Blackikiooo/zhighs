@@ -37,6 +37,9 @@ pub const MutableSparseKernel = struct {
     free_head: u32 = none,
     buckets_ready: bool = false,
     cache_column_maxima: bool = false,
+    /// Maximum non-singleton columns inspected after an eligible pivot is
+    /// known. Low-count buckets remain first, preserving the Markowitz bias.
+    markowitz_candidate_limit: usize = 32,
 
     row_head: []u32 = &.{},
     column_head: []u32 = &.{},
@@ -207,11 +210,13 @@ pub const MutableSparseKernel = struct {
         while (minimum_row_count <= self.dimension and self.row_bucket_first[minimum_row_count] == none) : (minimum_row_count += 1) {}
         if (minimum_row_count > self.dimension) return null;
         var count: usize = 1;
+        var columns_examined: usize = 0;
         while (count <= self.dimension) : (count += 1) {
             if (best != null and count - 1 > best.?.merit) break;
             var bucket_column = self.column_bucket_first[count];
             while (bucket_column != none) : (bucket_column = self.column_bucket_next[bucket_column]) {
                 const column: usize = bucket_column;
+                columns_examined += 1;
                 const maximum = self.columnMaximum(column);
                 if (maximum == 0.0 or !std.math.isFinite(maximum)) continue;
                 const minimum = threshold * maximum;
@@ -227,6 +232,7 @@ pub const MutableSparseKernel = struct {
                     const lower_bound = @as(u64, @intCast(count - 1)) * @as(u64, @intCast(minimum_row_count - 1));
                     if (best.?.merit == lower_bound) return best;
                 }
+                if (best != null and columns_examined >= self.markowitz_candidate_limit) return best;
             }
         }
         return best;
