@@ -71,6 +71,8 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 - [x] Dual sparse-ordering backends with reduced-kernel dispatch, HiGHS-style
   bounded row/column Markowitz search, dynamic pre-kernel singleton peeling,
   and fixed pivot-trace separation of ordering from numerical update cost.
+- [x] Numerically validated pivot-trace prefix replay with automatic suffix
+  repair, plus cost-gated adaptive bounded-Markowitz search windows.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
 - Forrest--Tomlin updates and adaptive reinversion.

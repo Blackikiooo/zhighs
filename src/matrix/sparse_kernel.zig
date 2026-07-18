@@ -42,6 +42,23 @@ pub const MutableSparseKernel = struct {
     /// Maximum non-singleton columns inspected after an eligible pivot is
     /// known. Low-count buckets remain first, preserving the Markowitz bias.
     markowitz_candidate_limit: usize = 32,
+    /// Candidate budget for the bounded row/column Markowitz search. The
+    /// budget is adapted only at fixed windows so one irregular pivot cannot
+    /// make ordering policy oscillate.
+    markowitz_search_limit: usize = 8,
+    // Eight is the validated HiGHS baseline. Adaptation may spend more work
+    // when that demonstrably improves merit, but never undercut the baseline.
+    markowitz_search_minimum: usize = 8,
+    markowitz_search_maximum: usize = 64,
+    /// Below this kernel size, bounded-search overhead dominates the possible
+    /// reduction in later fill; retain the proven eight-candidate baseline.
+    adaptive_markowitz_minimum_dimension: usize = 512,
+    last_markowitz_searches: usize = 0,
+    last_markowitz_budget_exhausted: bool = false,
+    last_markowitz_extension_improved: bool = false,
+    markowitz_window_pivots: usize = 0,
+    markowitz_window_exhaustions: usize = 0,
+    markowitz_window_improvements: usize = 0,
 
     row_head: []u32 = &.{},
     column_head: []u32 = &.{},
@@ -141,6 +158,12 @@ pub const MutableSparseKernel = struct {
         self.buckets_ready = false;
         self.cache_column_maxima = n != 0 and basis.nnz() / n > 4;
         self.cache_local_candidates = self.cache_column_maxima;
+        self.last_markowitz_searches = 0;
+        self.last_markowitz_budget_exhausted = false;
+        self.last_markowitz_extension_improved = false;
+        self.markowitz_window_pivots = 0;
+        self.markowitz_window_exhaustions = 0;
+        self.markowitz_window_improvements = 0;
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..n], none);
         @memset(self.row_count[0..n], 0);
@@ -287,6 +310,9 @@ pub const MutableSparseKernel = struct {
     /// buckets alternately, accept an opposing side with a smaller degree,
     /// and stop after eight bucket members once a stable candidate exists.
     pub fn choosePivotHighs(self: *MutableSparseKernel, threshold: f64) ?PivotChoice {
+        self.last_markowitz_searches = 0;
+        self.last_markowitz_budget_exhausted = false;
+        self.last_markowitz_extension_improved = false;
         if (!std.math.isFinite(threshold) or threshold <= 0.0 or threshold > 1.0) return null;
         if (self.column_bucket_first[1] != none) {
             const column = self.column_bucket_first[1];
@@ -300,7 +326,18 @@ pub const MutableSparseKernel = struct {
         }
         var best: ?PivotChoice = null;
         var searched: usize = 0;
-        const search_limit: usize = 8;
+        var budget_exhausted = false;
+        var half_budget_merit: u64 = std.math.maxInt(u64);
+        var half_budget_recorded = false;
+        defer {
+            self.last_markowitz_searches = searched;
+            self.last_markowitz_budget_exhausted = budget_exhausted;
+            self.last_markowitz_extension_improved = half_budget_recorded and best != null and
+                best.?.merit < half_budget_merit and
+                best.?.merit <= half_budget_merit - half_budget_merit / 4;
+        }
+        const search_limit = self.markowitz_search_limit;
+        const half_search_limit = @max(search_limit / 2, 1);
         var count: usize = 2;
         while (count <= self.dimension) : (count += 1) {
             var column = self.column_bucket_first[count];
@@ -318,7 +355,14 @@ pub const MutableSparseKernel = struct {
                         best = .{ .row = row, .column = column, .value = value, .merit = merit };
                     if (self.row_count[row] < self.column_count[column]) return best;
                 }
-                if (searched >= search_limit and best != null) return best;
+                if (!half_budget_recorded and searched >= half_search_limit) {
+                    half_budget_recorded = true;
+                    if (best) |candidate| half_budget_merit = candidate.merit;
+                }
+                if (searched >= search_limit and best != null) {
+                    budget_exhausted = true;
+                    return best;
+                }
             }
             var row = self.row_bucket_first[count];
             while (row != none) : (row = self.row_bucket_next[row]) {
@@ -334,10 +378,39 @@ pub const MutableSparseKernel = struct {
                     best = .{ .row = row, .column = candidate_column, .value = value, .merit = merit };
                     if (self.column_count[candidate_column] <= self.row_count[row]) return best;
                 }
-                if (searched >= search_limit and best != null) return best;
+                if (!half_budget_recorded and searched >= half_search_limit) {
+                    half_budget_recorded = true;
+                    if (best) |candidate| half_budget_merit = candidate.merit;
+                }
+                if (searched >= search_limit and best != null) {
+                    budget_exhausted = true;
+                    return best;
+                }
             }
         }
         return best;
+    }
+
+    /// Feed the measured search result back into the bounded Markowitz budget.
+    /// A wider search is justified only when candidates found in the second
+    /// half of the current budget repeatedly improve merit. The fixed
+    /// eight-pivot window provides hysteresis and deterministic results.
+    pub fn observeMarkowitzPivot(self: *MutableSparseKernel) void {
+        if (self.dimension < self.adaptive_markowitz_minimum_dimension) return;
+        if (self.last_markowitz_searches == 0) return;
+        self.markowitz_window_pivots += 1;
+        self.markowitz_window_exhaustions += @intFromBool(self.last_markowitz_budget_exhausted);
+        self.markowitz_window_improvements += @intFromBool(self.last_markowitz_extension_improved);
+        if (self.markowitz_window_pivots < 8) return;
+
+        if (self.markowitz_window_exhaustions == self.markowitz_window_pivots and self.markowitz_window_improvements >= 4) {
+            self.markowitz_search_limit = @min(self.markowitz_search_maximum, self.markowitz_search_limit * 2);
+        } else if (self.markowitz_window_improvements == 0) {
+            self.markowitz_search_limit = @max(self.markowitz_search_minimum, self.markowitz_search_limit / 2);
+        }
+        self.markowitz_window_pivots = 0;
+        self.markowitz_window_exhaustions = 0;
+        self.markowitz_window_improvements = 0;
     }
 
     fn localColumnCandidate(self: *MutableSparseKernel, column: usize, threshold: f64) ?PivotChoice {
@@ -704,10 +777,38 @@ test "mutable kernel inserts fill and updates row column counts" {
     };
     var kernel = MutableSparseKernel.init(std.testing.allocator);
     defer kernel.deinit();
+    kernel.dimension = 512;
     try kernel.load(basis);
     const pivot = kernel.choosePivot(0.1).?;
     const result = try kernel.applyPivot(pivot, 1e-14);
     try std.testing.expectEqual(@as(usize, 1), result.inserted_fill);
     try std.testing.expectEqual(@as(usize, 4), kernel.activeEntries());
     try std.testing.expect(kernel.choosePivot(0.1) != null);
+}
+
+test "Markowitz search budget adapts only after stable windows" {
+    var kernel = MutableSparseKernel.init(std.testing.allocator);
+    defer kernel.deinit();
+    kernel.markowitz_search_limit = 8;
+    for (0..7) |_| {
+        kernel.last_markowitz_searches = 8;
+        kernel.last_markowitz_budget_exhausted = true;
+        kernel.last_markowitz_extension_improved = true;
+        kernel.observeMarkowitzPivot();
+    }
+    try std.testing.expectEqual(@as(usize, 8), kernel.markowitz_search_limit);
+    kernel.last_markowitz_searches = 8;
+    kernel.last_markowitz_budget_exhausted = true;
+    kernel.last_markowitz_extension_improved = true;
+    kernel.observeMarkowitzPivot();
+    try std.testing.expectEqual(@as(usize, 16), kernel.markowitz_search_limit);
+
+    kernel.markowitz_search_minimum = 4;
+    for (0..8) |_| {
+        kernel.last_markowitz_searches = 2;
+        kernel.last_markowitz_budget_exhausted = false;
+        kernel.last_markowitz_extension_improved = false;
+        kernel.observeMarkowitzPivot();
+    }
+    try std.testing.expectEqual(@as(usize, 8), kernel.markowitz_search_limit);
 }
