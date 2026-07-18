@@ -209,7 +209,13 @@ pub const SparseForrestTomlin = struct {
     /// consume the partial BTRAN without another dense copy.
     pub fn solveUpperTranspose(self: *SparseForrestTomlin, values: []f64) FtError!void {
         if (values.len != self.dimension) return error.DimensionMismatch;
-        for (0..self.logical_count) |logical| {
+        return self.solveUpperTransposeFrom(values, 0);
+    }
+
+    /// Solve the active suffix of U^-T. Callers may skip a prefix only when
+    /// every pivot value in that prefix is known to be zero on entry.
+    fn solveUpperTransposeFrom(self: *SparseForrestTomlin, values: []f64, first_logical: usize) FtError!void {
+        for (first_logical..self.logical_count) |logical| {
             const pivot = self.pivot_ids[logical];
             if (pivot == none) continue;
             var value = values[pivot];
@@ -224,6 +230,7 @@ pub const SparseForrestTomlin = struct {
         while (correction > 0) {
             correction -= 1;
             const multiplier = values[self.correction_pivots[correction]];
+            if (multiplier == 0.0) continue;
             for (self.correction_starts[correction]..self.correction_starts[correction + 1]) |entry|
                 values[self.correction_indices[entry]] -= multiplier * self.correction_values[entry];
         }
@@ -231,9 +238,11 @@ pub const SparseForrestTomlin = struct {
 
     pub fn captureEp(self: *SparseForrestTomlin, leaving_id: u32) FtError!void {
         if (leaving_id >= self.dimension) return error.DimensionMismatch;
+        const first_logical = self.pivot_lookup[leaving_id];
+        if (first_logical == none) return error.Singular;
         @memset(self.work[0..self.dimension], 0.0);
         self.work[leaving_id] = 1.0;
-        try self.solveUpperTranspose(self.work[0..self.dimension]);
+        try self.solveUpperTransposeFrom(self.work[0..self.dimension], first_logical);
     }
 
     /// Delete the pivotal U row/column, append the captured FTRAN spike, and

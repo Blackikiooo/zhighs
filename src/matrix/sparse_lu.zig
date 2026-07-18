@@ -315,7 +315,7 @@ pub const SparseLU = struct {
         return self.solveFt(rhs, true);
     }
 
-    fn solveFt(self: *SparseLU, rhs: []f64, capture: bool) SparseLuError!void {
+    fn solveFt(self: *SparseLU, rhs: []f64, comptime capture: bool) SparseLuError!void {
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
         for (0..n) |k| self.work[k] = rhs[self.pivot_rows[k]];
