@@ -29,6 +29,12 @@ pub const IterationCallback = *const fn (event: ProgressEventView, user_data: ?*
 pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data: ?*anyopaque) void;
 pub const LogLevel = enum { off, iterations };
 pub const SolveStatus = solution_module.SolveStatus;
+const PrimalLeavingResult = struct {
+    status: SolveStatus,
+    row: ?u32 = null,
+    step: f64 = 0.0,
+    bound: basis_module.BasisStatus = .at_lower,
+};
 pub const BasisImportError = basis_snapshot_module.BasisViewError || error{
     InvalidNonbasicStatus,
     SingularBasis,
@@ -99,6 +105,7 @@ pub const SimplexEngine = struct {
         self.startSolveClock(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
+        self.numerical.resetAntiCycling();
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
             error.InvalidBounds => .infeasible,
@@ -216,6 +223,7 @@ pub const SimplexEngine = struct {
         self.startSolveClock(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
+        self.numerical.resetAntiCycling();
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
             error.InvalidBounds => .infeasible,
@@ -451,7 +459,7 @@ pub const SimplexEngine = struct {
     /// Choose the leaving basic row for the currently materialized pivot
     /// direction. Returns `unbounded` when no positive pivot coefficient
     /// limits the entering variable.
-    pub fn chooseLeaving(self: *SimplexEngine) struct { status: SolveStatus, row: ?u32 = null, step: f64 = 0.0, bound: basis_module.BasisStatus = .at_lower } {
+    pub fn chooseLeaving(self: *SimplexEngine) PrimalLeavingResult {
         const basis = if (self.basis) |*value| value else return .{ .status = .numerical_failure };
         for (basis.basic_margin, basis.ratio_direction, basis.basic_value, basis.basic_lower, basis.basic_upper, basis.pivot_direction) |*margin, *ratio_direction, value, lower, upper, direction| {
             if (direction > self.numerical.zero_tolerance) {
@@ -465,11 +473,35 @@ pub const SimplexEngine = struct {
                 ratio_direction.* = 0.0;
             }
         }
+        if (self.numerical.anti_cycling_active) return self.chooseLeavingBland();
         const choice = self.ratio_test.chooseLeaving(basis.ratio_direction, basis.basic_margin);
         if (choice.row == null) return .{ .status = .unbounded };
         const row = choice.row.?;
         const bound: basis_module.BasisStatus = if (basis.pivot_direction[@intCast(row)] > 0) .at_lower else .at_upper;
         return .{ .status = .optimal, .row = row, .step = choice.step, .bound = bound };
+    }
+
+    fn chooseLeavingBland(self: *SimplexEngine) PrimalLeavingResult {
+        const basis = if (self.basis) |*value| value else return .{ .status = .numerical_failure };
+        var best_row: ?u32 = null;
+        var best_column: u32 = std.math.maxInt(u32);
+        var best_step = std.math.inf(f64);
+        const tie_tolerance = self.numerical.perturbation;
+        for (basis.ratio_direction, basis.basic_margin, basis.basic_index, 0..) |direction, margin, basic_column, row| {
+            if (direction <= self.numerical.zero_tolerance) continue;
+            const step = @max(margin / direction, 0.0);
+            if (!std.math.isFinite(step)) continue;
+            if (step < best_step - tie_tolerance or
+                (@abs(step - best_step) <= tie_tolerance and basic_column < best_column))
+            {
+                best_step = step;
+                best_column = basic_column;
+                best_row = @intCast(row);
+            }
+        }
+        const row = best_row orelse return .{ .status = .unbounded };
+        const bound: basis_module.BasisStatus = if (basis.pivot_direction[row] > 0.0) .at_lower else .at_upper;
+        return .{ .status = .optimal, .row = row, .step = best_step, .bound = bound };
     }
 
     /// Apply one primal pivot and rebuild the dense basis factorization in
@@ -542,12 +574,19 @@ pub const SimplexEngine = struct {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
-            const entering = self.pricing.choosePrimalEnteringWeighted(
-                basis.reduced_cost[0..original_cols],
-                basis.col_status[0..original_cols],
-                basis.col_edge_weight[0..original_cols],
-                self.numerical.dual_tolerance,
-            ) orelse {
+            const entering = (if (self.numerical.anti_cycling_active)
+                self.pricing.choosePrimalEnteringBland(
+                    basis.reduced_cost[0..original_cols],
+                    basis.col_status[0..original_cols],
+                    self.numerical.dual_tolerance,
+                )
+            else
+                self.pricing.choosePrimalEnteringWeighted(
+                    basis.reduced_cost[0..original_cols],
+                    basis.col_status[0..original_cols],
+                    basis.col_edge_weight[0..original_cols],
+                    self.numerical.dual_tolerance,
+                )) orelse {
                 return self.finishOptimal(problem);
             };
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
@@ -563,9 +602,11 @@ pub const SimplexEngine = struct {
                 for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= own_step * direction;
                 basis.primal[entering.column] = if (entering.direction > 0) basis.col_upper[entering.column] else basis.col_lower[entering.column];
                 basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
+                self.numerical.observeStep(own_step);
             } else {
                 if (leaving.status != .optimal) return leaving.status;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) return .numerical_failure;
+                self.numerical.observeStep(leaving.step);
             }
             if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
         }
@@ -583,7 +624,9 @@ pub const SimplexEngine = struct {
 
             if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
-            const entering = self.ratio_test.chooseDualEntering(
+            var active_ratio_test = self.ratio_test;
+            if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
+            const entering = active_ratio_test.chooseDualEntering(
                 basis.tableau[0..original_cols],
                 basis.reduced_cost[0..original_cols],
                 basis.col_status[0..original_cols],
@@ -618,6 +661,7 @@ pub const SimplexEngine = struct {
                 leaving.bound,
                 @max(step, 0.0),
             ) != .optimal) return .numerical_failure;
+            self.numerical.observeStep(@max(step, 0.0));
             if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
             if (!self.classifyFeasibility(problem).dual) return .numerical_failure;
         }
@@ -626,6 +670,7 @@ pub const SimplexEngine = struct {
 
     fn chooseDualLeavingRow(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
         const basis = if (self.basis) |*value| value else return null;
+        if (self.numerical.anti_cycling_active) return self.chooseDualLeavingBland();
         if (self.pricing.rule != .hyper_sparse or !self.dual_hyper_sparse_active)
             return self.pricing.chooseDualLeavingWeighted(
                 basis.basic_value,
@@ -639,6 +684,21 @@ pub const SimplexEngine = struct {
         if (best == null or self.dualCandidateScore(best.?.row) + self.numerical.primal_tolerance < self.dual_candidate_cutoff) {
             self.rebuildDualCandidateList();
             best = self.bestDualCandidate();
+        }
+        return best;
+    }
+
+    fn chooseDualLeavingBland(self: *const SimplexEngine) ?pricing_module.DualLeavingChoice {
+        const basis = if (self.basis) |*value| value else return null;
+        var best: ?pricing_module.DualLeavingChoice = null;
+        var best_basic_column: u32 = std.math.maxInt(u32);
+        for (0..basis.num_rows) |row| {
+            const candidate = self.dualCandidate(row) orelse continue;
+            const basic_column = basis.basic_index[row];
+            if (basic_column < best_basic_column) {
+                best_basic_column = basic_column;
+                best = candidate;
+            }
         }
         return best;
     }
@@ -773,7 +833,9 @@ pub const SimplexEngine = struct {
             ) orelse return .optimal;
             if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
-            const entering = self.ratio_test.chooseDualEntering(
+            var active_ratio_test = self.ratio_test;
+            if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
+            const entering = active_ratio_test.chooseDualEntering(
                 basis.tableau[0..original_cols],
                 basis.reduced_cost[0..original_cols],
                 basis.col_status[0..original_cols],
@@ -807,6 +869,7 @@ pub const SimplexEngine = struct {
                 leaving.bound,
                 @max(step, 0.0),
             ) != .optimal) return .numerical_failure;
+            self.numerical.observeStep(@max(step, 0.0));
             @memset(basis.reduced_cost, 0.0);
         }
         return .iteration_limit;
@@ -883,12 +946,19 @@ pub const SimplexEngine = struct {
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_one)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
-            const entering = self.pricing.choosePrimalEnteringWeighted(
-                basis.reduced_cost,
-                basis.col_status,
-                basis.col_edge_weight,
-                self.numerical.dual_tolerance,
-            ) orelse break;
+            const entering = (if (self.numerical.anti_cycling_active)
+                self.pricing.choosePrimalEnteringBland(
+                    basis.reduced_cost,
+                    basis.col_status,
+                    self.numerical.dual_tolerance,
+                )
+            else
+                self.pricing.choosePrimalEnteringWeighted(
+                    basis.reduced_cost,
+                    basis.col_status,
+                    basis.col_edge_weight,
+                    self.numerical.dual_tolerance,
+                )) orelse break;
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
             if (entering.direction < 0) {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
@@ -902,10 +972,12 @@ pub const SimplexEngine = struct {
                 for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= own_step * direction;
                 basis.primal[entering.column] += entering.direction * own_step;
                 basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
+                self.numerical.observeStep(own_step);
             } else {
                 if (leaving.status != .optimal) return leaving.status;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
                     return .numerical_failure;
+                self.numerical.observeStep(leaving.step);
             }
             if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
         }
@@ -1341,6 +1413,30 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+test "anti cycling uses basic-column order for degenerate primal and dual ties" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 4);
+    engine.basis.?.initializeSlackBasis();
+    engine.basis.?.basic_index[0] = 5;
+    engine.basis.?.basic_index[1] = 4;
+    @memset(engine.basis.?.basic_value, 0.0);
+    @memset(engine.basis.?.basic_lower, 0.0);
+    @memset(engine.basis.?.basic_upper, std.math.inf(f64));
+    @memset(engine.basis.?.pivot_direction, 1.0);
+    engine.numerical.anti_cycling_active = true;
+    engine.numerical.perturbation = 1e-8;
+
+    const primal = engine.chooseLeaving();
+    try std.testing.expectEqual(SolveStatus.optimal, primal.status);
+    try std.testing.expectEqual(@as(?u32, 1), primal.row);
+
+    engine.basis.?.basic_value[0] = -1.0;
+    engine.basis.?.basic_value[1] = -1.0;
+    const dual = engine.chooseDualLeavingRow().?;
+    try std.testing.expectEqual(@as(u32, 1), dual.row);
+}
+
 test "engine solves a standard-form LP with primal revised simplex" {
     const rows = [_]foundation.RowId{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) };
     const problem = problem_module.ProblemView{
@@ -1365,6 +1461,40 @@ test "engine solves a standard-form LP with primal revised simplex" {
     const solution = engine.solutionView(problem, status).?;
     try std.testing.expectEqual(@as(usize, 2), solution.primal.len);
     try std.testing.expectApproxEqAbs(@as(f64, -4), solution.objective_value, 1e-12);
+}
+
+test "Bland fallback resolves the Beale degenerate cycling example" {
+    const rows = [_]foundation.RowId{
+        foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(2),
+        foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(0),
+        foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
+    };
+    const problem = problem_module.ProblemView{
+        .num_rows = 3,
+        .num_cols = 4,
+        .col_cost = &[_]f64{ 10, -57, -9, -24 },
+        .col_lower = &[_]f64{ 0, 0, 0, 0 },
+        .col_upper = &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) },
+        .row_lower = &[_]f64{ -std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) },
+        .row_upper = &[_]f64{ 0, 0, 1 },
+        .matrix = matrix.CscView.initAssumeValid(
+            3,
+            4,
+            &[_]usize{ 0, 3, 5, 7, 9 },
+            &rows,
+            &[_]f64{ 0.5, 0.5, 1, -5.5, -1.5, -2.5, -0.5, 9, 1 },
+        ),
+        .objective_sense = .maximize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.pricing.rule = .dantzig;
+    engine.numerical.degenerate_pivot_limit = 1;
+
+    try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{ .max_iterations = 100 }));
+    try std.testing.expect(engine.numerical.anti_cycling_activations > 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), engine.objective_value, 1e-9);
 }
 
 test "engine solves with a nonzero structural lower bound" {

@@ -24,6 +24,11 @@ pub const NumericalState = struct {
     pivot_condition_estimate: f64 = 1.0,
     dual_edge_weight_error_tolerance: f64 = 0.25,
     dual_edge_weight_corrections: usize = 0,
+    degenerate_pivot_limit: usize = 8,
+    consecutive_degenerate_pivots: usize = 0,
+    degenerate_pivot_count: usize = 0,
+    anti_cycling_activations: usize = 0,
+    anti_cycling_active: bool = false,
 
     pub fn observePivot(self: *NumericalState, pivot: f64) void {
         self.update_count += 1;
@@ -55,6 +60,35 @@ pub const NumericalState = struct {
     pub fn isDualFeasible(self: NumericalState, violation: f64) bool {
         return violation <= self.dual_tolerance;
     }
+
+    /// Observe primal movement after one simplex iteration. Repeated zero-step
+    /// pivots activate deterministic lexicographic tie-breaking; the first
+    /// material movement exits the fallback immediately.
+    pub fn observeStep(self: *NumericalState, step: f64) void {
+        if (std.math.isFinite(step) and step > self.primal_tolerance) {
+            self.consecutive_degenerate_pivots = 0;
+            self.anti_cycling_active = false;
+            self.perturbation = 0.0;
+            return;
+        }
+        self.degenerate_pivot_count += 1;
+        self.consecutive_degenerate_pivots += 1;
+        if (!self.anti_cycling_active and self.degenerate_pivot_limit != 0 and
+            self.consecutive_degenerate_pivots >= self.degenerate_pivot_limit)
+        {
+            self.anti_cycling_active = true;
+            self.anti_cycling_activations += 1;
+            self.perturbation = @max(self.zero_tolerance, self.primal_tolerance * 0.1);
+        }
+    }
+
+    pub fn resetAntiCycling(self: *NumericalState) void {
+        self.consecutive_degenerate_pivots = 0;
+        self.degenerate_pivot_count = 0;
+        self.anti_cycling_activations = 0;
+        self.anti_cycling_active = false;
+        self.perturbation = 0.0;
+    }
 };
 
 test "numerical state requests refactor after unstable pivot" {
@@ -63,4 +97,18 @@ test "numerical state requests refactor after unstable pivot" {
     try std.testing.expect(state.needsRefactor());
     state.markRefactorized();
     try std.testing.expect(!state.needsRefactor());
+}
+
+test "repeated degenerate steps activate and progress clears anti cycling" {
+    var state = NumericalState{ .degenerate_pivot_limit = 3 };
+    state.observeStep(0.0);
+    state.observeStep(1e-12);
+    try std.testing.expect(!state.anti_cycling_active);
+    state.observeStep(0.0);
+    try std.testing.expect(state.anti_cycling_active);
+    try std.testing.expectEqual(@as(usize, 1), state.anti_cycling_activations);
+    try std.testing.expect(state.perturbation > 0.0);
+    state.observeStep(1.0);
+    try std.testing.expect(!state.anti_cycling_active);
+    try std.testing.expectEqual(@as(usize, 0), state.consecutive_degenerate_pivots);
 }

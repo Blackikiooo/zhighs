@@ -64,6 +64,24 @@ pub const Pricing = struct {
         return self.choosePrimalEnteringWeighted(reduced_cost, status, &.{}, tolerance);
     }
 
+    /// Bland fallback used only after repeated degenerate pivots. The first
+    /// improving nonbasic column is selected, making the entering decision
+    /// independent of weights and previous candidate ordering.
+    pub fn choosePrimalEnteringBland(self: *Pricing, reduced_cost: []const f64, status: []const basis.BasisStatus, tolerance: f64) ?EnteringChoice {
+        if (status.len < reduced_cost.len) return null;
+        self.iterations += 1;
+        for (reduced_cost, status[0..reduced_cost.len], 0..) |value, column_status, column| {
+            const direction: f64 = switch (column_status) {
+                .at_lower => if (-value > tolerance) 1.0 else continue,
+                .at_upper => if (value > tolerance) -1.0 else continue,
+                .free, .superbasic => if (@abs(value) > tolerance) (if (value < 0.0) 1.0 else -1.0) else continue,
+                .basic, .fixed => continue,
+            };
+            return .{ .column = @intCast(column), .direction = direction };
+        }
+        return null;
+    }
+
     /// Bound-aware primal pricing with optional caller-owned edge weights.
     /// Empty weights select Dantzig-compatible unit weights. No candidates are
     /// materialized, which keeps the scan allocation-free and cache-linear.
@@ -159,4 +177,15 @@ test "devex weights can change the chosen entering column" {
         1e-9,
     ).?;
     try std.testing.expectEqual(@as(u32, 1), choice.column);
+}
+
+test "Bland pricing selects the first improving nonbasic column" {
+    var pricing = Pricing{ .rule = .devex };
+    const choice = pricing.choosePrimalEnteringBland(
+        &[_]f64{ -2, -100, -3 },
+        &[_]basis.BasisStatus{ .basic, .at_lower, .at_lower },
+        1e-9,
+    ).?;
+    try std.testing.expectEqual(@as(u32, 1), choice.column);
+    try std.testing.expectEqual(@as(f64, 1), choice.direction);
 }

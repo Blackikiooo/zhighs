@@ -26,7 +26,8 @@
 - [x] Allocation-free iterative refinement。
 - [x] Threshold/small-pivot rejection。
 - [x] 最优解发布前的 primal/dual residual 与人工变量校验。
-- [ ] Stalled/degenerate pivot 监控、扰动和 anti-cycling policy。
+- [x] Stalled/degenerate pivot 监控；连续零步长触发 Bland-style
+  entering/leaving 与字典序扰动 tie-break，有效移动后退出 fallback。
 
 ## 4. Phase I / Phase II 与状态输出
 

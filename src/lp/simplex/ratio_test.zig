@@ -120,7 +120,7 @@ pub const RatioTest = struct {
 
         std.sort.pdq(u32, candidate_work[0..candidate_count], ratio_work, struct {
             fn lessThan(ratios: []f64, lhs: u32, rhs: u32) bool {
-                return ratios[lhs] < ratios[rhs];
+                return ratios[lhs] < ratios[rhs] or (ratios[lhs] == ratios[rhs] and lhs < rhs);
             }
         }.lessThan);
 
@@ -181,4 +181,26 @@ test "dual bound-flipping ratio test records boxed breakpoints" {
     );
     try std.testing.expectEqual(@as(usize, 1), choice.flip_count);
     try std.testing.expectEqual(@as(?u32, 1), choice.column);
+}
+
+test "dual ratio ties use the lowest column index" {
+    const test_rule = RatioTest{ .rule = .standard, .tolerance = 1e-9 };
+    var ratios: [2]f64 = undefined;
+    var directions: [2]f64 = undefined;
+    var candidates: [2]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &[_]f64{ -1, -2 },
+        &[_]f64{ 1, 2 },
+        &[_]basis.BasisStatus{ .at_lower, .at_lower },
+        &[_]f64{ 0, 0 },
+        &[_]f64{ std.math.inf(f64), std.math.inf(f64) },
+        &[_]f64{ 0, 0 },
+        .at_lower,
+        1,
+        &ratios,
+        &directions,
+        &candidates,
+    );
+    try std.testing.expectEqual(@as(?u32, 0), choice.column);
+    try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
 }
