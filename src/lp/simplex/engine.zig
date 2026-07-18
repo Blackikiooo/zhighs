@@ -500,6 +500,10 @@ pub const SimplexEngine = struct {
     /// direction. Returns `unbounded` when no positive pivot coefficient
     /// limits the entering variable.
     pub fn chooseLeaving(self: *SimplexEngine) PrimalLeavingResult {
+        return self.chooseLeavingWithPolicy(true);
+    }
+
+    fn chooseLeavingWithPolicy(self: *SimplexEngine, allow_bland: bool) PrimalLeavingResult {
         const basis = if (self.basis) |*value| value else return .{ .status = .numerical_failure };
         for (basis.basic_margin, basis.ratio_direction, basis.basic_value, basis.basic_lower, basis.basic_upper, basis.pivot_direction) |*margin, *ratio_direction, value, lower, upper, direction| {
             if (direction > self.numerical.zero_tolerance) {
@@ -513,7 +517,7 @@ pub const SimplexEngine = struct {
                 ratio_direction.* = 0.0;
             }
         }
-        if (self.numerical.anti_cycling_active) return self.chooseLeavingBland();
+        if (allow_bland and self.numerical.anti_cycling_active) return self.chooseLeavingBland();
         const choice = self.ratio_test.chooseLeaving(basis.ratio_direction, basis.basic_margin);
         if (choice.row == null) return .{ .status = .unbounded };
         const row = choice.row.?;
@@ -1003,24 +1007,20 @@ pub const SimplexEngine = struct {
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_one)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
-            const entering = (if (self.numerical.anti_cycling_active)
-                self.pricing.choosePrimalEnteringBland(
-                    basis.reduced_cost,
-                    basis.col_status,
-                    self.numerical.dual_tolerance,
-                )
-            else
-                self.pricing.choosePrimalEnteringWeighted(
-                    basis.reduced_cost,
-                    basis.col_status,
-                    basis.col_edge_weight,
-                    self.numerical.dual_tolerance,
-                )) orelse break;
+            // General bounded Phase I contains artificial columns and is not
+            // the standard-form setting required by Bland's proof. Retain the
+            // numerically stable Harris candidate set throughout this phase.
+            const entering = self.pricing.choosePrimalEnteringWeighted(
+                basis.reduced_cost,
+                basis.col_status,
+                basis.col_edge_weight,
+                self.numerical.dual_tolerance,
+            ) orelse break;
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
             if (entering.direction < 0) {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
             }
-            const leaving = self.chooseLeaving();
+            const leaving = self.chooseLeavingWithPolicy(false);
             const own_step = if (entering.direction > 0)
                 basis.col_upper[entering.column] - basis.primal[entering.column]
             else
@@ -1055,6 +1055,7 @@ pub const SimplexEngine = struct {
             if (column >= artificial_begin) basis.basic_upper[row] = 0.0;
         }
         self.phase1_needed = false;
+        self.numerical.clearAntiCyclingFallback();
         return .optimal;
     }
 
@@ -1497,6 +1498,11 @@ test "anti cycling uses basic-column order for degenerate primal and dual ties" 
     engine.basis.?.pivot_direction[1] = 100.0;
     const stable_primal = engine.chooseLeaving();
     try std.testing.expectEqual(@as(?u32, 1), stable_primal.row);
+
+    engine.basis.?.pivot_direction[0] = 2.0;
+    engine.basis.?.pivot_direction[1] = 100.0;
+    try std.testing.expectEqual(@as(?u32, 0), engine.chooseLeaving().row);
+    try std.testing.expectEqual(@as(?u32, 1), engine.chooseLeavingWithPolicy(false).row);
 
     engine.basis.?.basic_value[0] = -1.0;
     engine.basis.?.basic_value[1] = -1.0;

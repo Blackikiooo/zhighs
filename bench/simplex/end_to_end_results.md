@@ -11,7 +11,7 @@ performance claims.
 | adlittle | optimal / 129 | Optimal / 74 | 225494.9631623804 | 9.09e-13 / 7.42e-11 |
 | sc50a | optimal / 48 | Optimal / 55 | -64.5750770585645 | 1.14e-13 / 1.67e-16 |
 | sc105 | optimal / 118 | Optimal / 124 | -52.202061211707225 | 5.40e-13 / 1.39e-16 |
-| brandy | numerical_failure / 1025 | Optimal / 304 | HiGHS 1518.5098964881281 | failure |
+| brandy | optimal / 4561 | Optimal / 304 | 1518.5098964881295 | 2.41e-11 / 1.24e-14 |
 
 `sc105` exposed an FT construction error: `captureEp` applied historical row
 corrections after solving the current mutable `U^-T`. The correction was then
@@ -20,11 +20,13 @@ BTRAN fixes the default run; a pre-ratio-test `B*aq-a` check remains as a
 backward-error safety gate.
 
 The `brandy` pivot hook showed that the default FT and reinvert-after-every-
-pivot oracle now have an identical 1025-event prefix. Earlier divergences at
+pivot oracle have an identical 1025-event prefix. Earlier divergences at
 iterations 50 and 541 were unstable Bland leaving pivots and are prevented by
-a direction-scaled pivot threshold. The remaining failure is common to both
-factorization paths after a long sequence of zero-step Phase-I pivots, so its
-next investigation boundary is anti-cycling/Phase-I state rather than FT.
+a direction-scaled pivot threshold. The remaining cycle came from applying a
+standard-form Bland fallback to generalized bounded Phase I with artificial
+columns. Phase I now retains Devex/Harris candidate selection and clears the
+fallback state when transitioning objectives. This restores correctness;
+closing the large iteration-count gap to HiGHS remains performance work.
 
 Run the deterministic smoke corpus with:
 

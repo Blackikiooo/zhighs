@@ -93,6 +93,14 @@ pub const NumericalState = struct {
         self.last_ftran_relative_residual = 0.0;
         self.max_ftran_relative_residual = 0.0;
     }
+
+    /// Leave the current fallback after a phase/objective transition while
+    /// preserving solve-level diagnostics accumulated so far.
+    pub fn clearAntiCyclingFallback(self: *NumericalState) void {
+        self.consecutive_degenerate_pivots = 0;
+        self.anti_cycling_active = false;
+        self.perturbation = 0.0;
+    }
 };
 
 test "numerical state requests refactor after unstable pivot" {

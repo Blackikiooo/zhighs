@@ -28,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     const max_iterations = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 1_000_000;
     const max_updates = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 100;
     const trace_enabled = if (args.next()) |text| std.mem.eql(u8, text, "trace") else false;
+    const degenerate_limit = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 8;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -49,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
     var engine = zhighs.lp.simplex.engine.SimplexEngine.init(allocator);
     defer engine.deinit();
     engine.numerical.max_update_count = max_updates;
+    engine.numerical.degenerate_pivot_limit = degenerate_limit;
     const trace: []zhighs.lp.simplex.engine.PivotTraceEvent = if (trace_enabled)
         try allocator.alloc(zhighs.lp.simplex.engine.PivotTraceEvent, @min(max_iterations, 100_000))
     else
