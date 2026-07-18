@@ -33,6 +33,10 @@ pub fn main(init: std.process.Init) !void {
     const sparse_threshold = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
     const collect_statistics = if (args.next()) |text| std.mem.eql(u8, text, "stats") else false;
     const fresh_recovery_pivots = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 32;
+    const phase_one_strategy: zhighs.lp.simplex.engine.PhaseOneStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "dual")) .dual else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "primal")) .primal else return error.InvalidArguments
+    else
+        .primal;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -85,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
         .max_iterations = max_iterations,
         .pivot_trace = trace,
         .collect_statistics = collect_statistics,
+        .phase_one_strategy = phase_one_strategy,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -191,13 +196,16 @@ pub fn main(init: std.process.Init) !void {
     const peak_rss_kb: u64 = @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
     const stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tphase1_iterations={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",
+        "stats\t{s}\tphase1_iterations={d}\tdual_phase1_iterations={d}\tdual_phase1_fallbacks={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_phase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",
         .{
             path,
             simplex_stats.phase_one_iterations,
+            simplex_stats.dual_phase_one_iterations,
+            simplex_stats.dual_phase_one_fallbacks,
             simplex_stats.dual_repair_iterations,
             simplex_stats.phase_two_iterations,
             simplex_stats.phase_one_ns,
+            simplex_stats.dual_phase_one_ns,
             simplex_stats.dual_repair_ns,
             simplex_stats.phase_two_ns,
             simplex_stats.cleanup_ns,

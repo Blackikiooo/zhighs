@@ -6,13 +6,15 @@ const factorization_module = @import("factorization.zig");
 const pricing_module = @import("pricing.zig");
 const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
+const dual_phase_one_module = @import("dual_phase_one.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
 const matrix = @import("matrix");
 
 pub const Algorithm = enum { primal_revised, dual_revised };
-pub const SolvePhase = enum { phase_one, dual_feasibility_repair, phase_two };
+pub const PhaseOneStrategy = enum { primal, dual, automatic };
+pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
 /// the callback invocation.
@@ -91,13 +93,19 @@ pub const SolveControl = struct {
     /// Collect phase and kernel timings. Disabled by default so production
     /// solves do not perform clock reads in simplex hot paths.
     collect_statistics: bool = false,
+    /// Cold-start Phase-I policy. `primal` remains the compatibility default
+    /// until corpus A/B validation allows deterministic automatic selection.
+    phase_one_strategy: PhaseOneStrategy = .primal,
 };
 
 pub const SimplexStats = struct {
     phase_one_iterations: usize = 0,
+    dual_phase_one_iterations: usize = 0,
+    dual_phase_one_fallbacks: usize = 0,
     dual_repair_iterations: usize = 0,
     phase_two_iterations: usize = 0,
     phase_one_ns: u64 = 0,
+    dual_phase_one_ns: u64 = 0,
     dual_repair_ns: u64 = 0,
     phase_two_ns: u64 = 0,
     cleanup_ns: u64 = 0,
@@ -160,6 +168,7 @@ pub const SimplexEngine = struct {
     algorithm: Algorithm = .dual_revised,
     basis: ?basis_module.BasisState = null,
     factorization: factorization_module.Factorization,
+    dual_phase_one: dual_phase_one_module.DualPhaseOneWorkspace,
     pricing: pricing_module.Pricing = .{},
     ratio_test: ratio_module.RatioTest = .{},
     numerical: numerical_module.NumericalState = .{},
@@ -192,16 +201,21 @@ pub const SimplexEngine = struct {
     cleanup_active: bool = false,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
-        return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
+        return .{
+            .allocator = a,
+            .factorization = factorization_module.Factorization.init(a),
+            .dual_phase_one = dual_phase_one_module.DualPhaseOneWorkspace.init(a),
+        };
     }
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
         self.factorization.deinit();
+        self.dual_phase_one.deinit();
     }
 
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.factorization.requestedBytes();
+        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes();
     }
     pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
         return .not_implemented;
@@ -277,10 +291,28 @@ pub const SimplexEngine = struct {
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
         const crash_feasibility = self.classifyFeasibility(problem);
         if (crash_feasibility.primal) return self.solvePrimal(problem, control);
-        // A neither-feasible logical crash needs a dedicated dual Phase I
-        // with cost perturbation. Until that policy is available, retain the
-        // artificial primal Phase I as the correctness fallback rather than
-        // reusing the warm-basis repair under assumptions it does not satisfy.
+        const phase_one_strategy = switch (control.phase_one_strategy) {
+            .primal => PhaseOneStrategy.primal,
+            .dual => PhaseOneStrategy.dual,
+            .automatic => self.chooseColdPhaseOneStrategy(problem),
+        };
+        if (phase_one_strategy == .dual) {
+            const numerical_before_dual_phase_one = self.numerical;
+            const pricing_before_dual_phase_one = self.pricing;
+            const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
+            if (dual_phase_one_status != .not_implemented) return dual_phase_one_status;
+            self.stats.dual_phase_one_fallbacks += 1;
+            // A failed explicit experiment falls back to the frozen logical
+            // crash and artificial Phase I, preserving the correctness path.
+            if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
+            self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+            self.numerical = numerical_before_dual_phase_one;
+            self.pricing = pricing_before_dual_phase_one;
+            self.dual_edge_weights_valid = true;
+            self.observeFactorizationStability();
+            if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+            self.iterations = 0;
+        }
         self.algorithm = .primal_revised;
         if (self.basis) |*basis| {
             self.phase1_needed = false;
@@ -1075,6 +1107,257 @@ pub const SimplexEngine = struct {
         return .iteration_limit;
     }
 
+    /// Dedicated dual Phase I. Special bounds encode the negated dual
+    /// infeasibility objective, while deterministic perturbed costs remove
+    /// ratio ties. The borrowed matrix is never copied and every iteration
+    /// uses engine-owned work arrays.
+    fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const phase_started = self.statisticsTimestamp();
+        const iteration_started = self.iterations;
+        defer self.recordPhaseElapsed(.dual_phase_one, phase_started);
+        defer self.recordPhaseIterations(.dual_phase_one, iteration_started);
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const original_count = problem.num_cols + problem.num_rows;
+        self.dual_phase_one.begin(basis, original_count) catch return .numerical_failure;
+        defer if (self.dual_phase_one.active)
+            self.dual_phase_one.restoreOriginalBounds(basis, original_count);
+
+        self.buildDualPhaseOneCosts(problem);
+        if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+        self.shiftDualPhaseOneCosts(problem);
+        if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+        self.dual_phase_one.installWorkingBounds(basis, original_count);
+        if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
+        self.algorithm = .dual_revised;
+        self.dual_edge_weights_valid = false;
+
+        while (self.iterations < control.max_iterations) : (self.iterations += 1) {
+            if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
+            if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+                return .not_implemented;
+            const leaving = self.chooseDualLeavingRow() orelse break;
+            if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .not_implemented;
+            var active_ratio_test = self.ratio_test;
+            if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
+            const entering = active_ratio_test.chooseDualEntering(
+                basis.tableau[0..original_count],
+                basis.reduced_cost[0..original_count],
+                basis.col_status[0..original_count],
+                basis.col_lower[0..original_count],
+                basis.col_upper[0..original_count],
+                basis.primal[0..original_count],
+                leaving.bound,
+                leaving.violation,
+                basis.dual_ratio[0..original_count],
+                basis.dual_direction[0..original_count],
+                basis.flip_columns[0..original_count],
+            );
+            if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .not_implemented;
+            const entering_col = entering.column orelse return .not_implemented;
+            const entering_index: usize = @intCast(entering_col);
+            if (self.computeDirection(problem, entering_index) != .optimal) return .not_implemented;
+            if (entering.direction < 0.0) {
+                for (basis.pivot_direction) |*value| value.* = -value.*;
+            }
+            const leaving_row: usize = @intCast(leaving.row);
+            const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
+            const pivot = basis.pivot_direction[leaving_row];
+            if (@abs(pivot) <= self.numerical.pivot_tolerance) return .not_implemented;
+            const step = (basis.basic_value[leaving_row] - target) / pivot;
+            if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .not_implemented;
+            if (self.performPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
+                return .not_implemented;
+            self.numerical.observeStep(@max(step, 0.0));
+            if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+        }
+        if (self.iterations >= control.max_iterations) return .iteration_limit;
+
+        // Remove perturbation and Phase-I bounds before making any claim
+        // about the original LP. A fresh factorization and fresh BTRAN price
+        // the restored problem independently of the update chain.
+        self.dual_phase_one.restoreOriginalBounds(basis, original_count);
+        if (self.refactorizeBasis(problem, .cleanup) != .optimal) return .not_implemented;
+        if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
+        if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
+        const feasibility = self.classifyFeasibility(problem);
+        if (feasibility.dual) return self.solveDual(problem, control);
+        if (feasibility.primal) return self.solvePrimal(problem, control);
+        return .not_implemented;
+    }
+
+    /// Deterministic cold-start selector. Automatic mode remains opt-in until
+    /// corpus timing establishes a benefit over the frozen primal baseline.
+    fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_module.ProblemView) PhaseOneStrategy {
+        const basis = if (self.basis) |*value| value else return .primal;
+        var primal_count: usize = 0;
+        var primal_sum: f64 = 0.0;
+        for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+            const amount = @max(@max(lower - value, value - upper), 0.0);
+            if (amount > self.numerical.primal_tolerance) {
+                primal_count += 1;
+                primal_sum += amount;
+            }
+        }
+        var dual_count: usize = 0;
+        var free_count: usize = 0;
+        var boxed_count: usize = 0;
+        for (0..problem.num_cols + problem.num_rows) |column| {
+            const lower = basis.col_lower[column];
+            const upper = basis.col_upper[column];
+            if (!std.math.isFinite(lower) and !std.math.isFinite(upper)) free_count += 1;
+            if (std.math.isFinite(lower) and std.math.isFinite(upper) and lower != upper) boxed_count += 1;
+            const reduced = basis.reduced_cost[column];
+            const infeasible = switch (basis.col_status[column]) {
+                .at_lower => reduced < -self.numerical.dual_tolerance,
+                .at_upper => reduced > self.numerical.dual_tolerance,
+                .free, .superbasic => @abs(reduced) > self.numerical.dual_tolerance,
+                else => false,
+            };
+            if (infeasible) dual_count += 1;
+        }
+        var coefficient_min = std.math.inf(f64);
+        var coefficient_max: f64 = 0.0;
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const magnitude = @abs(coefficient * basis.row_scale[row.toUsize()] * basis.column_scale[column]);
+                coefficient_min = @min(coefficient_min, magnitude);
+                coefficient_max = @max(coefficient_max, magnitude);
+            }
+        }
+        var cost_min = std.math.inf(f64);
+        var cost_max: f64 = 0.0;
+        for (problem.col_cost) |cost| {
+            const magnitude = @abs(cost);
+            if (magnitude == 0.0) continue;
+            cost_min = @min(cost_min, magnitude);
+            cost_max = @max(cost_max, magnitude);
+        }
+        const coefficient_range = if (coefficient_min < std.math.inf(f64)) coefficient_max / coefficient_min else 1.0;
+        const cost_range = if (cost_min < std.math.inf(f64)) cost_max / cost_min else 1.0;
+        // Dual Phase I is favoured for many violated logical rows, provided
+        // free columns do not dominate its amplified infeasibility objective.
+        // Wide sparse models amortize BTRAN row pricing particularly well;
+        // highly scaled models retain the more defensive primal path.
+        const width_score = if (problem.num_rows == 0) problem.num_cols else problem.num_cols / problem.num_rows;
+        const scale_risk = (if (coefficient_range > 1e12) problem.num_rows else 0) +
+            (if (cost_range > 1e12) problem.num_rows else 0);
+        const risk_score = free_count * 8 + boxed_count + scale_risk;
+        const benefit_score = primal_count * 4 + @min(dual_count, problem.num_cols) + width_score;
+        if (primal_count > 0 and primal_sum > self.numerical.primal_tolerance and
+            problem.num_cols >= problem.num_rows * 2 and benefit_score > risk_score)
+            return .dual;
+        return .primal;
+    }
+
+    fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
+        const basis = if (self.basis) |*value| value else return;
+        const workspace = &self.dual_phase_one;
+        const original_count = problem.num_cols + problem.num_rows;
+        const maximize = problem.objective_sense == .maximize;
+        var maximum: f64 = 0.0;
+        var boxed: usize = 0;
+        for (0..problem.num_cols) |column| {
+            const cost = (if (maximize) -problem.col_cost[column] else problem.col_cost[column]) *
+                self.objective_scale * basis.column_scale[column];
+            workspace.work_cost[column] = cost;
+            maximum = @max(maximum, @abs(cost));
+            if (std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
+                workspace.saved_lower[column] != workspace.saved_upper[column])
+                boxed += 1;
+        }
+        if (maximum > 100.0) maximum = @sqrt(@sqrt(maximum));
+        if (problem.num_cols != 0 and boxed * 100 < problem.num_cols) maximum = @min(maximum, 1.0);
+        const base = 5e-7 * @max(maximum, 1.0);
+        for (0..problem.num_cols) |column| {
+            const random = deterministicUnit(column, workspace.basis_epoch);
+            const lower = workspace.saved_lower[column];
+            const upper = workspace.saved_upper[column];
+            var perturbation: f64 = 0.0;
+            if (lower != upper) {
+                if (std.math.isFinite(lower) and !std.math.isFinite(upper)) {
+                    perturbation = random * base;
+                } else if (!std.math.isFinite(lower) and std.math.isFinite(upper)) {
+                    perturbation = -random * base;
+                } else if (std.math.isFinite(lower) and std.math.isFinite(upper)) {
+                    perturbation = if (workspace.work_cost[column] >= 0.0) random * base else -random * base;
+                }
+            }
+            workspace.perturbation[column] = perturbation;
+            workspace.work_cost[column] += perturbation;
+        }
+        for (problem.num_cols..original_count) |column| {
+            const perturbation = deterministicUnit(column, workspace.basis_epoch) * 1e-12;
+            workspace.perturbation[column] = perturbation;
+            workspace.work_cost[column] = perturbation;
+        }
+    }
+
+    /// Shift only currently infeasible nonbasic costs to the feasibility
+    /// boundary. Unlike the former zero-objective repair, feasible reduced
+    /// costs and all basic costs remain intact, so Phase I retains a meaningful
+    /// dual objective and deterministic ratio ordering.
+    fn shiftDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
+        const basis = if (self.basis) |*value| value else return;
+        const workspace = &self.dual_phase_one;
+        const original_count = problem.num_cols + problem.num_rows;
+        for (0..original_count) |column| {
+            if (basis.col_status[column] == .basic or basis.col_status[column] == .fixed) continue;
+            const reduced = basis.reduced_cost[column];
+            const shift = switch (basis.col_status[column]) {
+                .at_lower => if (reduced < self.numerical.dual_tolerance)
+                    self.numerical.dual_tolerance - reduced
+                else
+                    0.0,
+                .at_upper => if (reduced > -self.numerical.dual_tolerance)
+                    -self.numerical.dual_tolerance - reduced
+                else
+                    0.0,
+                .free, .superbasic => -reduced,
+                else => 0.0,
+            };
+            workspace.dual_infeasibility[column] = @abs(shift);
+            workspace.work_cost[column] += shift;
+            workspace.perturbation[column] += shift;
+        }
+    }
+
+    fn deterministicUnit(column: usize, epoch: u64) f64 {
+        var value = @as(u64, @intCast(column)) +% epoch *% 0x9e3779b97f4a7c15;
+        value = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
+        value = (value ^ (value >> 27)) *% 0x94d049bb133111eb;
+        value ^= value >> 31;
+        return (@as(f64, @floatFromInt(value >> 11)) + 1.0) * 0x1.0p-53;
+    }
+
+    fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const costs = self.dual_phase_one.work_cost;
+        const original_count = problem.num_cols + problem.num_rows;
+        if (costs.len < original_count) return .numerical_failure;
+        for (basis.basic_index, 0..) |column, row| basis.dual[row] = if (column < original_count) costs[column] else 0.0;
+        self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+        const pricing_started = self.statisticsTimestamp();
+        defer self.recordPricingElapsed(pricing_started);
+        for (0..problem.num_cols) |column| {
+            var reduced = costs[column];
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+            }
+            basis.reduced_cost[column] = reduced;
+        }
+        for (0..problem.num_rows) |row| basis.reduced_cost[problem.num_cols + row] = costs[problem.num_cols + row] - basis.dual[row];
+        @memset(basis.reduced_cost[original_count..], 0.0);
+        self.reduced_cost_update_count = 0;
+        return .optimal;
+    }
+
     fn chooseDualLeavingRow(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
         const pricing_started = self.statisticsTimestamp();
         defer self.recordRowPricingElapsed(pricing_started);
@@ -1541,6 +1824,7 @@ pub const SimplexEngine = struct {
         const elapsed = self.elapsedSince(started);
         const target = switch (phase) {
             .phase_one => &self.stats.phase_one_ns,
+            .dual_phase_one => &self.stats.dual_phase_one_ns,
             .dual_feasibility_repair => &self.stats.dual_repair_ns,
             .phase_two => &self.stats.phase_two_ns,
         };
@@ -1551,6 +1835,7 @@ pub const SimplexEngine = struct {
         const count = self.iterations -| started;
         const target = switch (phase) {
             .phase_one => &self.stats.phase_one_iterations,
+            .dual_phase_one => &self.stats.dual_phase_one_iterations,
             .dual_feasibility_repair => &self.stats.dual_repair_iterations,
             .phase_two => &self.stats.phase_two_iterations,
         };
