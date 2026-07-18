@@ -183,6 +183,23 @@ pub fn build(b: *std.Build) void {
     const build_sparse_basis_bench_step = b.step("build-bench-sparse-basis", "Build sparse basis benchmark for perf/disassembly");
     build_sparse_basis_bench_step.dependOn(&install_sparse_basis_bench.step);
 
+    const sparse_lu_bench = b.addExecutable(.{
+        .name = "sparse-lu-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/sparse_lu_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_sparse_lu_bench = b.addRunArtifact(sparse_lu_bench);
+    if (b.args) |args| run_sparse_lu_bench.addArgs(args);
+    const sparse_lu_bench_step = b.step("bench-sparse-lu", "Benchmark sparse INVERT and packed solves");
+    sparse_lu_bench_step.dependOn(&run_sparse_lu_bench.step);
+    const install_sparse_lu_bench = b.addInstallArtifact(sparse_lu_bench, .{});
+    const build_sparse_lu_bench_step = b.step("build-bench-sparse-lu", "Build sparse LU benchmark for perf/disassembly");
+    build_sparse_lu_bench_step.dependOn(&install_sparse_lu_bench.step);
+
     const install_matrix_bench = b.addInstallArtifact(matrix_bench, .{});
     const build_matrix_bench_step = b.step("build-bench-matrix", "Build the matrix benchmark without running it");
     build_matrix_bench_step.dependOn(&install_matrix_bench.step);

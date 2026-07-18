@@ -35,6 +35,8 @@ const transform_buffers = @import("transform_buffers.zig");
 const sparse_basis = @import("sparse_basis.zig");
 const target_policy = @import("target_policy.zig");
 const sparse_symbolic = @import("sparse_symbolic.zig");
+const sparse_kernel = @import("sparse_kernel.zig");
+const sparse_lu = @import("sparse_lu.zig");
 
 pub const DenseLU = dense_lu.DenseLU;
 pub const DenseLuError = dense_lu.DenseLuError;
@@ -46,6 +48,12 @@ pub const SymbolicError = sparse_symbolic.SymbolicError;
 pub const PivotKind = sparse_symbolic.PivotKind;
 pub const SymbolicPlanView = sparse_symbolic.SymbolicPlanView;
 pub const SymbolicWorkspace = sparse_symbolic.SymbolicWorkspace;
+pub const KernelError = sparse_kernel.KernelError;
+pub const SparsePivotChoice = sparse_kernel.PivotChoice;
+pub const SparsePivotView = sparse_kernel.PivotView;
+pub const MutableSparseKernel = sparse_kernel.MutableSparseKernel;
+pub const SparseLuError = sparse_lu.SparseLuError;
+pub const SparseLU = sparse_lu.SparseLU;
 
 pub const SparseVectorError = sparse_vector.SparseVectorError;
 pub const SparseVectorView = sparse_vector.SparseVectorView;

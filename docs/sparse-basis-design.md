@@ -86,12 +86,43 @@ then request the next choice.
 
 Remaining stages:
 
-1. Mutable sparse kernel matrix and packed L/U output streams.
-2. Numerical pivot application, fill insertion and threshold re-evaluation.
-3. Rank-deficiency repair and permutation publication.
-4. Dense/sparse FTRAN and BTRAN selected by measured RHS density.
-5. Dense-LU oracle comparison, iterative refinement and residual gates.
-6. Forrest--Tomlin updates after clean reinversion and solve benchmarks.
+Completed numerical MVP:
+
+- Reusable SoA entry pool with intrusive row/column lists and recycled slots.
+- O(1) row/column count-bucket relocation on fill insertion and removal.
+- Numerical Schur updates, configurable zero dropping, and threshold Markowitz
+  re-evaluation after every pivot.
+- Packed L columns and U rows with explicit `P B Q = L U` permutations.
+- Allocation-free packed FTRAN and BTRAN after factorization.
+
+Remaining stages:
+
+1. Rank-deficiency repair and stronger pivot-growth/condition monitoring.
+2. Hyper-sparse FTRAN/BTRAN selected by measured RHS density.
+3. Iterative refinement and integration behind the simplex factorization API.
+4. SuiteSparse/Netlib gates and complete HiGHS HFactor parity reports.
+5. Forrest--Tomlin updates after clean reinversion and solve benchmarks.
 
 The existing dense LU remains the small-basis fallback and correctness oracle
 until the sparse backend passes every numerical and end-to-end gate.
+
+## Initial numerical MVP measurement
+
+The cyclic tridiagonal benchmark uses identical CSC values, basic indices,
+warmup and retaining factor objects. zhighs uses ReleaseFast `-Dcpu=native`;
+HiGHS `de09bbad9f` uses Release with Clang `-O3 -march=native -flto`. Setup and
+initial allocations are outside both measured INVERT regions.
+
+The first MVP is correct but not yet faster than HiGHS:
+
+| dimension | zhighs INVERT | HiGHS HFactor | ratio |
+|---:|---:|---:|---:|
+| 128 | 27.4 us | 18.1 us | 1.51x |
+| 256 | 55.9 us | 35.3 us | 1.58x |
+| 512 | 125.0 us | 69.6 us | 1.80x |
+| 1024 | 241.5 us | 139.6 us | 1.73x |
+
+No performance-leading claim is made. On the 512 case, packed zhighs FTRAN
+plus BTRAN is about 10 us, but the current comparison runner measures only the
+fair common INVERT boundary. `perf` on the 1024 case identifies general
+Markowitz scanning and intrusive entry removal as the next tuning targets.

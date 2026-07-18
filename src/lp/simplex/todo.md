@@ -62,7 +62,11 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
 - [x] Reusable row-entry symbolic workspace, count buckets, fill-free singleton
   elimination, and deterministic threshold Markowitz selection for the first
   kernel pivot. Later pivots correctly wait for numerical fill updates.
-- Mutable kernel matrix, numerical fill updates, and sparse LU factor output.
+- [x] Mutable SoA kernel matrix, recycled fill slots, row/column count-bucket
+  updates, repeated numerical threshold Markowitz, packed L/U, and
+  allocation-free FTRAN/BTRAN MVP.
+- Integrate sparse LU behind the factorization backend with dense fallback,
+  rank-deficiency repair, iterative refinement, and production statistics.
 - Forrest--Tomlin updates and adaptive reinversion.
 - Hyper-sparse FTRAN/BTRAN.
 - Retain dense LU only as a small-basis fallback and correctness oracle.
