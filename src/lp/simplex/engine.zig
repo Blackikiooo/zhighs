@@ -497,7 +497,9 @@ pub const SimplexEngine = struct {
         basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
         basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
         for (basis.basic_index, basis.basic_value) |global_col, value| basis.primal[global_col] = value;
-        if (!update_succeeded or self.factorization.needsRefactor(self.numerical.max_update_count) or self.numerical.needsRefactor())
+        const reinversion_reason = self.factorization.reinversionReason(self.numerical.max_update_count);
+        if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
+        if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor())
             return self.refactorizeBasis(problem);
         return .optimal;
     }

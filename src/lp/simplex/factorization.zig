@@ -11,12 +11,15 @@ pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singula
 /// Selected numeric kernel. Sparse LU is intentionally a separate future
 /// backend rather than being embedded in simplex orchestration.
 pub const BackendKind = enum { dense_lu };
+pub const ReinversionReason = enum { update_limit, update_growth };
 pub const FactorizationStats = struct {
     factorizations: usize = 0,
     ftran_calls: usize = 0,
     btran_calls: usize = 0,
     eta_updates: usize = 0,
     maximum_update_growth: f64 = 1.0,
+    update_limit_reinversions: usize = 0,
+    update_growth_reinversions: usize = 0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -147,14 +150,26 @@ pub const Factorization = struct {
     /// updates retain the caller's hard limit; increasingly oblique entering
     /// columns request earlier reinversion before residual drift accumulates.
     pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
-        if (self.maximum_update_growth >= 1e10) return @min(hard_limit, 8);
-        if (self.maximum_update_growth >= 1e7) return @min(hard_limit, 16);
-        if (self.maximum_update_growth >= 1e4) return @min(hard_limit, 32);
-        if (self.maximum_update_growth >= 1e2) return @min(hard_limit, 64);
-        return hard_limit;
+        const storage_limit = @min(hard_limit, self.eta_capacity);
+        if (self.maximum_update_growth >= 1e10) return @min(storage_limit, 8);
+        if (self.maximum_update_growth >= 1e7) return @min(storage_limit, 16);
+        if (self.maximum_update_growth >= 1e4) return @min(storage_limit, 32);
+        if (self.maximum_update_growth >= 1e2) return @min(storage_limit, 64);
+        return storage_limit;
+    }
+    pub fn reinversionReason(self: Factorization, hard_limit: usize) ?ReinversionReason {
+        const recommended = self.recommendedUpdateLimit(hard_limit);
+        if (self.update_count < recommended) return null;
+        return if (recommended < @min(hard_limit, self.eta_capacity)) .update_growth else .update_limit;
     }
     pub fn needsRefactor(self: Factorization, limit: usize) bool {
-        return self.update_count >= self.recommendedUpdateLimit(limit);
+        return self.reinversionReason(limit) != null;
+    }
+    pub fn recordReinversion(self: *Factorization, reason: ReinversionReason) void {
+        switch (reason) {
+            .update_limit => self.stats.update_limit_reinversions += 1,
+            .update_growth => self.stats.update_growth_reinversions += 1,
+        }
     }
 
     fn prepareEtaStorage(self: *Factorization, dimension: usize) FactorizationError!void {
@@ -237,8 +252,20 @@ test "relative update growth tightens the reinversion interval" {
     try std.testing.expect(!factorization.needsRefactor(100));
     factorization.update_count = 32;
     try std.testing.expect(factorization.needsRefactor(100));
+    try std.testing.expectEqual(ReinversionReason.update_growth, factorization.reinversionReason(100).?);
+    factorization.recordReinversion(.update_growth);
+    try std.testing.expectEqual(@as(usize, 1), factorization.stats.update_growth_reinversions);
     try factorization.refactorizeInPlace();
     try std.testing.expectEqual(@as(f64, 1.0), factorization.maximum_update_growth);
+}
+
+test "reinversion is requested before retained update storage is exhausted" {
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeIdentity(1);
+    factorization.update_count = factorization.eta_capacity;
+    try std.testing.expectEqual(factorization.eta_capacity, factorization.recommendedUpdateLimit(100));
+    try std.testing.expectEqual(ReinversionReason.update_limit, factorization.reinversionReason(100).?);
 }
 
 test "factorization update rejects non-finite direction entries" {
