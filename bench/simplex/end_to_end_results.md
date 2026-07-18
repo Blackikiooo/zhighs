@@ -133,3 +133,37 @@ Retained simplex requested bytes are 629741 (`gas11`), 394588 (`brandy`),
 145752 (`sc105`), and 183485 (`scsd1`). The runner also reports process
 `ru_maxrss`; unlike requested bytes this includes runtime and parser memory and
 is platform-specific.
+
+## scsd1 rebuild fallback repair
+
+Stage 6.2 closed the rebuild accounting invariant: every rebuild is assigned
+exactly one engine reason, while dense-Eta and sparse-FT update errors are
+classified separately without formatting or allocation in the pivot path.
+The original `scsd1` run had 347 rebuilds, but only three policy reinversions.
+The new counters showed that 343 rebuilds came from one small-pivot warning
+leaving `fresh_factorization_mode` enabled for the remainder of the solve;
+there were no rejected sparse-FT updates.
+
+The permanent mode was replaced by a 32-pivot basis-epoch recovery window.
+Each pivot in the window uses and validates a fresh factorization; FT updates
+resume only after the window expires, and a later small-pivot or residual
+warning starts a new epoch. A sweep of 8, 16, 32, 64, 128, 256, and 512 fresh
+pivots found non-monotonic numerical paths; 32 was the fastest setting that
+passed the complete corpus. No feasibility, residual, or pivot tolerance was
+relaxed.
+
+| scsd1 metric | frozen baseline | recovery epoch | change |
+|---|---:|---:|---:|
+| total solve median | 13.00 ms | 8.77 ms | -32.5% |
+| rebuild median | 4.71 ms | 1.61 ms | -65.8% |
+| pricing median | 4.69 ms | 3.76 ms | -20.0% |
+| rebuild calls | 347 | 105 | -69.7% |
+| simplex iterations | 559 | 587 | +5.0% |
+| retained requested bytes | 183485 | 187133 | +2.0% |
+
+The new structural trace shares the first 355 pivot events with the frozen
+trace and deliberately diverges at simplex iteration 364 after FT updates are
+re-enabled. It contains 538 events instead of 536 and is deterministic across
+repeated runs. The updated trace, objective, residuals, and all 40 corpus
+models pass the acceptance gate. Against the frozen HiGHS median, the `scsd1`
+gap falls from about 2.01x to 1.36x.

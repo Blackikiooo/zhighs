@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     const refinement_steps = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 2;
     const sparse_threshold = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
     const collect_statistics = if (args.next()) |text| std.mem.eql(u8, text, "stats") else false;
+    const fresh_recovery_pivots = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 32;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -72,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
     engine.numerical.max_update_count = max_updates;
     engine.numerical.degenerate_pivot_limit = degenerate_limit;
     engine.numerical.max_refinement_steps = refinement_steps;
+    engine.numerical.fresh_factorization_recovery_pivots = fresh_recovery_pivots;
     engine.factorization.sparse_dimension_threshold = sparse_threshold;
     const trace: []zhighs.lp.simplex.engine.PivotTraceEvent = if (trace_enabled)
         try allocator.alloc(zhighs.lp.simplex.engine.PivotTraceEvent, @min(max_iterations, 100_000))
@@ -250,4 +252,37 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(kernel_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, kernel_stats_line);
+
+    const first_update_failure = if (simplex_stats.first_update_failure_kind) |kind| @tagName(kind) else "none";
+    const rebuild_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\trebuild_phase_one_setup={d}\trebuild_solve_residual={d}\trebuild_small_pivot={d}\trebuild_update_limit={d}\trebuild_update_growth={d}\trebuild_direction_refinement={d}\trebuild_fresh_mode={d}\trebuild_update_rejected={d}\trebuild_cleanup={d}\trebuild_edge_weight_reset={d}\trebuild_numerical_policy={d}\tupdate_dimension_failures={d}\tupdate_unsupported_failures={d}\tupdate_singular_failures={d}\tupdate_numerical_failures={d}\tupdate_out_of_memory_failures={d}\tdense_update_failures={d}\tsparse_update_failures={d}\tfirst_update_failure={s}\tfirst_update_failure_iteration={d}\tfirst_update_failure_entering={d}\tfirst_update_failure_leaving_row={d}\n",
+        .{
+            path,
+            simplex_stats.rebuild_phase_one_setup,
+            simplex_stats.rebuild_solve_residual,
+            simplex_stats.rebuild_small_pivot,
+            simplex_stats.rebuild_update_limit,
+            simplex_stats.rebuild_update_growth,
+            simplex_stats.rebuild_direction_refinement,
+            simplex_stats.rebuild_fresh_mode,
+            simplex_stats.rebuild_update_rejected,
+            simplex_stats.rebuild_cleanup,
+            simplex_stats.rebuild_edge_weight_reset,
+            simplex_stats.rebuild_numerical_policy,
+            factor_stats.update_dimension_failures,
+            factor_stats.update_unsupported_failures,
+            factor_stats.update_singular_failures,
+            factor_stats.update_numerical_failures,
+            factor_stats.update_out_of_memory_failures,
+            factor_stats.dense_update_failures,
+            factor_stats.sparse_update_failures,
+            first_update_failure,
+            simplex_stats.first_update_failure_iteration,
+            simplex_stats.first_update_failure_entering,
+            simplex_stats.first_update_failure_leaving_row,
+        },
+    );
+    defer allocator.free(rebuild_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, rebuild_stats_line);
 }

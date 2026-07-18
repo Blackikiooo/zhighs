@@ -117,6 +117,42 @@ pub const SimplexStats = struct {
     hyper_pricing_dispatches: usize = 0,
     row_pricing_dispatches: usize = 0,
     column_pricing_dispatches: usize = 0,
+    rebuild_phase_one_setup: usize = 0,
+    rebuild_solve_residual: usize = 0,
+    rebuild_small_pivot: usize = 0,
+    rebuild_update_limit: usize = 0,
+    rebuild_update_growth: usize = 0,
+    rebuild_direction_refinement: usize = 0,
+    rebuild_fresh_mode: usize = 0,
+    rebuild_update_rejected: usize = 0,
+    rebuild_cleanup: usize = 0,
+    rebuild_edge_weight_reset: usize = 0,
+    rebuild_numerical_policy: usize = 0,
+    first_update_failure_kind: ?factorization_module.UpdateFailureKind = null,
+    first_update_failure_iteration: usize = 0,
+    first_update_failure_entering: u32 = 0,
+    first_update_failure_leaving_row: u32 = 0,
+
+    pub fn classifiedRebuilds(self: SimplexStats) usize {
+        return self.rebuild_phase_one_setup + self.rebuild_solve_residual + self.rebuild_small_pivot +
+            self.rebuild_update_limit + self.rebuild_update_growth + self.rebuild_direction_refinement +
+            self.rebuild_fresh_mode + self.rebuild_update_rejected + self.rebuild_cleanup +
+            self.rebuild_edge_weight_reset + self.rebuild_numerical_policy;
+    }
+};
+
+const RebuildReason = enum {
+    phase_one_setup,
+    solve_residual,
+    small_pivot,
+    update_limit,
+    update_growth,
+    direction_refinement,
+    fresh_mode,
+    update_rejected,
+    cleanup,
+    edge_weight_reset,
+    numerical_policy,
 };
 
 pub const SimplexEngine = struct {
@@ -147,12 +183,13 @@ pub const SimplexEngine = struct {
     active_pivot_trace: []PivotTraceEvent = &.{},
     current_phase: SolvePhase = .phase_two,
     direction_requires_reinversion: bool = false,
-    fresh_factorization_mode: bool = false,
+    fresh_factorization_pivots_remaining: usize = 0,
     reduced_cost_update_count: usize = 0,
     reduced_cost_refresh_period: usize = 8,
     failure_site: FailureSite = .none,
     stats: SimplexStats = .{},
     statistics_io: ?std.Io = null,
+    cleanup_active: bool = false,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{ .allocator = a, .factorization = factorization_module.Factorization.init(a) };
@@ -179,7 +216,7 @@ pub const SimplexEngine = struct {
         self.resetStatistics(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
-        self.fresh_factorization_mode = false;
+        self.fresh_factorization_pivots_remaining = 0;
         self.reduced_cost_update_count = 0;
         self.failure_site = .none;
         self.unbounded_ray_valid = false;
@@ -282,7 +319,7 @@ pub const SimplexEngine = struct {
                 }
             }
         }
-        if (self.phase1_needed and self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+        if (self.phase1_needed and self.refactorizeBasis(problem, .phase_one_setup) != .optimal) return .numerical_failure;
         self.numerical.markRefactorized();
         self.iterations = 0;
         if (self.phase1_needed) {
@@ -327,6 +364,7 @@ pub const SimplexEngine = struct {
         self.resetStatistics(control);
         self.work_used = 0;
         self.rank_repair_count = 0;
+        self.fresh_factorization_pivots_remaining = 0;
         self.numerical.resetAntiCycling();
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
@@ -615,7 +653,7 @@ pub const SimplexEngine = struct {
         };
         if (!self.directionResidualAcceptable(problem, entering_col)) {
             self.factorization.recordReinversion(.solve_residual);
-            if (self.refactorizeBasis(problem) != .optimal) {
+            if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
                 self.failure_site = .direction_refactor;
                 return .numerical_failure;
             }
@@ -755,14 +793,32 @@ pub const SimplexEngine = struct {
             self.updateDevexWeights(entering_col, leaving_row, pivot);
         }
         self.dual_row_index = null;
+        var forced_rebuild_reason: ?RebuildReason = null;
         const update_succeeded = blk: {
-            if (self.direction_requires_reinversion or self.fresh_factorization_mode) break :blk false;
+            if (self.direction_requires_reinversion) {
+                forced_rebuild_reason = .direction_refinement;
+                break :blk false;
+            }
+            if (self.fresh_factorization_pivots_remaining != 0) {
+                forced_rebuild_reason = .fresh_mode;
+                break :blk false;
+            }
             self.factorization.update(.{
                 .leaving_row = @intCast(leaving_row),
                 .entering_col = @intCast(entering_col),
                 .direction = basis.pivot_direction,
                 .column_scale = entering_direction,
-            }) catch break :blk false;
+            }) catch |err| {
+                const failure_kind = self.factorization.recordUpdateFailure(err);
+                if (self.stats.first_update_failure_kind == null) {
+                    self.stats.first_update_failure_kind = failure_kind;
+                    self.stats.first_update_failure_iteration = self.iterations;
+                    self.stats.first_update_failure_entering = @intCast(entering_col);
+                    self.stats.first_update_failure_leaving_row = @intCast(leaving_row);
+                }
+                forced_rebuild_reason = if (self.cleanup_active) .cleanup else .update_rejected;
+                break :blk false;
+            };
             break :blk true;
         };
         self.direction_requires_reinversion = false;
@@ -794,7 +850,15 @@ pub const SimplexEngine = struct {
         const reinversion_reason = self.factorization.reinversionReason(self.numerical.max_update_count);
         if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
         if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor()) {
-            const status = self.refactorizeBasis(problem);
+            const rebuild_reason = forced_rebuild_reason orelse if (reinversion_reason) |reason| switch (reason) {
+                .update_limit => RebuildReason.update_limit,
+                .update_growth => RebuildReason.update_growth,
+                .solve_residual => RebuildReason.solve_residual,
+                .small_pivot => RebuildReason.small_pivot,
+            } else RebuildReason.numerical_policy;
+            const status = self.refactorizeBasis(problem, rebuild_reason);
+            if (status == .optimal and rebuild_reason == .fresh_mode)
+                self.fresh_factorization_pivots_remaining -|= 1;
             if (status != .optimal and self.failure_site == .none) self.failure_site = .pivot_update;
             return status;
         }
@@ -843,7 +907,7 @@ pub const SimplexEngine = struct {
                 // transpose solve can otherwise publish a false optimum.
                 if (self.factorization.update_count != 0) {
                     self.factorization.recordReinversion(.solve_residual);
-                    if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                    if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
                     if (self.recomputeReducedCosts(problem) != .optimal) {
                         self.failure_site = .reduced_cost;
                         return .numerical_failure;
@@ -870,9 +934,9 @@ pub const SimplexEngine = struct {
                 // onto a different numerical path. Keep reinverting for the
                 // remainder of this solve until column equilibration provides
                 // a stronger scale model.
-                self.fresh_factorization_mode = true;
+                self.fresh_factorization_pivots_remaining = self.numerical.fresh_factorization_recovery_pivots;
                 self.factorization.recordReinversion(.small_pivot);
-                if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                if (self.refactorizeBasis(problem, .small_pivot) != .optimal) return .numerical_failure;
                 if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
                 if (entering.direction < 0) {
                     for (basis.pivot_direction) |*value| value.* = -value.*;
@@ -900,7 +964,7 @@ pub const SimplexEngine = struct {
                 }
                 self.numerical.observeStep(leaving.step);
             }
-            if ((self.fresh_factorization_mode or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
+            if ((self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
                 self.recomputeReducedCosts(problem) != .optimal)
             {
                 self.failure_site = .reduced_cost;
@@ -1318,7 +1382,7 @@ pub const SimplexEngine = struct {
             ) orelse {
                 if (self.factorization.update_count != 0) {
                     self.factorization.recordReinversion(.solve_residual);
-                    if (self.refactorizeBasis(problem) != .optimal) return .numerical_failure;
+                    if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
                     if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
                     continue;
                 }
@@ -1346,7 +1410,7 @@ pub const SimplexEngine = struct {
                     return .numerical_failure;
                 self.numerical.observeStep(leaving.step);
             }
-            if ((self.fresh_factorization_mode or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
+            if ((self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
                 self.recomputePhaseOneReducedCosts(problem) != .optimal)
                 return .numerical_failure;
         }
@@ -1540,6 +1604,8 @@ pub const SimplexEngine = struct {
             const elapsed = self.elapsedSince(cleanup_started);
             self.stats.cleanup_ns = std.math.add(u64, self.stats.cleanup_ns, elapsed) catch std.math.maxInt(u64);
         }
+        self.cleanup_active = true;
+        defer self.cleanup_active = false;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         const artificial_begin = problem.num_cols + problem.num_rows;
 
@@ -1676,11 +1742,24 @@ pub const SimplexEngine = struct {
         return .optimal;
     }
 
-    fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+    fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView, reason: RebuildReason) SolveStatus {
         const rebuild_started = self.statisticsTimestamp();
         defer {
             self.stats.rebuild_calls += 1;
             self.stats.rebuild_ns = std.math.add(u64, self.stats.rebuild_ns, self.elapsedSince(rebuild_started)) catch std.math.maxInt(u64);
+        }
+        switch (reason) {
+            .phase_one_setup => self.stats.rebuild_phase_one_setup += 1,
+            .solve_residual => self.stats.rebuild_solve_residual += 1,
+            .small_pivot => self.stats.rebuild_small_pivot += 1,
+            .update_limit => self.stats.rebuild_update_limit += 1,
+            .update_growth => self.stats.rebuild_update_growth += 1,
+            .direction_refinement => self.stats.rebuild_direction_refinement += 1,
+            .fresh_mode => self.stats.rebuild_fresh_mode += 1,
+            .update_rejected => self.stats.rebuild_update_rejected += 1,
+            .cleanup => self.stats.rebuild_cleanup += 1,
+            .edge_weight_reset => self.stats.rebuild_edge_weight_reset += 1,
+            .numerical_policy => self.stats.rebuild_numerical_policy += 1,
         }
         self.factorizeCurrentBasis(problem) catch {
             self.failure_site = .pivot_factorization;
@@ -2148,6 +2227,7 @@ test "engine solves a standard-form LP with primal revised simplex" {
     try std.testing.expect(engine.stats.pricing_calls > 0);
     try std.testing.expectEqual(@as(u64, 0), engine.stats.pricing_ns);
     try std.testing.expectEqual(engine.factorization.stats.ftran_calls, engine.factorization.stats.dense_ftran_dispatches);
+    try std.testing.expectEqual(engine.stats.rebuild_calls, engine.stats.classifiedRebuilds());
     try std.testing.expect(engine.requestedBytes() > 0);
 }
 

@@ -14,6 +14,9 @@ pub const NumericalState = struct {
     perturbation: f64 = 0.0,
     max_update_count: usize = 100,
     max_refinement_steps: usize = 2,
+    /// Number of fresh-basis pivots required after a forward-accuracy warning
+    /// before Forrest--Tomlin updates are tried again.
+    fresh_factorization_recovery_pivots: usize = 32,
     residual_tolerance: f64 = 1e-10,
     update_count: usize = 0,
     numerical_warning: bool = false,

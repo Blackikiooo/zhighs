@@ -12,6 +12,7 @@ pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singula
 /// are cleared whenever a new base factorization is installed.
 pub const BackendKind = enum { dense_lu, sparse_lu };
 pub const ReinversionReason = enum { update_limit, update_growth, solve_residual, small_pivot };
+pub const UpdateFailureKind = enum { dimension_mismatch, unsupported, singular, numerical, out_of_memory };
 pub const FactorizationStats = struct {
     factorizations: usize = 0,
     ftran_calls: usize = 0,
@@ -36,6 +37,13 @@ pub const FactorizationStats = struct {
     dense_btran_dispatches: usize = 0,
     hyper_ftran_dispatches: usize = 0,
     hyper_btran_dispatches: usize = 0,
+    update_dimension_failures: usize = 0,
+    update_unsupported_failures: usize = 0,
+    update_singular_failures: usize = 0,
+    update_numerical_failures: usize = 0,
+    update_out_of_memory_failures: usize = 0,
+    dense_update_failures: usize = 0,
+    sparse_update_failures: usize = 0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -361,6 +369,35 @@ pub const Factorization = struct {
             .solve_residual => self.stats.solve_residual_reinversions += 1,
             .small_pivot => self.stats.small_pivot_reinversions += 1,
         }
+    }
+
+    pub fn recordUpdateFailure(self: *Factorization, err: FactorizationError) UpdateFailureKind {
+        switch (self.backend_kind) {
+            .dense_lu => self.stats.dense_update_failures += 1,
+            .sparse_lu => self.stats.sparse_update_failures += 1,
+        }
+        return switch (err) {
+            error.DimensionMismatch => blk: {
+                self.stats.update_dimension_failures += 1;
+                break :blk .dimension_mismatch;
+            },
+            error.NotImplemented => blk: {
+                self.stats.update_unsupported_failures += 1;
+                break :blk .unsupported;
+            },
+            error.Singular => blk: {
+                self.stats.update_singular_failures += 1;
+                break :blk .singular;
+            },
+            error.NumericalFailure => blk: {
+                self.stats.update_numerical_failures += 1;
+                break :blk .numerical;
+            },
+            error.OutOfMemory => blk: {
+                self.stats.update_out_of_memory_failures += 1;
+                break :blk .out_of_memory;
+            },
+        };
     }
 
     pub fn pivotConditionEstimate(self: *const Factorization) f64 {
