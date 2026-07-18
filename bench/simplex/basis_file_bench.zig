@@ -48,6 +48,10 @@ pub fn main(init: std.process.Init) !void {
     var lu = zhighs.matrix.SparseLU.init(allocator);
     defer lu.deinit();
     try lu.factorize(basis);
+    const trace_rows = try allocator.dupe(u32, lu.pivot_rows[0..n]);
+    defer allocator.free(trace_rows);
+    const trace_columns = try allocator.dupe(u32, lu.pivot_columns[0..n]);
+    defer allocator.free(trace_columns);
     const samples = try allocator.alloc(u64, repeats);
     defer allocator.free(samples);
     for (samples) |*sample| {
@@ -56,6 +60,14 @@ pub fn main(init: std.process.Init) !void {
         sample.* = @intCast(nowNs() - began);
     }
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
+    const replay_samples = try allocator.alloc(u64, repeats);
+    defer allocator.free(replay_samples);
+    for (replay_samples) |*sample| {
+        const began = nowNs();
+        try lu.factorizeWithTraceAssumeValid(basis, .{ .rows = trace_rows, .columns = trace_columns });
+        sample.* = @intCast(nowNs() - began);
+    }
+    std.mem.sort(u64, replay_samples, {}, std.sort.asc(u64));
     const rhs = try allocator.alloc(f64, n);
     defer allocator.free(rhs);
     for (rhs, 0..) |*value, index| value.* = 1.0 + @as(f64, @floatFromInt(index % 13)) * 0.125;
@@ -69,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
             if (rows[entry].toUsize() == row) { product += values[entry] * rhs[column]; };
         residual = @max(residual, @abs(product - original[row]));
     }
-    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{e},{d}\n", .{
-        path, n, nnz, lu.factorNonzeros(), lu.inserted_fill, samples[repeats / 2], residual, lu.requestedBytes(),
+    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{d},{e},{d}\n", .{
+        path, n, nnz, lu.factorNonzeros(), lu.inserted_fill, samples[repeats / 2], replay_samples[repeats / 2], residual, lu.requestedBytes(),
     });
 }

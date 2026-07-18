@@ -240,6 +240,16 @@ pub const MutableSparseKernel = struct {
         return best;
     }
 
+    /// Resolve a recorded pivot against the current numerical kernel. Used by
+    /// fixed-trace benchmarks to separate ordering cost from update cost.
+    pub fn chooseRecordedPivot(self: *const MutableSparseKernel, row: u32, column: u32) ?PivotChoice {
+        if (row >= self.dimension or column >= self.dimension or !self.row_active[row] or !self.column_active[column]) return null;
+        const entry = self.find(row, column) orelse return null;
+        const value = self.entry_value[entry];
+        if (value == 0.0 or !std.math.isFinite(value)) return null;
+        return .{ .row = row, .column = column, .value = value, .merit = 0 };
+    }
+
     fn singletonMember(self: *const MutableSparseKernel, first: u32, next: []const u32) ?u32 {
         if (first == none) return null;
         if (self.dimension >= 128) return first;

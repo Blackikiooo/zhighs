@@ -11,6 +11,8 @@ const sparse_kernel = @import("sparse_kernel.zig");
 
 pub const SparseLuError = sparse_kernel.KernelError || error{ DimensionMismatch, NumericalFailure };
 
+pub const PivotTrace = struct { rows: []const u32, columns: []const u32 };
+
 pub const SparseLU = struct {
     allocator: std.mem.Allocator,
     kernel: sparse_kernel.MutableSparseKernel,
@@ -65,16 +67,24 @@ pub const SparseLU = struct {
     }
 
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
-        return self.factorizeImpl(basis, true);
+        return self.factorizeImpl(basis, true, null);
     }
 
     /// Zero-copy trusted reinversion entry for canonical engine-owned basis
     /// CSC. Workspace and factor capacities are retained across calls.
     pub fn factorizeAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
-        return self.factorizeImpl(basis, false);
+        return self.factorizeImpl(basis, false, null);
     }
 
-    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool) SparseLuError!void {
+    /// Replay a previously recorded row/column pivot sequence. This is mainly
+    /// a diagnostic control for comparing numerical kernels under identical
+    /// ordering; normal reinversion should use threshold Markowitz selection.
+    pub fn factorizeWithTraceAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
+        if (trace.rows.len != basis.dimension or trace.columns.len != basis.dimension) return error.DimensionMismatch;
+        return self.factorizeImpl(basis, false, trace);
+    }
+
+    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace) SparseLuError!void {
         const n = basis.dimension;
         try self.ensureDimension(n);
         try self.ensureFactorCapacity(@max(basis.nnz(), n));
@@ -87,7 +97,10 @@ pub const SparseLU = struct {
         self.u_starts[0] = 0;
 
         for (0..n) |pivot_index| {
-            const choice = self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular;
+            const choice = if (trace) |recorded|
+                self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
+            else
+                self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular;
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);
             try self.ensureFactorCapacity(@max(self.l_nonzeros + pivot.l_rows.len, self.u_nonzeros + pivot.u_columns.len));
             self.pivot_rows[pivot_index] = pivot.pivot_row;
@@ -359,6 +372,13 @@ test "packed sparse LU solves FTRAN and BTRAN with fill" {
     defer lu.deinit();
     try lu.factorize(basis);
     try std.testing.expect(lu.inserted_fill >= 1);
+    var trace_rows: [3]u32 = undefined;
+    var trace_columns: [3]u32 = undefined;
+    @memcpy(&trace_rows, lu.pivot_rows[0..3]);
+    @memcpy(&trace_columns, lu.pivot_columns[0..3]);
+    const factor_nonzeros = lu.factorNonzeros();
+    try lu.factorizeWithTraceAssumeValid(basis, .{ .rows = &trace_rows, .columns = &trace_columns });
+    try std.testing.expectEqual(factor_nonzeros, lu.factorNonzeros());
 
     var rhs = [_]f64{ 4, 7, 10 };
     const original_rhs = rhs;
