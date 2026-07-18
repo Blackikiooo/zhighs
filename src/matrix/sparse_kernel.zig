@@ -257,6 +257,22 @@ pub const MutableSparseKernel = struct {
         return best;
     }
 
+    /// Return a unit/column-singleton or row-singleton pivot without entering
+    /// either general Markowitz backend.
+    pub fn chooseSingleton(self: *const MutableSparseKernel) ?PivotChoice {
+        if (self.column_bucket_first[1] != none) {
+            const column = self.column_bucket_first[1];
+            const entry = self.column_head[column];
+            if (entry != none) return .{ .row = self.entry_row[entry], .column = column, .value = self.entry_value[entry], .merit = 0 };
+        }
+        if (self.row_bucket_first[1] != none) {
+            const row = self.row_bucket_first[1];
+            const entry = self.row_head[row];
+            if (entry != none) return .{ .row = row, .column = self.entry_column[entry], .value = self.entry_value[entry], .merit = 0 };
+        }
+        return null;
+    }
+
     /// HiGHS-style bounded kernel search: visit low-count column and row
     /// buckets alternately, accept an opposing side with a smaller degree,
     /// and stop after eight bucket members once a stable candidate exists.

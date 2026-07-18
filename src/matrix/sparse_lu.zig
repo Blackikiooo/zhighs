@@ -27,6 +27,9 @@ pub const SparseLU = struct {
     hyper_views_ready: bool = false,
     ordering_strategy: OrderingStrategy = .automatic,
     selected_ordering: OrderingStrategy = .dod_markowitz,
+    peeled_pivots: usize = 0,
+    kernel_dimension: usize = 0,
+    kernel_nonzeros: usize = 0,
 
     pivot_rows: []u32 = &.{},
     pivot_columns: []u32 = &.{},
@@ -96,14 +99,31 @@ pub const SparseLU = struct {
         self.l_nonzeros = 0;
         self.u_nonzeros = 0;
         self.inserted_fill = 0;
+        self.peeled_pivots = 0;
+        self.kernel_dimension = n;
+        self.kernel_nonzeros = basis.nnz();
         self.selected_ordering = self.selectOrdering(basis);
         self.l_starts[0] = 0;
         self.u_starts[0] = 0;
 
+        var peeling = trace == null;
         for (0..n) |pivot_index| {
             const choice = if (trace) |recorded|
                 self.kernel.chooseRecordedPivot(recorded.rows[pivot_index], recorded.columns[pivot_index]) orelse return error.Singular
-            else
+            else if (peeling) peel: {
+                if (self.kernel.chooseSingleton()) |singleton| {
+                    self.peeled_pivots += 1;
+                    break :peel singleton;
+                }
+                peeling = false;
+                self.kernel_dimension = n - pivot_index;
+                self.kernel_nonzeros = self.kernel.activeEntries();
+                break :peel switch (self.selected_ordering) {
+                    .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                    .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
+                    .automatic => unreachable,
+                };
+            } else
                 switch (self.selected_ordering) {
                     // The backend split is deliberately established before
                     // the HiGHS-style search lands, so dispatch/API changes
@@ -128,6 +148,10 @@ pub const SparseLU = struct {
             self.u_nonzeros += pivot.u_columns.len;
             self.u_starts[pivot_index + 1] = self.u_nonzeros;
             self.inserted_fill += pivot.inserted_fill;
+        }
+        if (peeling) {
+            self.kernel_dimension = 0;
+            self.kernel_nonzeros = 0;
         }
         self.hyper_views_ready = false;
     }

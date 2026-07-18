@@ -90,7 +90,8 @@ pub fn main(init: std.process.Init) !void {
             if (rows[entry].toUsize() == row) { product += values[entry] * rhs[column]; };
         residual = @max(residual, @abs(product - original[row]));
     }
-    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{d},{e},{d}\n", .{
-        path, n, nnz, lu.factorNonzeros(), lu.inserted_fill, samples[repeats / 2], replay_samples[repeats / 2], residual, lu.requestedBytes(),
+    std.debug.print("zhighs-basis,{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{e},{d}\n", .{
+        path, n, nnz, lu.peeled_pivots, lu.kernel_dimension, lu.kernel_nonzeros,
+        lu.factorNonzeros(), lu.inserted_fill, samples[repeats / 2], replay_samples[repeats / 2], residual, lu.requestedBytes(),
     });
 }
