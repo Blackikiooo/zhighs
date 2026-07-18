@@ -37,6 +37,7 @@ pub const MutableSparseKernel = struct {
     free_head: u32 = none,
     buckets_ready: bool = false,
     cache_column_maxima: bool = false,
+    cache_local_candidates: bool = false,
     /// Maximum non-singleton columns inspected after an eligible pivot is
     /// known. Low-count buckets remain first, preserving the Markowitz bias.
     markowitz_candidate_limit: usize = 32,
@@ -47,6 +48,10 @@ pub const MutableSparseKernel = struct {
     column_count: []u32 = &.{},
     column_maximum: []f64 = &.{},
     column_maximum_dirty: []bool = &.{},
+    local_candidate_dirty: []bool = &.{},
+    local_candidate_valid: []bool = &.{},
+    local_candidate_row: []u32 = &.{},
+    local_candidate_value: []f64 = &.{},
     row_active: []bool = &.{},
     column_active: []bool = &.{},
     row_bucket_first: []u32 = &.{},
@@ -78,6 +83,7 @@ pub const MutableSparseKernel = struct {
     pub fn deinit(self: *MutableSparseKernel) void {
         inline for (.{
             "row_head",         "column_head",         "row_count",       "column_count",        "column_maximum",      "column_maximum_dirty",
+            "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value",
             "row_active",       "column_active",
             "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous",
             "entry_row",        "entry_column",        "entry_value",     "row_next",            "row_previous",       "column_next",
@@ -97,11 +103,11 @@ pub const MutableSparseKernel = struct {
             "row_bucket_first", "column_bucket_first", "row_bucket_next", "row_bucket_previous",
             "column_bucket_next", "column_bucket_previous", "entry_row", "entry_column",
             "row_next", "row_previous", "column_next", "column_previous", "free_next",
-            "scratch_rows", "scratch_columns", "scratch_lookup",
+            "scratch_rows", "scratch_columns", "scratch_lookup", "local_candidate_row",
         }) |name| total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "row_active", "column_active", "column_maximum_dirty" }) |name|
+        inline for (.{ "row_active", "column_active", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
-        inline for (.{ "entry_value", "scratch_l", "scratch_u", "column_maximum" }) |name|
+        inline for (.{ "entry_value", "scratch_l", "scratch_u", "column_maximum", "local_candidate_value" }) |name|
             total += @sizeOf(std.meta.Elem(@TypeOf(@field(self, name)))) * @field(self, name).len;
         return total;
     }
@@ -127,12 +133,15 @@ pub const MutableSparseKernel = struct {
         self.free_head = none;
         self.buckets_ready = false;
         self.cache_column_maxima = n != 0 and basis.nnz() / n > 4;
+        self.cache_local_candidates = self.cache_column_maxima;
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..n], none);
         @memset(self.row_count[0..n], 0);
         @memset(self.column_count[0..n], 0);
         @memset(self.column_maximum[0..n], 0.0);
         @memset(self.column_maximum_dirty[0..n], false);
+        @memset(self.local_candidate_dirty[0..n], true);
+        @memset(self.local_candidate_valid[0..n], false);
         @memset(self.row_active[0..n], true);
         @memset(self.column_active[0..n], true);
         @memset(self.row_bucket_first[0 .. n + 1], none);
@@ -219,18 +228,26 @@ pub const MutableSparseKernel = struct {
             while (bucket_column != none) : (bucket_column = self.column_bucket_next[bucket_column]) {
                 const column: usize = bucket_column;
                 columns_examined += 1;
-                const maximum = self.columnMaximum(column);
-                if (maximum == 0.0 or !std.math.isFinite(maximum)) continue;
-                const minimum = threshold * maximum;
-                var entry = self.column_head[column];
-                while (entry != none) : (entry = self.column_next[entry]) {
-                    const value = self.entry_value[entry];
-                    if (@abs(value) < minimum) continue;
-                    const row = self.entry_row[entry];
-                    const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[column] - 1);
-                    if (best == null or merit < best.?.merit or
-                        (merit == best.?.merit and (column < best.?.column or (column == best.?.column and row < best.?.row))))
-                        best = .{ .row = row, .column = @intCast(column), .value = value, .merit = merit };
+                if (!self.cache_local_candidates) {
+                    const maximum = self.columnMaximum(column);
+                    if (maximum == 0.0 or !std.math.isFinite(maximum)) continue;
+                    const minimum = threshold * maximum;
+                    var entry = self.column_head[column];
+                    while (entry != none) : (entry = self.column_next[entry]) {
+                        const value = self.entry_value[entry];
+                        if (@abs(value) < minimum) continue;
+                        const row = self.entry_row[entry];
+                        const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[column] - 1);
+                        if (best == null or merit < best.?.merit or
+                            (merit == best.?.merit and (column < best.?.column or (column == best.?.column and row < best.?.row))))
+                            best = .{ .row = row, .column = @intCast(column), .value = value, .merit = merit };
+                        const lower_bound = @as(u64, @intCast(count - 1)) * @as(u64, @intCast(minimum_row_count - 1));
+                        if (best.?.merit == lower_bound) return best;
+                    }
+                } else if (self.localColumnCandidate(column, threshold)) |candidate| {
+                    if (best == null or candidate.merit < best.?.merit or
+                        (candidate.merit == best.?.merit and (column < best.?.column or (column == best.?.column and candidate.row < best.?.row))))
+                        best = candidate;
                     const lower_bound = @as(u64, @intCast(count - 1)) * @as(u64, @intCast(minimum_row_count - 1));
                     if (best.?.merit == lower_bound) return best;
                 }
@@ -238,6 +255,36 @@ pub const MutableSparseKernel = struct {
             }
         }
         return best;
+    }
+
+    fn localColumnCandidate(self: *MutableSparseKernel, column: usize, threshold: f64) ?PivotChoice {
+        if (self.local_candidate_dirty[column]) {
+            self.local_candidate_dirty[column] = false;
+            self.local_candidate_valid[column] = false;
+            const maximum = self.columnMaximum(column);
+            if (maximum == 0.0 or !std.math.isFinite(maximum)) return null;
+            const minimum = threshold * maximum;
+            var best_merit: u64 = std.math.maxInt(u64);
+            var entry = self.column_head[column];
+            while (entry != none) : (entry = self.column_next[entry]) {
+                const value = self.entry_value[entry];
+                if (@abs(value) < minimum) continue;
+                const row = self.entry_row[entry];
+                const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[column] - 1);
+                if (!self.local_candidate_valid[column] or merit < best_merit or
+                    (merit == best_merit and row < self.local_candidate_row[column]))
+                {
+                    self.local_candidate_valid[column] = true;
+                    self.local_candidate_row[column] = row;
+                    self.local_candidate_value[column] = value;
+                    best_merit = merit;
+                }
+            }
+        }
+        if (!self.local_candidate_valid[column]) return null;
+        const row = self.local_candidate_row[column];
+        const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[column] - 1);
+        return .{ .row = row, .column = @intCast(column), .value = self.local_candidate_value[column], .merit = merit };
     }
 
     /// Resolve a recorded pivot against the current numerical kernel. Used by
@@ -324,6 +371,7 @@ pub const MutableSparseKernel = struct {
                     if (@abs(updated) <= zero_tolerance) self.remove(existing) else {
                         self.entry_value[existing] = updated;
                         if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
+                        if (self.cache_local_candidates) self.local_candidate_dirty[column] = true;
                     }
                 } else if (@abs(delta) > zero_tolerance) {
                     _ = try self.insert(row, column, -delta);
@@ -417,6 +465,7 @@ pub const MutableSparseKernel = struct {
         self.entry_column[entry] = column;
         self.entry_value[entry] = value;
         if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
+        if (self.cache_local_candidates) self.local_candidate_dirty[column] = true;
         self.row_previous[entry] = none;
         self.row_next[entry] = self.row_head[row];
         if (self.row_head[row] != none) self.row_previous[self.row_head[row]] = entry;
@@ -442,6 +491,7 @@ pub const MutableSparseKernel = struct {
         const row = self.entry_row[entry];
         const column = self.entry_column[entry];
         if (self.cache_column_maxima) self.column_maximum_dirty[column] = true;
+        if (self.cache_local_candidates) self.local_candidate_dirty[column] = true;
         const row_prev = self.row_previous[entry];
         const row_after = self.row_next[entry];
         if (row_prev == none) self.row_head[row] = row_after else self.row_next[row_prev] = row_after;
@@ -471,7 +521,7 @@ pub const MutableSparseKernel = struct {
     fn ensureDimension(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
-        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u", "scratch_lookup" }) |field_name|
+        inline for (.{ "row_head", "column_head", "row_count", "column_count", "column_maximum", "column_maximum_dirty", "local_candidate_dirty", "local_candidate_valid", "local_candidate_row", "local_candidate_value", "row_active", "column_active", "row_bucket_next", "row_bucket_previous", "column_bucket_next", "column_bucket_previous", "scratch_rows", "scratch_columns", "scratch_l", "scratch_u", "scratch_lookup" }) |field_name|
             @field(self, field_name) = self.allocator.realloc(@field(self, field_name), capacity) catch return error.OutOfMemory;
         self.row_bucket_first = self.allocator.realloc(self.row_bucket_first, capacity + 1) catch return error.OutOfMemory;
         self.column_bucket_first = self.allocator.realloc(self.column_bucket_first, capacity + 1) catch return error.OutOfMemory;
