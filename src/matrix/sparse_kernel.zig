@@ -154,6 +154,7 @@ pub const MutableSparseKernel = struct {
         if (validate and (basis.starts.len != n + 1 or basis.rows.len != basis.values.len)) return error.InvalidBasis;
         try self.ensureDimension(n);
         try self.ensureEntries(@max(basis.nnz(), n));
+        if (self.dimension != n) self.markowitz_search_limit = 8;
         self.dimension = n;
         self.entry_high_water = 0;
         self.free_head = none;

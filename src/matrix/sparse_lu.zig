@@ -192,7 +192,8 @@ pub const SparseLU = struct {
                 if (repairing) self.trace_repaired_pivots += 1;
             }
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);
-            if (trace == null and self.selected_ordering == .highs_kernel)
+            if (trace == null and self.selected_ordering == .highs_kernel and
+                self.kernel_dimension >= self.kernel.adaptive_markowitz_minimum_dimension)
                 self.kernel.observeMarkowitzPivot();
             try self.ensureFactorCapacity(@max(self.l_nonzeros + pivot.l_rows.len, self.u_nonzeros + pivot.u_columns.len));
             self.pivot_rows[pivot_index] = pivot.pivot_row;
