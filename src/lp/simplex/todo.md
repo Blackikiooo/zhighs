@@ -77,7 +77,9 @@ non-artificial replacement. Presolve row removal will eliminate those rows.
   O(n) clearing required only on u32 generation wraparound.
 - Integrate sparse LU behind the factorization backend with dense fallback,
   rank-deficiency repair, iterative refinement, and production statistics.
-- Forrest--Tomlin updates and adaptive reinversion.
+- Forrest--Tomlin updates. Relative update-growth monitoring and adaptive
+  reinversion limits are implemented for the current product-form backend;
+  the sparse FT backend must reuse this policy rather than relabeling Eta.
 - [x] Reachability-based hyper-sparse FTRAN/BTRAN with dense-output adaptive
   dispatch and an explicit sparse-output API.
 - Retain dense LU only as a small-basis fallback and correctness oracle.

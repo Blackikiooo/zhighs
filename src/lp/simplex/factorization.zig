@@ -16,6 +16,7 @@ pub const FactorizationStats = struct {
     ftran_calls: usize = 0,
     btran_calls: usize = 0,
     eta_updates: usize = 0,
+    maximum_update_growth: f64 = 1.0,
 };
 pub const PivotUpdateView = struct {
     leaving_row: u32,
@@ -37,6 +38,9 @@ pub const Factorization = struct {
     dimension: usize = 0,
     backend_kind: BackendKind = .dense_lu,
     stats: FactorizationStats = .{},
+    /// Largest max(|d|)/|d[p]| observed since reinversion. This inexpensive
+    /// signal estimates how strongly an update can amplify solve error.
+    maximum_update_growth: f64 = 1.0,
 
     pub fn init(allocator: std.mem.Allocator) Factorization {
         return .{ .allocator = allocator, .dense_lu = matrix.DenseLU.init(allocator) };
@@ -87,6 +91,7 @@ pub const Factorization = struct {
         };
         self.update_count = 0;
         self.eta_count = 0;
+        self.maximum_update_growth = 1.0;
         self.stats.factorizations += 1;
     }
     pub fn solve(self: *Factorization, rhs: []f64) FactorizationError!void {
@@ -117,18 +122,39 @@ pub const Factorization = struct {
         if (update_view.direction.len != self.dimension or update_view.leaving_row >= self.dimension) return error.DimensionMismatch;
         if (self.eta_count >= self.eta_capacity) return error.NotImplemented;
         const pivot_row: usize = @intCast(update_view.leaving_row);
-        if (!std.math.isFinite(update_view.column_scale) or
-            @abs(update_view.direction[pivot_row] * update_view.column_scale) <= self.dense_lu.pivot_tolerance)
+        if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
+        const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
+        var maximum_magnitude: f64 = 0.0;
+        for (update_view.direction) |value| {
+            if (!std.math.isFinite(value)) return error.NumericalFailure;
+            maximum_magnitude = @max(maximum_magnitude, @abs(value * update_view.column_scale));
+        }
+        if (pivot_magnitude <= self.dense_lu.pivot_tolerance)
             return error.Singular;
+        const update_growth = maximum_magnitude / pivot_magnitude;
+        if (!std.math.isFinite(update_growth)) return error.NumericalFailure;
         const eta = self.eta_values[self.eta_count * self.dimension ..][0..self.dimension];
         for (eta, update_view.direction) |*value, direction| value.* = direction * update_view.column_scale;
         self.eta_rows[self.eta_count] = update_view.leaving_row;
         self.eta_count += 1;
         self.update_count += 1;
         self.stats.eta_updates += 1;
+        self.maximum_update_growth = @max(self.maximum_update_growth, update_growth);
+        self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
+    }
+
+    /// Adapt the update-chain length to observed numerical growth. Benign
+    /// updates retain the caller's hard limit; increasingly oblique entering
+    /// columns request earlier reinversion before residual drift accumulates.
+    pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
+        if (self.maximum_update_growth >= 1e10) return @min(hard_limit, 8);
+        if (self.maximum_update_growth >= 1e7) return @min(hard_limit, 16);
+        if (self.maximum_update_growth >= 1e4) return @min(hard_limit, 32);
+        if (self.maximum_update_growth >= 1e2) return @min(hard_limit, 64);
+        return hard_limit;
     }
     pub fn needsRefactor(self: Factorization, limit: usize) bool {
-        return self.update_count >= limit;
+        return self.update_count >= self.recommendedUpdateLimit(limit);
     }
 
     fn prepareEtaStorage(self: *Factorization, dimension: usize) FactorizationError!void {
@@ -137,6 +163,7 @@ pub const Factorization = struct {
         self.dimension = dimension;
         self.eta_count = 0;
         self.update_count = 0;
+        self.maximum_update_growth = 1.0;
     }
 
     fn applyEtaInverse(self: *const Factorization, update_index: usize, vector: []f64) void {
@@ -193,4 +220,34 @@ test "eta update restores the actual column from a signed movement direction" {
     try factorization.solve(&rhs);
     try std.testing.expectApproxEqAbs(@as(f64, 2), rhs[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 5), rhs[1], 1e-12);
+}
+
+test "relative update growth tightens the reinversion interval" {
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeIdentity(2);
+    try factorization.update(.{
+        .leaving_row = 0,
+        .entering_col = 0,
+        .direction = &[_]f64{ 1e-5, 1 },
+    });
+    try std.testing.expectApproxEqRel(@as(f64, 1e5), factorization.maximum_update_growth, 1e-12);
+    try std.testing.expectEqual(@as(usize, 32), factorization.recommendedUpdateLimit(100));
+    factorization.update_count = 31;
+    try std.testing.expect(!factorization.needsRefactor(100));
+    factorization.update_count = 32;
+    try std.testing.expect(factorization.needsRefactor(100));
+    try factorization.refactorizeInPlace();
+    try std.testing.expectEqual(@as(f64, 1.0), factorization.maximum_update_growth);
+}
+
+test "factorization update rejects non-finite direction entries" {
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeIdentity(2);
+    try std.testing.expectError(error.NumericalFailure, factorization.update(.{
+        .leaving_row = 0,
+        .entering_col = 0,
+        .direction = &[_]f64{ 1, std.math.nan(f64) },
+    }));
 }
