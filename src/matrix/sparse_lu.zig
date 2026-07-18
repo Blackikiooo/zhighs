@@ -108,7 +108,8 @@ pub const SparseLU = struct {
                     // The backend split is deliberately established before
                     // the HiGHS-style search lands, so dispatch/API changes
                     // can be verified independently from ordering changes.
-                    .dod_markowitz, .highs_kernel => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                    .dod_markowitz => self.kernel.choosePivot(self.pivot_threshold) orelse return error.Singular,
+                    .highs_kernel => self.kernel.choosePivotHighs(self.pivot_threshold) orelse return error.Singular,
                     .automatic => unreachable,
                 };
             const pivot = try self.kernel.applyPivot(choice, self.zero_tolerance);

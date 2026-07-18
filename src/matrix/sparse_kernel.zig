@@ -257,6 +257,63 @@ pub const MutableSparseKernel = struct {
         return best;
     }
 
+    /// HiGHS-style bounded kernel search: visit low-count column and row
+    /// buckets alternately, accept an opposing side with a smaller degree,
+    /// and stop after eight bucket members once a stable candidate exists.
+    pub fn choosePivotHighs(self: *MutableSparseKernel, threshold: f64) ?PivotChoice {
+        if (!std.math.isFinite(threshold) or threshold <= 0.0 or threshold > 1.0) return null;
+        if (self.column_bucket_first[1] != none) {
+            const column = self.column_bucket_first[1];
+            const entry = self.column_head[column];
+            if (entry != none) return .{ .row = self.entry_row[entry], .column = column, .value = self.entry_value[entry], .merit = 0 };
+        }
+        if (self.row_bucket_first[1] != none) {
+            const row = self.row_bucket_first[1];
+            const entry = self.row_head[row];
+            if (entry != none) return .{ .row = row, .column = self.entry_column[entry], .value = self.entry_value[entry], .merit = 0 };
+        }
+        var best: ?PivotChoice = null;
+        var searched: usize = 0;
+        const search_limit: usize = 8;
+        var count: usize = 2;
+        while (count <= self.dimension) : (count += 1) {
+            var column = self.column_bucket_first[count];
+            while (column != none) : (column = self.column_bucket_next[column]) {
+                searched += 1;
+                const maximum = self.columnMaximum(column);
+                const minimum = threshold * maximum;
+                var entry = self.column_head[column];
+                while (entry != none) : (entry = self.column_next[entry]) {
+                    const value = self.entry_value[entry];
+                    if (@abs(value) < minimum) continue;
+                    const row = self.entry_row[entry];
+                    const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[column] - 1);
+                    if (best == null or merit < best.?.merit)
+                        best = .{ .row = row, .column = column, .value = value, .merit = merit };
+                    if (self.row_count[row] < self.column_count[column]) return best;
+                }
+                if (searched >= search_limit and best != null) return best;
+            }
+            var row = self.row_bucket_first[count];
+            while (row != none) : (row = self.row_bucket_next[row]) {
+                searched += 1;
+                var entry = self.row_head[row];
+                while (entry != none) : (entry = self.row_next[entry]) {
+                    const candidate_column = self.entry_column[entry];
+                    const merit = @as(u64, self.row_count[row] - 1) * @as(u64, self.column_count[candidate_column] - 1);
+                    if (best != null and merit >= best.?.merit) continue;
+                    const maximum = self.columnMaximum(candidate_column);
+                    const value = self.entry_value[entry];
+                    if (@abs(value) < threshold * maximum) continue;
+                    best = .{ .row = row, .column = candidate_column, .value = value, .merit = merit };
+                    if (self.column_count[candidate_column] <= self.row_count[row]) return best;
+                }
+                if (searched >= search_limit and best != null) return best;
+            }
+        }
+        return best;
+    }
+
     fn localColumnCandidate(self: *MutableSparseKernel, column: usize, threshold: f64) ?PivotChoice {
         if (self.local_candidate_dirty[column]) {
             self.local_candidate_dirty[column] = false;

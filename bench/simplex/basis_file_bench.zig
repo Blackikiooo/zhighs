@@ -47,6 +47,15 @@ pub fn main(init: std.process.Init) !void {
     const basis = zhighs.matrix.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
     var lu = zhighs.matrix.SparseLU.init(allocator);
     defer lu.deinit();
+    const ordering = init.environ_map.get("ZHIGHS_ORDERING") orelse "auto";
+    lu.ordering_strategy = if (std.mem.eql(u8, ordering, "auto"))
+        .automatic
+    else if (std.mem.eql(u8, ordering, "dod"))
+        .dod_markowitz
+    else if (std.mem.eql(u8, ordering, "highs"))
+        .highs_kernel
+    else
+        return error.InvalidOrdering;
     try lu.factorize(basis);
     const trace_rows = try allocator.dupe(u32, lu.pivot_rows[0..n]);
     defer allocator.free(trace_rows);
