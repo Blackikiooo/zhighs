@@ -63,13 +63,26 @@ pub const SparseForrestTomlin = struct {
     }
 
     pub fn deinit(self: *SparseForrestTomlin) void {
-        inline for (.{
-            "pivot_ids",         "pivot_values",      "pivot_lookup",      "column_head",
-            "row_head",          "entry_row",         "entry_column",      "entry_value",
-            "column_next",       "column_previous",   "row_next",          "row_previous",
-            "free_next",         "correction_starts", "correction_pivots", "correction_indices",
-            "correction_values", "work",              "captured_aq",       "captured_ep",
-        }) |name| self.allocator.free(@field(self, name));
+        self.allocator.free(self.pivot_ids);
+        self.allocator.free(self.pivot_values);
+        self.allocator.free(self.pivot_lookup);
+        self.allocator.free(self.column_head);
+        self.allocator.free(self.row_head);
+        self.allocator.free(self.entry_row);
+        self.allocator.free(self.entry_column);
+        self.allocator.free(self.entry_value);
+        self.allocator.free(self.column_next);
+        self.allocator.free(self.column_previous);
+        self.allocator.free(self.row_next);
+        self.allocator.free(self.row_previous);
+        self.allocator.free(self.free_next);
+        self.allocator.free(self.correction_starts);
+        self.allocator.free(self.correction_pivots);
+        self.allocator.free(self.correction_indices);
+        self.allocator.free(self.correction_values);
+        self.allocator.free(self.work);
+        self.allocator.free(self.captured_aq);
+        self.allocator.free(self.captured_ep);
         self.* = .{ .allocator = self.allocator };
     }
 

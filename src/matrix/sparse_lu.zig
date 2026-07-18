@@ -80,13 +80,27 @@ pub const SparseLU = struct {
         self.kernel.deinit();
         self.symbolic.deinit();
         self.ft.deinit();
-        inline for (.{
-            "pivot_rows",      "pivot_columns", "row_position",    "column_position", "pivot_values",
-            "l_starts",        "u_starts",      "l_rows",          "l_values",        "u_columns",
-            "u_values",        "work",          "active",          "hyper_output",    "marked",
-            "u_column_starts", "u_column_rows", "u_column_values", "l_row_starts",    "l_row_columns",
-            "l_row_values",
-        }) |field_name| self.allocator.free(@field(self, field_name));
+        self.allocator.free(self.pivot_rows);
+        self.allocator.free(self.pivot_columns);
+        self.allocator.free(self.row_position);
+        self.allocator.free(self.column_position);
+        self.allocator.free(self.pivot_values);
+        self.allocator.free(self.l_starts);
+        self.allocator.free(self.u_starts);
+        self.allocator.free(self.l_rows);
+        self.allocator.free(self.l_values);
+        self.allocator.free(self.u_columns);
+        self.allocator.free(self.u_values);
+        self.allocator.free(self.work);
+        self.allocator.free(self.active);
+        self.allocator.free(self.hyper_output);
+        self.allocator.free(self.marked);
+        self.allocator.free(self.u_column_starts);
+        self.allocator.free(self.u_column_rows);
+        self.allocator.free(self.u_column_values);
+        self.allocator.free(self.l_row_starts);
+        self.allocator.free(self.l_row_columns);
+        self.allocator.free(self.l_row_values);
         self.* = .{
             .allocator = self.allocator,
             .kernel = sparse_kernel.MutableSparseKernel.init(self.allocator),

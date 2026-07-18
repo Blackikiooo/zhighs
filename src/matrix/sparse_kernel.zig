@@ -101,14 +101,38 @@ pub const MutableSparseKernel = struct {
     }
 
     pub fn deinit(self: *MutableSparseKernel) void {
-        inline for (.{
-            "row_head",              "column_head",               "row_count",           "column_count",          "column_maximum",     "column_maximum_dirty",
-            "local_candidate_dirty", "local_candidate_valid",     "local_candidate_row", "local_candidate_value", "row_active",         "column_active",
-            "row_bucket_first",      "column_bucket_first",       "row_bucket_next",     "row_bucket_previous",   "column_bucket_next", "column_bucket_previous",
-            "entry_row",             "entry_column",              "entry_value",         "row_next",              "row_previous",       "column_next",
-            "column_previous",       "free_next",                 "scratch_rows",        "scratch_columns",       "scratch_l",          "scratch_u",
-            "scratch_lookup",        "scratch_lookup_generation",
-        }) |field_name| self.allocator.free(@field(self, field_name));
+        self.allocator.free(self.row_head);
+        self.allocator.free(self.column_head);
+        self.allocator.free(self.row_count);
+        self.allocator.free(self.column_count);
+        self.allocator.free(self.column_maximum);
+        self.allocator.free(self.column_maximum_dirty);
+        self.allocator.free(self.local_candidate_dirty);
+        self.allocator.free(self.local_candidate_valid);
+        self.allocator.free(self.local_candidate_row);
+        self.allocator.free(self.local_candidate_value);
+        self.allocator.free(self.row_active);
+        self.allocator.free(self.column_active);
+        self.allocator.free(self.row_bucket_first);
+        self.allocator.free(self.column_bucket_first);
+        self.allocator.free(self.row_bucket_next);
+        self.allocator.free(self.row_bucket_previous);
+        self.allocator.free(self.column_bucket_next);
+        self.allocator.free(self.column_bucket_previous);
+        self.allocator.free(self.entry_row);
+        self.allocator.free(self.entry_column);
+        self.allocator.free(self.entry_value);
+        self.allocator.free(self.row_next);
+        self.allocator.free(self.row_previous);
+        self.allocator.free(self.column_next);
+        self.allocator.free(self.column_previous);
+        self.allocator.free(self.free_next);
+        self.allocator.free(self.scratch_rows);
+        self.allocator.free(self.scratch_columns);
+        self.allocator.free(self.scratch_l);
+        self.allocator.free(self.scratch_u);
+        self.allocator.free(self.scratch_lookup);
+        self.allocator.free(self.scratch_lookup_generation);
         self.* = .{ .allocator = self.allocator };
     }
 
