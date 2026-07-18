@@ -272,6 +272,19 @@ pub const MutableSparseKernel = struct {
             }
         }
 
+        // A pivot is an atomic mutation from the perspective of Markowitz
+        // selection. Detach every affected dimension once, update counts
+        // without exposing intermediate states, then publish final buckets.
+        // This replaces potentially many remove/insert bucket pairs per row
+        // and column with one pair for the complete Schur update.
+        self.rowBucketRemove(choice.row, self.row_count[choice.row]);
+        for (self.scratch_rows[0..l_count]) |row|
+            self.rowBucketRemove(row, self.row_count[row]);
+        self.columnBucketRemove(choice.column, self.column_count[choice.column]);
+        for (self.scratch_columns[0..u_count]) |column|
+            self.columnBucketRemove(column, self.column_count[column]);
+        self.buckets_ready = false;
+
         var inserted_fill: usize = 0;
         for (self.scratch_rows[0..l_count], self.scratch_l[0..l_count]) |row, multiplier| {
             for (self.scratch_columns[0..u_count], self.scratch_u[0..u_count]) |column, upper| {
@@ -295,8 +308,6 @@ pub const MutableSparseKernel = struct {
         // own counts are dead after this pivot, so moving them through every
         // intermediate count bucket is wasted work. Neighboring active rows
         // and columns still relocate exactly once per removed entry.
-        self.rowBucketRemove(choice.row, self.row_count[choice.row]);
-        self.columnBucketRemove(choice.column, self.column_count[choice.column]);
         self.row_active[choice.row] = false;
         self.column_active[choice.column] = false;
         entry = self.row_head[choice.row];
@@ -313,6 +324,11 @@ pub const MutableSparseKernel = struct {
             removed_entries += 1;
             entry = next;
         }
+        for (self.scratch_rows[0..l_count]) |row|
+            self.rowBucketInsert(row, self.row_count[row]);
+        for (self.scratch_columns[0..u_count]) |column|
+            self.columnBucketInsert(column, self.column_count[column]);
+        self.buckets_ready = true;
         return .{
             .pivot_row = choice.row,
             .pivot_column = choice.column,
