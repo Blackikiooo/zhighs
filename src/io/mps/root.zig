@@ -76,7 +76,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
         if (raw.len > options.max_line_bytes) return error.ResourceLimitExceeded;
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '*') continue;
-        var fields = try tokenize(allocator, line);
+        var fields = try tokenizeRecord(allocator, raw, line, section);
         defer fields.deinit(allocator);
         if (fields.items.len == 0) continue;
         const first = fields.items[0];
@@ -215,6 +215,63 @@ fn tokenize(allocator: std.mem.Allocator, line: []const u8) types.IoError!std.Ar
     var iterator = std.mem.tokenizeAny(u8, line, " \t\r");
     while (iterator.next()) |field| fields.append(allocator, field) catch return error.OutOfMemory;
     return fields;
+}
+
+/// Traditional fixed MPS permits blanks inside its eight-character row and
+/// column names. Whitespace tokenization silently splits those names, so use
+/// the standard field columns whenever the physical record has fixed-format
+/// separator blanks. Free-format records fall back to the existing scanner.
+fn tokenizeRecord(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+    trimmed: []const u8,
+    section: Section,
+) types.IoError!std.ArrayListUnmanaged([]const u8) {
+    if (!isFixedRecord(raw, section)) return tokenize(allocator, trimmed);
+    var fields: std.ArrayListUnmanaged([]const u8) = .empty;
+    errdefer fields.deinit(allocator);
+    switch (section) {
+        .rows => {
+            try appendFixedField(allocator, &fields, raw, 1, 3);
+            try appendFixedField(allocator, &fields, raw, 4, 12);
+        },
+        .columns, .rhs, .ranges => {
+            try appendFixedField(allocator, &fields, raw, 4, 12);
+            try appendFixedField(allocator, &fields, raw, 14, 22);
+            try appendFixedField(allocator, &fields, raw, 24, 36);
+            try appendFixedField(allocator, &fields, raw, 39, 47);
+            try appendFixedField(allocator, &fields, raw, 49, 61);
+        },
+        .bounds => {
+            try appendFixedField(allocator, &fields, raw, 1, 3);
+            try appendFixedField(allocator, &fields, raw, 4, 12);
+            try appendFixedField(allocator, &fields, raw, 14, 22);
+            try appendFixedField(allocator, &fields, raw, 24, 36);
+        },
+        else => return tokenize(allocator, trimmed),
+    }
+    return fields;
+}
+
+fn isFixedRecord(raw: []const u8, section: Section) bool {
+    if (raw.len < 5 or raw[0] != ' ' or raw[3] != ' ') return false;
+    return switch (section) {
+        .rows => raw.len <= 12 or raw[12] == ' ',
+        .columns, .rhs, .ranges, .bounds => raw.len >= 14 and raw[12] == ' ' and raw[13] == ' ',
+        else => false,
+    };
+}
+
+fn appendFixedField(
+    allocator: std.mem.Allocator,
+    fields: *std.ArrayListUnmanaged([]const u8),
+    raw: []const u8,
+    begin: usize,
+    end: usize,
+) types.IoError!void {
+    if (begin >= raw.len) return;
+    const field = std.mem.trim(u8, raw[begin..@min(end, raw.len)], " \t\r");
+    if (field.len != 0) fields.append(allocator, field) catch return error.OutOfMemory;
 }
 
 fn sectionKeyword(field: []const u8) ?Section {
@@ -382,12 +439,27 @@ test "MPS parser enforces record and semantic limits and cancellation" {
 }
 
 fn parseBound(parser: *Parser, fields: []const []const u8) types.IoError!void {
-    if (fields.len < 3 or fields.len > 4) return error.InvalidSyntax;
-    if (parser.bounds_set == null) parser.bounds_set = fields[1];
-    if (!std.mem.eql(u8, parser.bounds_set.?, fields[1])) return;
-    const column = try parser.column(fields[2]);
     const code = fields[0];
-    const value = if (fields.len == 4) try parseFinite(fields[3]) else 0.0;
+    const requires_value = std.ascii.eqlIgnoreCase(code, "LO") or std.ascii.eqlIgnoreCase(code, "UP") or
+        std.ascii.eqlIgnoreCase(code, "FX") or std.ascii.eqlIgnoreCase(code, "LI") or
+        std.ascii.eqlIgnoreCase(code, "UI") or std.ascii.eqlIgnoreCase(code, "SC") or
+        std.ascii.eqlIgnoreCase(code, "SI");
+    const omitted_set = (requires_value and fields.len == 3) or (!requires_value and fields.len == 2);
+    if ((requires_value and fields.len != 3 and fields.len != 4) or
+        (!requires_value and fields.len < 2 or fields.len > 4))
+        return error.InvalidSyntax;
+    const set_name: []const u8 = if (omitted_set) "" else fields[1];
+    const column_name = fields[if (omitted_set) 1 else 2];
+    const value_index: ?usize = if (requires_value)
+        (if (omitted_set) 2 else 3)
+    else if ((!omitted_set and fields.len == 4) or (omitted_set and fields.len == 3))
+        fields.len - 1
+    else
+        null;
+    if (parser.bounds_set == null) parser.bounds_set = set_name;
+    if (!std.mem.eql(u8, parser.bounds_set.?, set_name)) return;
+    const column = try parser.column(column_name);
+    const value = if (value_index) |index| try parseFinite(fields[index]) else 0.0;
     const target = &parser.builder.columns.items[column];
     if (std.ascii.eqlIgnoreCase(code, "LO")) target.lower = value else if (std.ascii.eqlIgnoreCase(code, "UP")) target.upper = value else if (std.ascii.eqlIgnoreCase(code, "FX")) {
         target.lower = value;
@@ -489,4 +561,45 @@ test "fixed MPS accepts an omitted RHS set name" {
     defer model.deinit();
     try std.testing.expectEqual(@as(f64, 7.0), model.row_lower[0]);
     try std.testing.expectEqual(@as(f64, 9.0), model.row_upper[1]);
+}
+
+test "fixed MPS preserves blanks inside eight-character names" {
+    const input =
+        \\NAME          FIXEDNAMES
+        \\ROWS
+        \\ N  OB1PNW20
+        \\ E  DEDO3 1R
+        \\COLUMNS
+        \\    DEDO3 11  OB1PNW20        .02466   DEDO3 1R           -1.
+        \\RHS
+        \\    RHS 1     DEDO3 1R            3.
+        \\BOUNDS
+        \\ UP BND-1     DEDO3 11       200000.
+        \\ENDATA
+    ;
+    var model = try parse(std.testing.allocator, input, "fixed-names", .{});
+    defer model.deinit();
+    try std.testing.expectEqual(@as(usize, 1), model.col_cost.len);
+    try std.testing.expectEqual(@as(usize, 1), model.row_lower.len);
+    try std.testing.expectEqual(@as(f64, 0.02466), model.col_cost[0]);
+    try std.testing.expectEqual(@as(f64, 3.0), model.row_lower[0]);
+    try std.testing.expectEqual(@as(f64, 3.0), model.row_upper[0]);
+    try std.testing.expectEqual(@as(f64, 200000.0), model.col_upper[0]);
+}
+
+test "fixed MPS accepts an omitted bounds set name" {
+    const input =
+        \\NAME OMITTED_BOUND_SET
+        \\ROWS
+        \\ N OBJ
+        \\ L ROW
+        \\COLUMNS
+        \\ X OBJ 1 ROW 1
+        \\BOUNDS
+        \\ UP           X                   7.
+        \\ENDATA
+    ;
+    var model = try parse(std.testing.allocator, input, "omitted-bound-set", .{});
+    defer model.deinit();
+    try std.testing.expectEqual(@as(f64, 7.0), model.col_upper[0]);
 }
