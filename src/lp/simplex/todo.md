@@ -322,6 +322,19 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
 第 6.3 节 scale-aware dual Phase-I 重设计已明确移入后续独立优化，不属于本阶段前置
 条件；第 7 阶段只验收当前已通过快速 corpus 的默认 primal Phase-I 路径。
 
+- [x] 冻结官方 Netlib 传统压缩 MPS 中可直接解码的 93 个模型及其 SHA-256，新增
+  带逐模型 timeout、memory limit、peak RSS、原始 TSV 保留和 HiGHS/可选 CLP 对照的
+  可复现 runner；首轮结果记录于 `bench/simplex/stage7_results.md`。
+- [x] 完成 93 模型解析前置关卡：修复 fixed MPS 名称内空格及省略 BOUNDS set name
+  两类兼容问题，并以 `gfrd-pnc`、`sierra` objective 对照确认未再静默丢失 bounds。
+- [ ] 获取并锁定 `stocfor3`、`truss` 与 QAP8/QAP12/QAP15 五个特殊生成模型；在此之前
+  “93/93 可解析”不得表述为完整 Netlib 已通过。
+- [ ] 处理首轮暴露的 `modszk1`、`scsd8`、`wood1p` 数值失败、`tuff` Phase-I 循环及
+  大模型超时；强制 perturbation 已修复 `scsd8`/`wood1p`，但 taboo 在 `tuff`/`wood1p`
+  产生错误 infeasible，未通过默认启用门槛。
+- [ ] 增加固定版本 CLP runner；当前环境没有 CLP，因此只允许报告 zhighs/HiGHS 的
+  阶段性数据，不能勾选三方完整对照。
+
 - [ ] Netlib 完整求解结果与 HiGHS/CLP 对比。
 - [ ] Mittelmann 完整求解结果与 HiGHS/CLP 对比，并单独记录超时和内存上限。
 - [ ] 汇总 objective、status、iteration count、primal/dual residual、ray 和
