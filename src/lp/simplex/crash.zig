@@ -8,28 +8,35 @@
 const std = @import("std");
 const matrix = @import("matrix");
 
+/// Output of a crash plan: parallel arrays of (row, column) pairs that the
+/// engine should install as basic structural variables.
 pub const CrashPlanView = struct {
     rows: []const u32,
     columns: []const u32,
 };
+
+/// Selection policy for ranking crash candidates.
+/// - `ltssf`: Lexicographic tie-break: degree, bound, cost, row degree, pivot magnitude.
+/// - `bixby`: Merit-based score that rewards strong pivots in sparse rows.
 pub const CrashScoring = enum { ltssf, bixby };
 
 pub const CrashWorkspace = struct {
     allocator: std.mem.Allocator,
-    row_starts: []usize = &.{},
-    row_columns: []u32 = &.{},
-    row_cursor: []usize = &.{},
-    row_degree: []u32 = &.{},
-    column_degree: []u32 = &.{},
-    row_active: []bool = &.{},
-    column_active: []bool = &.{},
-    selected_rows: []u32 = &.{},
-    selected_columns: []u32 = &.{},
+    row_starts: []usize = &.{}, // CSR row pointers (length = num_rows + 1)
+    row_columns: []u32 = &.{}, // Column index per retained nonzero
+    row_cursor: []usize = &.{}, // Scatter cursor used while building CSR
+    row_degree: []u32 = &.{}, // Live nonzero count per row
+    column_degree: []u32 = &.{}, // Live nonzero count per column
+    row_active: []bool = &.{}, // False once a row has been matched
+    column_active: []bool = &.{}, // False once a column has been matched
+    selected_rows: []u32 = &.{}, // Output: matched row for each selection
+    selected_columns: []u32 = &.{}, // Output: matched column for each selection
 
     pub fn init(allocator: std.mem.Allocator) CrashWorkspace {
         return .{ .allocator = allocator };
     }
 
+    /// Free all allocated buffers.
     pub fn deinit(self: *CrashWorkspace) void {
         self.allocator.free(self.row_starts);
         self.allocator.free(self.row_columns);
@@ -53,8 +60,8 @@ pub const CrashWorkspace = struct {
         upper: []const f64,
         row_scale: []const f64,
         column_scale: []const f64,
-        near_singleton_limit: u32,
-        pivot_tolerance: f64,
+        near_singleton_limit: u32, // Max acceptable column degree for crash eligibility
+        pivot_tolerance: f64, // Minimum scaled pivot magnitude
         scoring: CrashScoring,
     ) !CrashPlanView {
         if (cost.len != csc.num_cols or lower.len != csc.num_cols or upper.len != csc.num_cols or
@@ -72,6 +79,7 @@ pub const CrashWorkspace = struct {
         @memset(row_active, true);
         @memset(column_active, true);
 
+        // First pass: count retained nonzeros per row and per column.
         for (0..csc.num_cols) |column| {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
@@ -82,8 +90,10 @@ pub const CrashWorkspace = struct {
                 column_degree[column] += 1;
             }
         }
+        // Prefix-sum per-row counts into CSR row pointers and copy them into the cursor.
         for (0..csc.num_rows) |row| row_starts[row + 1] += row_starts[row];
         @memcpy(row_cursor, row_starts[0..csc.num_rows]);
+        // Second pass: scatter column indices into row-major order.
         for (0..csc.num_cols) |column| {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
@@ -96,6 +106,8 @@ pub const CrashWorkspace = struct {
         }
         for (0..csc.num_rows) |row| row_degree[row] = @intCast(row_starts[row + 1] - row_starts[row]);
 
+        // Greedy matching loop: repeatedly pick the best eligible (column, row)
+        // pair, mark both sides inactive, and decrement degrees of neighbors.
         var selected_count: usize = 0;
         while (selected_count < @min(csc.num_rows, csc.num_cols)) {
             var best: ?Candidate = null;
@@ -105,6 +117,8 @@ pub const CrashWorkspace = struct {
                 if (degree == 0 or degree > near_singleton_limit) continue;
                 const begin = csc.col_starts[column];
                 const end = csc.col_starts[column + 1];
+                // Find the strongest eligible pivot in this column (ties broken
+                // by smaller row degree to keep fill-in low).
                 var pivot_row: ?usize = null;
                 var pivot_magnitude: f64 = 0.0;
                 for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
@@ -138,10 +152,12 @@ pub const CrashWorkspace = struct {
             row_active[chosen.row] = false;
             column_active[chosen.column] = false;
 
+            // Decrement degree of every column touched by the matched row.
             for (self.row_columns[row_starts[chosen.row]..row_starts[chosen.row + 1]]) |column_u32| {
                 const column: usize = @intCast(column_u32);
                 if (column_active[column] and column_degree[column] != 0) column_degree[column] -= 1;
             }
+            // Decrement degree of every row touched by the matched column.
             const begin = csc.col_starts[chosen.column];
             const end = csc.col_starts[chosen.column + 1];
             for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
@@ -156,6 +172,7 @@ pub const CrashWorkspace = struct {
         };
     }
 
+    /// Total bytes currently held by all dynamic buffers.
     pub fn requestedBytes(self: *const CrashWorkspace) usize {
         return std.mem.sliceAsBytes(self.row_starts).len +
             std.mem.sliceAsBytes(self.row_columns).len +
@@ -168,6 +185,7 @@ pub const CrashWorkspace = struct {
             std.mem.sliceAsBytes(self.selected_columns).len;
     }
 
+    /// Grow buffers as needed; only ever enlarges, never shrinks.
     fn ensureCapacity(self: *CrashWorkspace, rows: usize, columns: usize, nonzeros: usize) !void {
         if (self.row_starts.len < rows + 1) self.row_starts = try self.allocator.realloc(self.row_starts, rows + 1);
         if (self.row_columns.len < nonzeros) self.row_columns = try self.allocator.realloc(self.row_columns, nonzeros);
@@ -181,17 +199,20 @@ pub const CrashWorkspace = struct {
         if (self.selected_columns.len < selected) self.selected_columns = try self.allocator.realloc(self.selected_columns, selected);
     }
 
+    /// A single (column, row) crash candidate with the data needed for ranking.
     const Candidate = struct {
         column: usize,
         row: usize,
-        degree: u32,
-        bound_penalty: u8,
-        cost: f64,
+        degree: u32, // Column degree at selection time
+        bound_penalty: u8, // 0 (free), 1 (boxed), 2 (fixed)
+        cost: f64, // Scaled |objective coefficient|
         row_degree: u32,
-        pivot_magnitude: f64,
+        pivot_magnitude: f64, // Scaled |coefficient|
 
+        /// Return true if `self` should be selected before `other` under `scoring`.
         fn betterThan(self: Candidate, other: Candidate, scoring: CrashScoring) bool {
             if (scoring == .ltssf) {
+                // Lexicographic order on (degree, bound_penalty, cost, row_degree, -pivot).
                 if (self.degree != other.degree) return self.degree < other.degree;
                 if (self.bound_penalty != other.bound_penalty) return self.bound_penalty < other.bound_penalty;
                 if (self.cost != other.cost) return self.cost < other.cost;
@@ -210,11 +231,14 @@ pub const CrashWorkspace = struct {
                 if (self.degree != other.degree) return self.degree < other.degree;
                 if (self.row_degree != other.row_degree) return self.row_degree < other.row_degree;
             }
+            // Final deterministic tiebreak by position.
             if (self.column != other.column) return self.column < other.column;
             return self.row < other.row;
         }
     };
 
+    /// Classify a column's bound tightness for the ltssf penalty:
+    /// 0 = free (one-sided or unbounded), 1 = boxed, 2 = fixed.
     fn boundPenalty(lower: f64, upper: f64) u8 {
         if (lower == upper) return 2;
         if (std.math.isFinite(lower) and std.math.isFinite(upper)) return 1;

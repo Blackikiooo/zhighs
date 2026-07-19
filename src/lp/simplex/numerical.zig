@@ -6,20 +6,27 @@
 
 const std = @import("std");
 
+/// Mutable numerical state shared across simplex iterations. Tracks pivot
+/// stability, refactorization triggers, and anti-cycling fallbacks.
 pub const NumericalState = struct {
-    primal_tolerance: f64 = 1e-7,
-    dual_tolerance: f64 = 1e-7,
-    pivot_tolerance: f64 = 1e-12,
-    zero_tolerance: f64 = 1e-12,
-    perturbation: f64 = 0.0,
-    max_update_count: usize = 100,
-    max_refinement_steps: usize = 2,
+    // --- Feasibility and pivot tolerances ---
+    primal_tolerance: f64 = 1e-7, // Max acceptable primal infeasibility
+    dual_tolerance: f64 = 1e-7, // Max acceptable dual infeasibility
+    pivot_tolerance: f64 = 1e-12, // Below this |pivot| is treated as zero
+    zero_tolerance: f64 = 1e-12, // Generic zero threshold for residual/scalar comparisons
+    perturbation: f64 = 0.0, // Active perturbation magnitude (0 when not perturbing)
+
+    // --- Refactorization policy ---
+    max_update_count: usize = 100, // Forrest-Tomlin updates before forced refactor
+    max_refinement_steps: usize = 2, // Iterative refinement attempts per solve
     /// Number of fresh-basis pivots required after a forward-accuracy warning
     /// before Forrest--Tomlin updates are tried again.
     fresh_factorization_recovery_pivots: usize = 32,
-    residual_tolerance: f64 = 1e-10,
-    update_count: usize = 0,
-    numerical_warning: bool = false,
+    residual_tolerance: f64 = 1e-10, // Relative residual that triggers a refactor
+
+    // --- Live diagnostics (reset by `markRefactorized`) ---
+    update_count: usize = 0, // Updates applied since last refactor
+    numerical_warning: bool = false, // Latched flag: refactor required
     last_relative_residual: f64 = 0.0,
     max_relative_residual: f64 = 0.0,
     refinement_count: usize = 0,
@@ -29,12 +36,15 @@ pub const NumericalState = struct {
     pivot_condition_estimate: f64 = 1.0,
     dual_edge_weight_error_tolerance: f64 = 0.25,
     dual_edge_weight_corrections: usize = 0,
-    degenerate_pivot_limit: usize = 8,
+
+    // --- Anti-cycling fallback ---
+    degenerate_pivot_limit: usize = 8, // Consecutive zero-step pivots before fallback
     consecutive_degenerate_pivots: usize = 0,
     degenerate_pivot_count: usize = 0,
     anti_cycling_activations: usize = 0,
     anti_cycling_active: bool = false,
 
+    /// Account for one pivot; flag a warning if it is non-finite or below tolerance.
     pub fn observePivot(self: *NumericalState, pivot: f64) void {
         self.update_count += 1;
         if (!std.math.isFinite(pivot) or @abs(pivot) <= self.pivot_tolerance) {
@@ -42,15 +52,18 @@ pub const NumericalState = struct {
         }
     }
 
+    /// True when the factorization must be rebuilt before the next FTran/BTran.
     pub fn needsRefactor(self: NumericalState) bool {
         return self.numerical_warning or self.update_count >= self.max_update_count;
     }
 
+    /// Reset all update/refactor counters after a fresh factorization.
     pub fn markRefactorized(self: *NumericalState) void {
         self.update_count = 0;
         self.numerical_warning = false;
     }
 
+    /// Record a residual observation from a solve/refinement step.
     pub fn observeResidual(self: *NumericalState, absolute: f64, rhs_scale: f64) void {
         self.last_relative_residual = absolute / @max(1.0, rhs_scale);
         self.max_relative_residual = @max(self.max_relative_residual, self.last_relative_residual);
@@ -58,10 +71,12 @@ pub const NumericalState = struct {
             self.numerical_warning = true;
     }
 
+    /// Check primal feasibility of a violation.
     pub fn isPrimalFeasible(self: NumericalState, violation: f64) bool {
         return violation <= self.primal_tolerance;
     }
 
+    /// Check dual feasibility of a violation.
     pub fn isDualFeasible(self: NumericalState, violation: f64) bool {
         return violation <= self.dual_tolerance;
     }
@@ -87,6 +102,7 @@ pub const NumericalState = struct {
         }
     }
 
+    /// Full reset of anti-cycling counters (called between solves).
     pub fn resetAntiCycling(self: *NumericalState) void {
         self.consecutive_degenerate_pivots = 0;
         self.degenerate_pivot_count = 0;

@@ -6,19 +6,23 @@
 
 const matrix = @import("matrix");
 
+/// Optimization direction. Encoded as +1/-1 so flipping the sense is just a
+/// sign change on the objective vector.
 pub const ObjectiveSense = enum(i2) { minimize = 1, maximize = -1 };
 
+/// Non-owning view over a sparse LP in CSC form. All slices are borrowed from
+/// the caller; the view performs no allocation.
 pub const ProblemView = struct {
     num_rows: usize,
     num_cols: usize,
-    col_cost: []const f64,
-    col_lower: []const f64,
-    col_upper: []const f64,
-    row_lower: []const f64,
-    row_upper: []const f64,
-    matrix: matrix.CscView,
+    col_cost: []const f64, // Objective coefficients (length = num_cols)
+    col_lower: []const f64, // Column lower bounds (length = num_cols)
+    col_upper: []const f64, // Column upper bounds (length = num_cols)
+    row_lower: []const f64, // Row lower bounds (length = num_rows)
+    row_upper: []const f64, // Row upper bounds (length = num_rows)
+    matrix: matrix.CscView, // Constraint matrix in compressed sparse column form
     objective_sense: ObjectiveSense,
-    objective_offset: f64,
+    objective_offset: f64, // Constant added to the objective value
 
     pub const ViewError = error{ DimensionMismatch, InvalidBounds, InvalidMatrix };
 

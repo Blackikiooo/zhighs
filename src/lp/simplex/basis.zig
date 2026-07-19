@@ -8,35 +8,49 @@ const std = @import("std");
 /// Public-compatible values keep zero-copy status views possible at the model
 /// adapter boundary. `free` and `fixed` remain solver-internal extensions.
 pub const BasisStatus = enum(i8) { basic = 0, at_lower = -1, at_upper = 1, superbasic = 2, free = 3, fixed = 4 };
+
+/// Errors raised by basis mutation operations.
 pub const BasisError = error{ RowOutOfRange, ColumnOutOfRange, ColumnAlreadyBasic };
 
+/// Hot, mutable simplex state. All SoA vectors are owned by this struct so
+/// that the pivot loop never needs to allocate.
 pub const BasisState = struct {
     allocator: std.mem.Allocator,
-    num_structural_cols: usize = 0,
+    num_structural_cols: usize = 0, // Original model columns (excludes logical/artificial)
     num_rows: usize = 0,
-    row_status: []BasisStatus = &.{},
-    col_status: []BasisStatus = &.{},
-    basic_index: []u32 = &.{},
-    basic_pos: []u32 = &.{},
-    primal: []f64 = &.{},
-    dual: []f64 = &.{},
-    reduced_cost: []f64 = &.{},
-    pivot_direction: []f64 = &.{},
-    basic_value: []f64 = &.{},
-    basic_lower: []f64 = &.{},
-    basic_upper: []f64 = &.{},
-    basic_margin: []f64 = &.{},
-    ratio_direction: []f64 = &.{},
-    row_scale: []f64 = &.{},
-    column_scale: []f64 = &.{},
-    row_rhs: []f64 = &.{},
-    col_lower: []f64 = &.{},
-    col_upper: []f64 = &.{},
-    artificial_sign: []f64 = &.{},
-    rhs_work: []f64 = &.{},
+
+    // --- Basis membership ---
+    row_status: []BasisStatus = &.{}, // Status of each logical column (length = num_rows)
+    col_status: []BasisStatus = &.{}, // Status of every internal column (length = num_cols + 2*num_rows)
+    basic_index: []u32 = &.{}, // For each basis row, the column currently basic there (length = num_rows)
+    basic_pos: []u32 = &.{}, // For each column, its row in the basis (maxInt(u32) when nonbasic)
+
+    // --- Primal/dual solution vectors ---
+    primal: []f64 = &.{}, // Primal value of every internal column
+    dual: []f64 = &.{}, // Dual value of every row
+    reduced_cost: []f64 = &.{}, // Reduced cost of every internal column
+    pivot_direction: []f64 = &.{}, // Direction of the current primal pivot (length = num_rows)
+
+    // --- Basic variable bookkeeping ---
+    basic_value: []f64 = &.{}, // Current value of each basic variable
+    basic_lower: []f64 = &.{}, // Lower bound of each basic variable
+    basic_upper: []f64 = &.{}, // Upper bound of each basic variable
+    basic_margin: []f64 = &.{}, // Distance from current value to the active bound
+    ratio_direction: []f64 = &.{}, // Sign of feasibility movement used by the ratio test
+
+    // --- Scaling and bounds (working copies) ---
+    row_scale: []f64 = &.{}, // Row equilibration scale
+    column_scale: []f64 = &.{}, // Column equilibration scale
+    row_rhs: []f64 = &.{}, // Scaled row right-hand side
+    col_lower: []f64 = &.{}, // Working lower bound for every internal column
+    col_upper: []f64 = &.{}, // Working upper bound for every internal column
+    artificial_sign: []f64 = &.{}, // Sign convention for artificial columns (phase-one)
+    rhs_work: []f64 = &.{}, // Scratch RHS used during FTran/BTran
     /// Residual/correction workspace used by iterative refinement. Keeping it
     /// beside the other row vectors makes every FTRAN refinement allocation-free.
     residual_work: []f64 = &.{},
+
+    // --- Pricing weights (Devex / steepest-edge) ---
     /// Devex/steepest-edge reference weights. These are solver-owned because
     /// pricing mutates them, while pricing scans remain contiguous SoA loops.
     col_edge_weight: []f64 = &.{},
@@ -44,18 +58,25 @@ pub const BasisState = struct {
     /// Frozen nonbasic reference set for a primal Devex framework. Bytes keep
     /// the hot weighted-norm loop branch-light and avoid packed-bit updates.
     devex_reference: []u8 = &.{},
-    dual_row: []f64 = &.{},
-    tableau: []f64 = &.{},
-    dual_ratio: []f64 = &.{},
-    dual_direction: []f64 = &.{},
-    flip_columns: []u32 = &.{},
-    dual_candidate_rows: []u32 = &.{},
-    dual_candidate_score: []f64 = &.{},
-    published_primal: []f64 = &.{},
-    published_dual: []f64 = &.{},
-    published_reduced_cost: []f64 = &.{},
-    unbounded_ray: []f64 = &.{},
 
+    // --- Dual simplex workspace ---
+    dual_row: []f64 = &.{}, // BTran result for the chosen pivot row
+    tableau: []f64 = &.{}, // Updated tableau row (alpha values) for the pivot
+    dual_ratio: []f64 = &.{}, // Per-column dual ratio-test value
+    dual_direction: []f64 = &.{}, // Direction of the current dual pivot
+    flip_columns: []u32 = &.{}, // Columns whose bounds should be flipped at the pivot
+    dual_candidate_rows: []u32 = &.{}, // Heap of candidate rows for dual pricing
+    dual_candidate_score: []f64 = &.{}, // Score for each entry in `dual_candidate_rows`
+
+    // --- Published solution (post-cleanup, original coordinates) ---
+    published_primal: []f64 = &.{}, // Final primal values for structural columns
+    published_dual: []f64 = &.{}, // Final dual values for rows
+    published_reduced_cost: []f64 = &.{}, // Final reduced costs for structural columns
+    unbounded_ray: []f64 = &.{}, // Primal ray (empty unless the solve is unbounded)
+
+    /// Allocate all SoA vectors for a model with `rows` rows and `cols`
+    /// structural columns. Internal column count is `cols + 2*rows` to make
+    /// room for logical and artificial columns.
     pub fn init(allocator: std.mem.Allocator, rows: usize, cols: usize) !BasisState {
         const total_cols = cols + 2 * rows;
         var self = BasisState{ .allocator = allocator, .num_structural_cols = cols, .num_rows = rows };
@@ -133,6 +154,8 @@ pub const BasisState = struct {
         return self;
     }
 
+    /// Reset to the slack basis: every row carries its logical column, all
+    /// structural columns are nonbasic at lower, artificials are fixed at 0.
     pub fn initializeSlackBasis(self: *BasisState) void {
         @memset(self.basic_pos, std.math.maxInt(u32));
         for (self.basic_index, 0..) |*col, row| {
@@ -164,6 +187,7 @@ pub const BasisState = struct {
         self.basic_pos[leaving_col] = std.math.maxInt(u32);
     }
 
+    /// Release all SoA buffers.
     pub fn deinit(self: *BasisState) void {
         self.allocator.free(self.row_status);
         self.allocator.free(self.col_status);

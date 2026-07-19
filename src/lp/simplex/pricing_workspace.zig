@@ -9,12 +9,14 @@ const std = @import("std");
 const matrix = @import("matrix");
 const foundation = @import("foundation");
 
+/// Row-major (CSR) transpose of the retained CSC entries. Built once per solve
+/// and reused by every row-pricing operation without further allocation.
 pub const RowView = struct {
     allocator: std.mem.Allocator,
-    row_starts: []usize = &.{},
-    row_columns: []u32 = &.{},
-    row_values: []f64 = &.{},
-    row_cursor: []usize = &.{},
+    row_starts: []usize = &.{}, // CSR row pointers (length = num_rows + 1)
+    row_columns: []u32 = &.{}, // Column index for each nonzero (length = nonzeros)
+    row_values: []f64 = &.{}, // Value for each nonzero (length = nonzeros)
+    row_cursor: []usize = &.{}, // Scratch cursor used during `build` (length = num_rows)
     num_rows: usize = 0,
     num_cols: usize = 0,
     nonzeros: usize = 0,
@@ -23,6 +25,7 @@ pub const RowView = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Free all allocated buffers and reset to the empty state.
     pub fn deinit(self: *RowView) void {
         self.allocator.free(self.row_starts);
         self.allocator.free(self.row_columns);
@@ -38,12 +41,17 @@ pub const RowView = struct {
         const starts = self.row_starts[0 .. csc.num_rows + 1];
         const cursor = self.row_cursor[0..csc.num_rows];
         @memset(starts, 0);
+
+        // First pass: count retained nonzeros per row to build the row pointers.
         for (csc.row_indices, csc.values) |row_id, coefficient| {
             if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
             starts[row_id.toUsize() + 1] += 1;
         }
+        // Prefix-sum the per-row counts into CSR row pointers.
         for (0..csc.num_rows) |row| starts[row + 1] += starts[row];
         @memcpy(cursor, starts[0..csc.num_rows]);
+
+        // Second pass: scatter (column, value) pairs into their row slots.
         for (0..csc.num_cols) |column| {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
@@ -61,18 +69,22 @@ pub const RowView = struct {
         self.nonzeros = starts[csc.num_rows];
     }
 
+    /// Column indices for the nonzeros in `row`.
     pub fn rowColumns(self: *const RowView, row: usize) []const u32 {
         return self.row_columns[self.row_starts[row]..self.row_starts[row + 1]];
     }
 
+    /// Values for the nonzeros in `row`.
     pub fn rowValues(self: *const RowView, row: usize) []const f64 {
         return self.row_values[self.row_starts[row]..self.row_starts[row + 1]];
     }
 
+    /// Number of nonzeros in `row`.
     pub fn rowDegree(self: *const RowView, row: usize) usize {
         return self.row_starts[row + 1] - self.row_starts[row];
     }
 
+    /// Total bytes currently held by all dynamic buffers (used for memory budgeting).
     pub fn requestedBytes(self: *const RowView) usize {
         return std.mem.sliceAsBytes(self.row_starts).len +
             std.mem.sliceAsBytes(self.row_columns).len +
@@ -80,6 +92,7 @@ pub const RowView = struct {
             std.mem.sliceAsBytes(self.row_cursor).len;
     }
 
+    /// Grow buffers as needed; only ever enlarges, never shrinks.
     fn ensureCapacity(self: *RowView, rows: usize, nonzeros: usize) !void {
         if (self.row_starts.len < rows + 1) self.row_starts = try self.allocator.realloc(self.row_starts, rows + 1);
         if (self.row_cursor.len < rows) self.row_cursor = try self.allocator.realloc(self.row_cursor, rows);

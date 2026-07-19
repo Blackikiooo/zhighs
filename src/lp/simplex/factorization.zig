@@ -7,35 +7,44 @@
 const std = @import("std");
 const matrix = @import("matrix");
 
+/// Errors raised by factorization and update operations.
 pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singular, NumericalFailure, OutOfMemory };
+
 /// Selected base factorization. Updates are applied above either backend and
 /// are cleared whenever a new base factorization is installed.
 pub const BackendKind = enum { dense_lu, sparse_lu };
+
+/// Reason a reinversion was triggered. Reported via `recordReinversion`.
 pub const ReinversionReason = enum { update_limit, update_growth, solve_residual, small_pivot };
+
+/// Classification of an update failure for diagnostic counters.
 pub const UpdateFailureKind = enum { dimension_mismatch, unsupported, singular, numerical, out_of_memory };
+
+/// Aggregate statistics across one solve. Counts are always populated; the
+/// `*_ns` timing fields require an explicit `statistics_io` clock to be set.
 pub const FactorizationStats = struct {
-    factorizations: usize = 0,
-    ftran_calls: usize = 0,
-    btran_calls: usize = 0,
-    eta_updates: usize = 0,
-    ft_updates: usize = 0,
-    maximum_update_growth: f64 = 1.0,
+    factorizations: usize = 0, // Total base factorizations built
+    ftran_calls: usize = 0, // Forward solves (B^-1 * x)
+    btran_calls: usize = 0, // Transpose solves (B^-T * x)
+    eta_updates: usize = 0, // Product-form Eta updates applied (dense backend)
+    ft_updates: usize = 0, // Forrest-Tomlin updates applied (sparse backend)
+    maximum_update_growth: f64 = 1.0, // Worst max/diagonal ratio observed
     update_limit_reinversions: usize = 0,
     update_growth_reinversions: usize = 0,
     solve_residual_reinversions: usize = 0,
     small_pivot_reinversions: usize = 0,
-    maximum_update_count: usize = 0,
-    invert_ns: u64 = 0,
-    ftran_ns: u64 = 0,
-    btran_ns: u64 = 0,
-    update_ns: u64 = 0,
+    maximum_update_count: usize = 0, // Peak update chain length seen
+    invert_ns: u64 = 0, // Time spent inside factorize*
+    ftran_ns: u64 = 0, // Time spent inside solve/solveForUpdate
+    btran_ns: u64 = 0, // Time spent inside solveTranspose
+    update_ns: u64 = 0, // Time spent inside update
     ftran_rhs_samples: usize = 0,
-    ftran_rhs_nonzeros: usize = 0,
+    ftran_rhs_nonzeros: usize = 0, // Total nonzeros across sampled FTRAN RHS vectors
     btran_rhs_samples: usize = 0,
     btran_rhs_nonzeros: usize = 0,
     dense_ftran_dispatches: usize = 0,
     dense_btran_dispatches: usize = 0,
-    hyper_ftran_dispatches: usize = 0,
+    hyper_ftran_dispatches: usize = 0, // Reserved for hyper-sparse dispatches
     hyper_btran_dispatches: usize = 0,
     update_dimension_failures: usize = 0,
     update_unsupported_failures: usize = 0,
@@ -45,10 +54,12 @@ pub const FactorizationStats = struct {
     dense_update_failures: usize = 0,
     sparse_update_failures: usize = 0,
 };
+
+/// View of one pivot update supplied by the simplex engine.
 pub const PivotUpdateView = struct {
     leaving_row: u32,
     entering_col: u32,
-    direction: []const f64,
+    direction: []const f64, // Updated tableau column (B^-1 * a_entering)
     /// Converts a signed movement direction back to the actual entering
     /// basis column. Primal simplex uses -1 when entering from an upper bound.
     column_scale: f64 = 1.0,
@@ -56,20 +67,20 @@ pub const PivotUpdateView = struct {
 
 pub const Factorization = struct {
     allocator: std.mem.Allocator,
-    update_count: usize = 0,
-    dense_lu: matrix.DenseLU,
-    sparse_lu: matrix.SparseLU,
-    sparse_basis: matrix.SparseBasisBuffers,
-    eta_values: []f64 = &.{},
-    eta_rows: []u32 = &.{},
-    identity_basic: []u32 = &.{},
-    identity_scale: []f64 = &.{},
-    identity_sign: []f64 = &.{},
-    eta_count: usize = 0,
-    eta_capacity: usize = 64,
-    dimension: usize = 0,
-    backend_kind: BackendKind = .dense_lu,
-    sparse_dimension_threshold: usize = 64,
+    update_count: usize = 0, // Updates applied since last factorize
+    dense_lu: matrix.DenseLU, // Dense LU backend (small bases)
+    sparse_lu: matrix.SparseLU, // Sparse LU backend (larger bases)
+    sparse_basis: matrix.SparseBasisBuffers, // Reusable CSC assembly buffers
+    eta_values: []f64 = &.{}, // Slab of Eta vectors (dense backend only)
+    eta_rows: []u32 = &.{}, // Leaving-row index for each Eta
+    identity_basic: []u32 = &.{}, // Identity basis head for `factorizeIdentity`
+    identity_scale: []f64 = &.{}, // Column scales for the identity basis
+    identity_sign: []f64 = &.{}, // Sign convention for artificial identity columns
+    eta_count: usize = 0, // Live Eta vectors in the slab
+    eta_capacity: usize = 64, // Max Eta vectors before forced refactor (dense backend)
+    dimension: usize = 0, // Current basis dimension (n = num_rows)
+    backend_kind: BackendKind = .dense_lu, // Active backend for the current basis
+    sparse_dimension_threshold: usize = 64, // Bases at or above this use the sparse backend
     stats: FactorizationStats = .{},
     /// Largest max(|d|)/|d[p]| observed since reinversion. This inexpensive
     /// signal estimates how strongly an update can amplify solve error.
@@ -78,6 +89,7 @@ pub const Factorization = struct {
     /// unless the caller explicitly requests benchmark statistics.
     statistics_io: ?std.Io = null,
 
+    /// Construct an empty factorization. Backends are lazily sized on first use.
     pub fn init(allocator: std.mem.Allocator) Factorization {
         return .{
             .allocator = allocator,
@@ -86,6 +98,8 @@ pub const Factorization = struct {
             .sparse_basis = matrix.SparseBasisBuffers.init(allocator),
         };
     }
+
+    /// Release all backend and Eta storage.
     pub fn deinit(self: *Factorization) void {
         self.dense_lu.deinit();
         self.sparse_lu.deinit();
@@ -96,6 +110,8 @@ pub const Factorization = struct {
         self.allocator.free(self.identity_scale);
         self.allocator.free(self.identity_sign);
     }
+
+    /// Factorize a dense `n x n` matrix in row-major order via the dense backend.
     pub fn factorize(self: *Factorization, n: usize, matrix_data: []const f64) FactorizationError!void {
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.invert_ns, started);
@@ -157,6 +173,9 @@ pub const Factorization = struct {
         const buffer = self.dense_lu.lu;
         @memset(buffer, 0.0);
         if (basic_index.len != n or row_scale.len != n or column_scale.len != problem_matrix.num_cols or artificial_sign.len != n) return error.DimensionMismatch;
+        // Scatter the basis columns into the dense buffer. Structural columns
+        // come from the problem matrix; logical/artificial columns are unit
+        // vectors with an optional sign convention.
         for (basic_index, 0..) |global_column_u32, basis_column| {
             const global_column: usize = global_column_u32;
             if (global_column < problem_matrix.num_cols) {
@@ -211,11 +230,14 @@ pub const Factorization = struct {
         self.stats.factorizations += 1;
     }
 
+    /// Expose the dense LU backing buffer for in-place fills by the caller.
     pub fn mutableBasisBuffer(self: *Factorization, n: usize) FactorizationError![]f64 {
         if (self.dense_lu.n != n or self.dense_lu.lu.len != n * n) return error.DimensionMismatch;
         return self.dense_lu.lu;
     }
 
+    /// Refactorize the dense LU in place, using the existing buffer contents.
+    /// Clears all Eta updates.
     pub fn refactorizeInPlace(self: *Factorization) FactorizationError!void {
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.invert_ns, started);
@@ -231,6 +253,8 @@ pub const Factorization = struct {
         self.maximum_update_growth = 1.0;
         self.stats.factorizations += 1;
     }
+
+    /// Forward solve `rhs = B^-1 * rhs` in place, applying any pending Eta updates.
     pub fn solve(self: *Factorization, rhs: []f64) FactorizationError!void {
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.ftran_ns, started);
@@ -251,6 +275,7 @@ pub const Factorization = struct {
                 error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
             },
         }
+        // Apply pending Eta updates (dense backend only).
         for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
     }
 
@@ -271,6 +296,9 @@ pub const Factorization = struct {
             error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
         };
     }
+
+    /// Transpose solve `rhs = B^-T * rhs` in place. Eta updates are applied
+    /// in reverse order before the backend transpose solve.
     pub fn solveTranspose(self: *Factorization, rhs: []f64) FactorizationError!void {
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.btran_ns, started);
@@ -297,6 +325,9 @@ pub const Factorization = struct {
             },
         }
     }
+
+    /// Apply one pivot update to the factorization. Records growth statistics
+    /// and dispatches to either the Eta (dense) or Forrest-Tomlin (sparse) path.
     pub fn update(self: *Factorization, update_view: PivotUpdateView) FactorizationError!void {
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.update_ns, started);
@@ -305,6 +336,7 @@ pub const Factorization = struct {
         const pivot_row: usize = @intCast(update_view.leaving_row);
         if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
         const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
+        // Scan the direction vector for non-finite entries and the largest magnitude.
         var maximum_magnitude: f64 = 0.0;
         for (update_view.direction) |value| {
             if (!std.math.isFinite(value)) return error.NumericalFailure;
@@ -316,6 +348,7 @@ pub const Factorization = struct {
         if (!std.math.isFinite(update_growth)) return error.NumericalFailure;
         switch (self.backend_kind) {
             .dense_lu => {
+                // Append a new Eta vector to the slab.
                 const eta = self.eta_values[self.eta_count * self.dimension ..][0..self.dimension];
                 for (eta, update_view.direction) |*value, direction| value.* = direction * update_view.column_scale;
                 self.eta_rows[self.eta_count] = update_view.leaving_row;
@@ -353,15 +386,22 @@ pub const Factorization = struct {
         if (self.maximum_update_growth >= 1e2) return @min(storage_limit, 64);
         return storage_limit;
     }
+
+    /// Return the reason a reinversion is currently required, if any.
     pub fn reinversionReason(self: Factorization, hard_limit: usize) ?ReinversionReason {
         const recommended = self.recommendedUpdateLimit(hard_limit);
         if (self.update_count < recommended) return null;
         const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
         return if (recommended < storage_limit) .update_growth else .update_limit;
     }
+
+    /// Convenience wrapper: true if a reinversion is required.
     pub fn needsRefactor(self: Factorization, limit: usize) bool {
         return self.reinversionReason(limit) != null;
     }
+
+    /// Record that a reinversion was performed for `reason`. Called by the
+    /// engine after a successful refactor.
     pub fn recordReinversion(self: *Factorization, reason: ReinversionReason) void {
         switch (reason) {
             .update_limit => self.stats.update_limit_reinversions += 1,
@@ -371,6 +411,7 @@ pub const Factorization = struct {
         }
     }
 
+    /// Classify and record a failed update for diagnostic counters.
     pub fn recordUpdateFailure(self: *Factorization, err: FactorizationError) UpdateFailureKind {
         switch (self.backend_kind) {
             .dense_lu => self.stats.dense_update_failures += 1,
@@ -400,6 +441,8 @@ pub const Factorization = struct {
         };
     }
 
+    /// Backend-specific pivot condition estimate (cheap heuristic, not a true
+    /// condition number).
     pub fn pivotConditionEstimate(self: *const Factorization) f64 {
         return switch (self.backend_kind) {
             .dense_lu => self.dense_lu.pivotConditionEstimate(),
@@ -407,6 +450,7 @@ pub const Factorization = struct {
         };
     }
 
+    /// Bytes held by all retained factorization buffers.
     pub fn requestedBytes(self: *const Factorization) usize {
         var total = self.sparse_lu.requestedBytes();
         total += std.mem.sliceAsBytes(self.dense_lu.lu).len;
@@ -430,11 +474,13 @@ pub const Factorization = struct {
         self.statistics_io = io;
     }
 
+    /// Read the current timer, or return null when timing is disabled.
     fn statisticsTimestamp(self: *const Factorization) ?i96 {
         const io = self.statistics_io orelse return null;
         return std.Io.Clock.awake.now(io).nanoseconds;
     }
 
+    /// Accumulate elapsed time into `target` when timing is enabled.
     fn recordElapsed(self: *const Factorization, target: *u64, started: ?i96) void {
         const begin = started orelse return;
         const io = self.statistics_io orelse return;
@@ -443,6 +489,7 @@ pub const Factorization = struct {
         target.* = std.math.add(u64, target.*, @intCast(end - begin)) catch std.math.maxInt(u64);
     }
 
+    /// Sample FTRAN RHS density for hyper-sparsity heuristics.
     fn observeFtranRhs(self: *Factorization, rhs: []const f64) void {
         if (self.statistics_io == null) return;
         self.stats.ftran_rhs_samples += 1;
@@ -451,6 +498,7 @@ pub const Factorization = struct {
         };
     }
 
+    /// Sample BTRAN RHS density for hyper-sparsity heuristics.
     fn observeBtranRhs(self: *Factorization, rhs: []const f64) void {
         if (self.statistics_io == null) return;
         self.stats.btran_rhs_samples += 1;
@@ -459,6 +507,7 @@ pub const Factorization = struct {
         };
     }
 
+    /// Allocate (or reallocate) the dense-backend Eta slab for `dimension` rows.
     fn prepareEtaStorage(self: *Factorization, dimension: usize) FactorizationError!void {
         self.eta_values = self.allocator.realloc(self.eta_values, dimension * self.eta_capacity) catch return error.OutOfMemory;
         self.eta_rows = self.allocator.realloc(self.eta_rows, self.eta_capacity) catch return error.OutOfMemory;
@@ -468,6 +517,7 @@ pub const Factorization = struct {
         self.maximum_update_growth = 1.0;
     }
 
+    /// Reset update counters for the sparse backend (no Eta slab is needed).
     fn prepareSparseUpdateStorage(self: *Factorization, dimension: usize) void {
         self.dimension = dimension;
         self.eta_count = 0;
@@ -475,6 +525,8 @@ pub const Factorization = struct {
         self.maximum_update_growth = 1.0;
     }
 
+    /// Apply the `update_index`-th Eta to a forward-solved vector: solve
+    /// `(I + e_p * eta^T / eta_p) * x = rhs` in place.
     fn applyEtaInverse(self: *const Factorization, update_index: usize, vector: []f64) void {
         const row: usize = @intCast(self.eta_rows[update_index]);
         const eta = self.eta_values[update_index * self.dimension ..][0..self.dimension];
@@ -485,6 +537,7 @@ pub const Factorization = struct {
         vector[row] = pivot_value;
     }
 
+    /// Apply the transpose of `applyEtaInverse` for BTran.
     fn applyEtaInverseTranspose(self: *const Factorization, update_index: usize, vector: []f64) void {
         const row: usize = @intCast(self.eta_rows[update_index]);
         const eta = self.eta_values[update_index * self.dimension ..][0..self.dimension];

@@ -3,8 +3,16 @@
 const std = @import("std");
 const basis = @import("basis.zig");
 
+/// Available ratio-test rules. `bound_flipping` enables boxed-variable bound
+/// flipping in the dual, which often avoids extra pivots on tightly bounded LPs.
 pub const RatioRule = enum { standard, harris_two_pass, bound_flipping };
+
+/// Result of a primal ratio test: which row leaves and the primal step length.
+/// `row == null` means the problem is unbounded along the current direction.
 pub const LeavingChoice = struct { row: ?u32 = null, step: f64 = 0.0 };
+
+/// Result of a dual ratio test: which column enters, the dual step `theta`,
+/// and how many boxed columns flip their bounds before the entering column fires.
 pub const DualEnteringChoice = struct {
     column: ?u32 = null,
     direction: f64 = 0.0,
@@ -16,6 +24,7 @@ pub const RatioTest = struct {
     rule: RatioRule = .bound_flipping,
     tolerance: f64 = 1e-9,
 
+    /// Dispatch to the configured primal ratio-test rule.
     pub fn chooseLeaving(self: *const RatioTest, direction: []const f64, rhs: []const f64) LeavingChoice {
         if (direction.len != rhs.len) return .{};
         return switch (self.rule) {
@@ -37,6 +46,9 @@ pub const RatioTest = struct {
         degeneracy_tolerance: f64,
     ) LeavingChoice {
         if (direction.len != rhs.len or row_rank.len < direction.len) return .{};
+
+        // First pass: find the smallest virtual step (minimum_step) and the
+        // Harris-relaxed step (relaxed_step) over all blocking rows.
         var relaxed_step = std.math.inf(f64);
         var minimum_step = std.math.inf(f64);
         for (direction, rhs, row_rank[0..direction.len]) |coefficient, value, rank| {
@@ -46,8 +58,11 @@ pub const RatioTest = struct {
             relaxed_step = @min(relaxed_step, (virtual_margin + self.tolerance) / coefficient);
         }
         if (!std.math.isFinite(relaxed_step)) return .{ .step = relaxed_step };
+        // If the smallest virtual step is already large enough, the perturbation
+        // is not needed: fall back to the plain Harris rule.
         if (minimum_step > degeneracy_tolerance) return self.chooseHarris(direction, rhs);
 
+        // Second pass: find the largest pivot magnitude inside the degenerate set.
         var maximum_pivot: f64 = 0.0;
         for (direction, rhs, row_rank[0..direction.len]) |coefficient, value, rank| {
             if (coefficient <= self.tolerance) continue;
@@ -55,6 +70,9 @@ pub const RatioTest = struct {
             if (virtual_step <= relaxed_step and virtual_step <= minimum_step + degeneracy_tolerance)
                 maximum_pivot = @max(maximum_pivot, coefficient);
         }
+
+        // Third pass: pick the lexicographically smallest rank (with tiebreak on
+        // pivot magnitude) among candidates that retain at least half the max pivot.
         var choice = LeavingChoice{ .step = std.math.inf(f64) };
         var best_rank = std.math.inf(f64);
         var best_pivot: f64 = 0.0;
@@ -74,6 +92,7 @@ pub const RatioTest = struct {
         return choice;
     }
 
+    /// Plain ratio test: smallest non-negative step among blocking rows.
     fn chooseStandard(self: *const RatioTest, direction: []const f64, rhs: []const f64) LeavingChoice {
         var choice = LeavingChoice{ .step = std.math.inf(f64) };
         for (direction, rhs, 0..) |coefficient, value, i| {
@@ -87,7 +106,10 @@ pub const RatioTest = struct {
         return choice;
     }
 
+    /// Two-pass Harris ratio test: relax the bound by `tolerance` first, then
+    /// pick the candidate with the largest pivot inside the relaxed window.
     fn chooseHarris(self: *const RatioTest, direction: []const f64, rhs: []const f64) LeavingChoice {
+        // Pass 1: find the smallest step under the relaxed bound.
         var relaxed_step = std.math.inf(f64);
         for (direction, rhs) |coefficient, value| {
             if (coefficient > self.tolerance) {
@@ -96,6 +118,8 @@ pub const RatioTest = struct {
         }
         if (!std.math.isFinite(relaxed_step)) return .{ .step = relaxed_step };
 
+        // Pass 2: among rows whose exact step is within the relaxed window,
+        // choose the one with the largest pivot for numerical stability.
         var choice = LeavingChoice{ .step = std.math.inf(f64) };
         var best_pivot: f64 = 0.0;
         for (direction, rhs, 0..) |coefficient, value, i| {
@@ -133,6 +157,7 @@ pub const RatioTest = struct {
             return .{};
         if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
 
+        // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
         for (0..count) |column| {
             ratio_work[column] = std.math.inf(f64);
@@ -140,6 +165,8 @@ pub const RatioTest = struct {
             const alpha = tableau[column];
             if (@abs(alpha) <= self.tolerance) continue;
 
+            // Direction is normally implied by the bound status; `nonbasic_move`
+            // (dual Phase-I) can override it with an explicit sign.
             const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
             const direction: f64 = if (explicit_move != 0)
                 @floatFromInt(explicit_move)
@@ -173,12 +200,16 @@ pub const RatioTest = struct {
         }
         if (candidate_count == 0) return .{};
 
+        // Sort candidates by ratio (ties broken by column index for determinism).
         std.sort.pdq(u32, candidate_work[0..candidate_count], ratio_work, struct {
             fn lessThan(ratios: []f64, lhs: u32, rhs: u32) bool {
                 return ratios[lhs] < ratios[rhs] or (ratios[lhs] == ratios[rhs] and lhs < rhs);
             }
         }.lessThan);
 
+        // Walk candidates in increasing ratio order. Boxed columns whose flip
+        // capacity still fits inside the remaining primal infeasibility are
+        // accumulated as flips instead of triggering an entering pivot.
         var corrected: f64 = 0.0;
         var flip_count: usize = 0;
         for (candidate_work[0..candidate_count]) |column_u32| {
@@ -201,6 +232,7 @@ pub const RatioTest = struct {
                 .flip_count = flip_count,
             };
         }
+        // All candidates were absorbed as bound flips: dual step is unbounded.
         return .{ .flip_count = flip_count };
     }
 };

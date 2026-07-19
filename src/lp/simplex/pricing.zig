@@ -3,26 +3,37 @@
 const std = @import("std");
 const basis = @import("basis.zig");
 
+/// Available pricing rules. `dantzig` is the textbook rule; `devex` and
+/// `steepest_edge` use weighted norms; `partial`/`hyper_sparse` use segmented
+/// candidate pools to amortize the scan cost.
 pub const PricingRule = enum { dantzig, devex, steepest_edge, partial, hyper_sparse };
+
+/// Result of a primal pricing scan: which column enters and the sign of the
+/// primal step that improves the objective.
 pub const EnteringChoice = struct { column: u32, direction: f64 };
+
+/// Result of a dual pricing scan: which basic row leaves, which bound it
+/// violates, and by how much.
 pub const DualLeavingChoice = struct {
     row: u32,
     bound: basis.BasisStatus,
     violation: f64,
 };
+
 pub const Pricing = struct {
     rule: PricingRule = .devex,
-    devex_reset_period: usize = 100,
+    devex_reset_period: usize = 100, // Devex weights are reset after this many iterations
     iterations: usize = 0,
     /// Persistent segmented-pricing cursor. A segment is selected once per
     /// pricing operation; only an all-segment miss can certify optimality.
-    partial_candidate_count: usize = 0,
-    partial_cached_searches: usize = 0,
-    partial_refill_interval: usize = 1,
-    partial_searches: usize = 0,
-    partial_scanned_entries: usize = 0,
-    partial_full_scans: usize = 0,
+    partial_candidate_count: usize = 0, // Live entries in the candidate pool
+    partial_cached_searches: usize = 0, // Scans served from the pool since last refill
+    partial_refill_interval: usize = 1, // Max cached searches before a forced refill
+    partial_searches: usize = 0, // Total pricing calls (cached + full)
+    partial_scanned_entries: usize = 0, // Total nonzeros inspected across all scans
+    partial_full_scans: usize = 0, // Number of full refill scans performed
 
+    /// Clear all partial-pricing statistics (called between solves).
     pub fn resetPartial(self: *Pricing) void {
         self.partial_candidate_count = 0;
         self.partial_cached_searches = 0;
@@ -31,6 +42,8 @@ pub const Pricing = struct {
         self.partial_full_scans = 0;
     }
 
+    /// Apply the rule-specific normalization: Dantzig uses the raw violation,
+    /// weighted rules divide by sqrt(weight) to approximate the steepest edge.
     fn normalizedScore(self: Pricing, violation: f64, weight: f64) f64 {
         return switch (self.rule) {
             .dantzig, .partial => violation,
@@ -38,6 +51,7 @@ pub const Pricing = struct {
         };
     }
 
+    /// Simplest Dantzig scan: pick the column with the largest |reduced cost|.
     pub fn chooseEntering(self: *Pricing, reduced_cost: []const f64, tolerance: f64) ?u32 {
         self.iterations += 1;
         var best: ?u32 = null;
@@ -76,6 +90,7 @@ pub const Pricing = struct {
         return choice.column;
     }
 
+    /// Same as `choosePrimalEntering` but also returns the primal direction.
     pub fn choosePrimalEnteringDirection(self: *Pricing, reduced_cost: []const f64, status: []const basis.BasisStatus, tolerance: f64) ?EnteringChoice {
         return self.choosePrimalEnteringWeighted(reduced_cost, status, &.{}, tolerance);
     }
@@ -146,6 +161,7 @@ pub const Pricing = struct {
         self.iterations += 1;
         self.partial_searches += 1;
 
+        // Try to serve the request from the cached pool first.
         if (self.partial_candidate_count != 0 and
             (self.partial_refill_interval == 0 or self.partial_cached_searches < self.partial_refill_interval))
         {
@@ -172,6 +188,7 @@ pub const Pricing = struct {
             }
         }
 
+        // Pool exhausted (or first call): perform a full scan and refill.
         var best: ?EnteringChoice = null;
         var best_score = tolerance;
         var count: usize = 0;
@@ -193,8 +210,12 @@ pub const Pricing = struct {
         return best;
     }
 
+    /// Intermediate result for one primal candidate: its violation magnitude
+    /// and the direction that improves the objective.
     const PrimalCandidate = struct { violation: f64, direction: f64 };
 
+    /// Compute the violation and direction for a single (value, status) pair.
+    /// Returns null when the column is not eligible to enter.
     fn primalCandidate(value: f64, column_status: basis.BasisStatus, tolerance: f64) ?PrimalCandidate {
         return switch (column_status) {
             .at_lower => if (-value > tolerance) .{ .violation = -value, .direction = 1 } else null,
@@ -212,8 +233,8 @@ pub const Pricing = struct {
         reduced_cost: []const f64,
         status: []const basis.BasisStatus,
         edge_weight: []const f64,
-        column_rank: []const f64,
-        taboo_until: []const usize,
+        column_rank: []const f64, // Deterministic tie-break rank per column
+        taboo_until: []const usize, // Iteration until which a column is forbidden
         current_iteration: usize,
         tolerance: f64,
     ) ?EnteringChoice {
@@ -237,6 +258,8 @@ pub const Pricing = struct {
             };
             const weight = if (edge_weight.len == 0) 1.0 else edge_weight[column];
             const score = self.normalizedScore(violation, weight);
+            // Accept a new candidate when it strictly improves the score, or
+            // when it ties within tolerance and has a lexicographically smaller rank.
             if (score > best_score + tolerance or
                 (score > tolerance and @abs(score - best_score) <= tolerance and rank < best_rank))
             {
@@ -259,6 +282,8 @@ pub const Pricing = struct {
         return self.chooseDualLeavingWeighted(value, lower, upper, &.{}, tolerance);
     }
 
+    /// Weighted dual pricing. Score is the bound violation normalized by the
+    /// row's edge weight; the largest score wins.
     pub fn chooseDualLeavingWeighted(self: *Pricing, value: []const f64, lower: []const f64, upper: []const f64, edge_weight: []const f64, tolerance: f64) ?DualLeavingChoice {
         if (value.len != lower.len or value.len != upper.len) return null;
         if (edge_weight.len != 0 and edge_weight.len != value.len) return null;
