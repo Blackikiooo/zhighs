@@ -420,3 +420,120 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   同时报告 warmup 后多轮 median、p95、requested bytes 和 peak RSS。
 - [ ] 对第 5 节 baseline、各阶段提交和最终结果生成可由 git 追踪的对比报告，
   明确性能改善、回退、已知失败和下一轮优化候选。
+
+## 8. 下一阶段严格执行顺序（2026-07-19 外部评审，已对齐 7.1）
+
+本节规定第 7 节（含 7.1）剩余项的唯一执行顺序，禁止并行挑选。第 7 节与 7.1
+未勾选项的对应关系：三个 zhighs-only 超时、`dfl001`/`pilot87` 重分类、
+Devex/PSE corpus A/B 与 hyper-sparse FTRAN/BTRAN → 8.1；Phase-II primal/dual
+自动选择及其 scale-aware dual Phase I 前置研究 → 8.5；可逆 LP presolve → 8.3；
+`stocfor3`/`truss`/QAP 锁定、CLP runner、Mittelmann 与各汇总报告 → 8.4。
+完成 8.x 工作即勾选第 7 节/7.1 对应条目，第 7 节不因本节的存在而跳过。
+评审结论：归因先行、显式 A/B、拒绝特判、证书只出自无扰动 fresh rebuild 的
+方法学有效，当前未偏离轨道。以下约束继续有效，违反即视为回退：
+
+- 禁止按模型名称特判；禁止放宽 feasibility/pivot/residual 容差换取通过。
+- 已被数据拒绝的方案不得重新引入：一列 Devex 近似、8-update 候选缓存
+  （`scrs8` factorization failure）、2x dual Phase-I working radius、dual
+  Phase I 默认启用、LTSSF/Bixby 默认 crash、无守卫的 taboo 自动分发。
+- 任何启发式的最终状态与 certificate 必须来自原始坐标下的 fresh rebuild/reprice。
+
+### 8.1 P0：关闭三个 zhighs-only 超时（d2q06c、fit2p、pilot）
+
+7.1 已完成本轮算法实现（均为 forcing 模式且 40 模型 gate 通过）：primal
+Devex framework（`brandy` 1519 → 498 iterations、median 22.87 → 9.70 ms）、
+dual DSE→Devex fallback（`scsd1` 181 → 115 iterations）、multiple pricing
+（`pilot` 28,241 → 19,895 iterations、7.70 s，进入 10 秒帽内）。三个宽模型的
+第一轮归因见 `bench/simplex/partial_pricing_results.md`：PRICE 占比
+`dfl001` 35% / `fit2p` 28% / `pilot` 23%；`fit2p` 为 perturbation 主导
+（仅 256 次 pool search），`dfl001` Phase I 高退化。剩余关口严格按序：
+
+- [ ] 解决 `d2q06c`/`d6cube` 解压文件缺失：重复 A/B harness 必须复用 stage7
+  的 SHA-256 锁定与 emps 解码路径，禁止手工放置未锁定文件。
+- [ ] 完成新 pricing 机制的 93 模型 corpus A/B（forcing 单模式与组合）。
+  验收：`d2q06c`（98,703 iterations / 17.9 s）、`d6cube`（61,506 / 6.39 s）
+  的 iterations 与完整 solve 同时显著下降，88 个已完成模型的
+  status/objective/residual 不回退；`fit2p` 在 multiple pricing 下的总时间
+  回退（5.297 → 5.715 s）先归因再决定是否进入组合。
+- [ ] corpus A/B 通过后才允许默认化；激活规则按宽度/退化 epoch/refill 收益
+  确定性判定（7.1 结论），禁止模型名分发。
+- [ ] 60 秒复跑 `dfl001`、`pilot87` 完成分类（HiGHS 在 10 秒同样超时），以
+  证据选定最终 Netlib 时限；禁止把 timeout 直接记为失败。同步补齐 `fit2p`
+  的 Phase-I 退化归因 trace 与 `dfl001` 的 Phase-I 高退化归因。
+- [ ] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API 并
+  补齐 FT-update-aware reachability（自 7.1 移入，作为宽退化模型的内核杠杆）；
+  密度只在粗粒度 solve 边界判定，本项不得被 8.5 的研究进度阻塞。
+
+### 8.2 P1：默认化口径与守卫可观测性
+
+- [ ] 在首轮 84 个公共完成模型子集上重算 median/p95，隔离 `.automatic` 默认化
+  （weighted entering + 256-pivot 迟滞）对无退化模型的净开销；median 回退超过
+  5% 必须归因到具体路径。
+- [ ] 为 `restartSolveWithoutPerturbation`/`restartPhaseOneWithoutPerturbation`
+  增加 stats 计数（当前冷回退重置时钟与统计，最坏 2× 预算且丢失 epoch 归因）。
+- [ ] 将 published primal/dual residual 上限（当前实测 9.93e-8 / 5.30e-8）作为
+  corpus gate 的显式断言。
+
+### 8.3 P2：可逆 LP presolve（8.1 关闭前不得启动）
+
+presolve 改变 simplex 的输入问题；在定价迭代差距关闭前引入会使 raw Netlib
+A/B 失去可归因性。7.1 将 presolve 置于全部算法路径之后的门径与本节一致且更
+严格，以本节为准：8.1 关闭即解除阻塞。启动后按根 todo 顺序：fixed column、
+empty row/column、singleton row + primal/dual/ray/certificate postsolve，并以
+presolve 开关前后状态与目标一致为验收。
+
+### 8.4 P3：对照与报告（正确性 gate 稳定后）
+
+- [ ] 获取并锁定 `stocfor3`、`truss`、QAP8/QAP12/QAP15。
+- [ ] 固定版本 CLP runner，重复 status/objective/certificate 三方对照。
+- [ ] 获取并锁定 Mittelmann corpus，设置 timeout 与 memory cap。
+- [ ] warmup 多轮 median/p95、requested bytes、peak RSS 汇总报告。
+
+### 8.5 scale-aware dual Phase I（研究轨道，不阻塞 8.1）
+
+作为 7.1 "Phase-II primal/dual 自动选择" 的前置研究可继续推进（scale-aware
+working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但：
+
+- 不得阻塞 8.1 的 corpus A/B、默认化决策与 hyper-sparse 接入。
+- Phase-II 自动选择若评估默认化，须具备与 8.1 同级的完整 corpus A/B 证据；
+  logical/crash basis 既非 primal 亦非 dual feasible 时，必须先得到经验证的
+  可行 basis（7.1 约束继续有效）。
+- `brandy` 推进 140 pivots 后的回退原因（169 个 wrong-sign move、仅 3 个可
+  flip move）需先闭环；已拒绝的 2x working radius 不得重引。
+
+### 8.6 外部评审：对标 HiGHS 的现状评估（2026-07-19）
+
+本节是优先级判断依据。其中的百分比为基于实测数据的结构化判断而非测量值，
+真正的检验点是 8.1 的 corpus A/B 结果；评估随 A/B 数据更新。
+
+现状分解（实测）：
+
+- 共同完成模型总耗时：按模型比值的中位数 zhighs/HiGHS 为 1.21x，p95 为
+  8.68x（双方 serial simplex、presolve-off；总耗时中位数 39.19 vs 25.39 ms）。
+  中位数差距小说明逐次迭代的内核速度已接近 HiGHS；差距集中在退化密集模型
+  的迭代数（`d2q06c` 98.7k 次 vs HiGHS 10 秒内完成）。
+- 单次迭代耗时与 HiGHS 同量级：`brandy` 1,519 iterations / 23 ms 对 HiGHS
+  约 304 iterations。
+- 7.1 已初步验证杠杆有效：primal Devex framework 使 `brandy` 1519 → 498
+  iterations（22.87 → 9.70 ms）；multiple pricing 使 `pilot` 进入 10 秒帽内。
+  二者尚未通过 corpus A/B，默认化前不作为既定收益。
+
+三种口径的超越概率评估：
+
+1. presolve-off serial simplex 中位数口径：约 60–70%。差距约 20%，完整
+   Devex/PSE 递推是历史上对退化问题降低 5–10x 迭代的标准手段，7.1 的
+   single-model 证据初步支持，8.1 corpus A/B 是直接检验。
+2. Netlib 全 corpus（含尾部）追平或超过：约 40–50%。`fit2p`/`dfl001` 尚未
+   完全归因，尾部病态退化 LP 在 Devex/PSE 落地后仍可能残留差距。
+3. 默认配置 HiGHS（presolve 开启）：短期低于 20%。presolve 是分水岭（8.3），
+   其落地并通过 postsolve 验证后本口径可重估至 40–50%。
+
+关键风险与评估更新条件：
+
+- Devex/PSE 收益依赖实现质量（reference framework 重建策略、精确刷新周期）；
+  一列近似与 8-update 候选缓存均被数据拒绝，说明陷阱真实存在。
+- HiGHS 默认走 dual simplex + steepest-edge；zhighs dual 路径成熟度不及
+  primal，对标默认口径时 dual 侧是隐性工作量。
+- 若 8.1 corpus A/B 使 `d2q06c`/`d6cube` 的 iterations 与完整 solve 同时显著
+  下降，口径 2 上调；若收益不足，禁止继续叠加启发式，回到归因阶段重新评估
+  定价路径。
