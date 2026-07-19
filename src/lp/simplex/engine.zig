@@ -1226,6 +1226,7 @@ pub const SimplexEngine = struct {
         basis.primal[entering_col] = entering_value;
         basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
         basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
+        self.dual_phase_one.notePivot(entering_col, leaving_col, leaving_bound);
         if (self.devex_reset_after_pivot) {
             self.initializePrimalDevexFramework();
             self.devex_reset_after_pivot = false;
@@ -1607,6 +1608,7 @@ pub const SimplexEngine = struct {
                 basis.tableau[0..original_cols],
                 basis.reduced_cost[0..original_cols],
                 basis.col_status[0..original_cols],
+                &.{},
                 basis.col_lower[0..original_cols],
                 basis.col_upper[0..original_cols],
                 basis.primal[0..original_cols],
@@ -1703,6 +1705,7 @@ pub const SimplexEngine = struct {
                 basis.tableau[0..original_count],
                 basis.reduced_cost[0..original_count],
                 basis.col_status[0..original_count],
+                self.dual_phase_one.nonbasic_move[0..original_count],
                 basis.col_lower[0..original_count],
                 basis.col_upper[0..original_count],
                 basis.primal[0..original_count],
@@ -1711,6 +1714,14 @@ pub const SimplexEngine = struct {
                 basis.dual_ratio[0..original_count],
                 basis.dual_direction[0..original_count],
                 basis.flip_columns[0..original_count],
+            );
+            self.dual_phase_one.recordRemainingViolation(
+                @intCast(leaving.row),
+                leaving.violation,
+                basis.tableau[0..original_count],
+                basis.flip_columns[0..entering.flip_count],
+                basis.col_lower[0..original_count],
+                basis.col_upper[0..original_count],
             );
             if (entering.column == null)
                 self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_count);
@@ -2255,6 +2266,7 @@ pub const SimplexEngine = struct {
                 basis.tableau[0..original_cols],
                 basis.reduced_cost[0..original_cols],
                 basis.col_status[0..original_cols],
+                &.{},
                 basis.col_lower[0..original_cols],
                 basis.col_upper[0..original_cols],
                 basis.primal[0..original_cols],
@@ -2409,6 +2421,7 @@ pub const SimplexEngine = struct {
             };
             basis.primal[column] += delta;
             basis.col_status[column] = if (delta > 0.0) .at_upper else .at_lower;
+            self.dual_phase_one.noteBoundFlip(column);
         }
         for (basis.basic_index, basis.basic_value) |basic_column, value| basis.primal[basic_column] = value;
         return .optimal;

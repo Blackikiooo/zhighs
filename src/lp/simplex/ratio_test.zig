@@ -117,6 +117,7 @@ pub const RatioTest = struct {
         tableau: []const f64,
         reduced_cost: []const f64,
         status: []const basis.BasisStatus,
+        nonbasic_move: []const i8,
         lower: []const f64,
         upper: []const f64,
         primal: []const f64,
@@ -130,6 +131,7 @@ pub const RatioTest = struct {
         if (reduced_cost.len < count or status.len < count or lower.len < count or upper.len < count or
             primal.len < count or ratio_work.len < count or direction_work.len < count or candidate_work.len < count)
             return .{};
+        if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
 
         var candidate_count: usize = 0;
         for (0..count) |column| {
@@ -138,9 +140,12 @@ pub const RatioTest = struct {
             const alpha = tableau[column];
             if (@abs(alpha) <= self.tolerance) continue;
 
-            const direction: f64 = switch (status[column]) {
-                .at_lower => 1.0,
-                .at_upper => -1.0,
+            const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
+            const direction: f64 = if (explicit_move != 0)
+                @floatFromInt(explicit_move)
+            else switch (status[column]) {
+                .at_lower => if (nonbasic_move.len == 0) 1.0 else continue,
+                .at_upper => if (nonbasic_move.len == 0) -1.0 else continue,
                 .free, .superbasic => if (leaving_bound == .at_lower)
                     (if (alpha < 0.0) 1.0 else -1.0)
                 else
@@ -227,6 +232,7 @@ test "dual bound-flipping ratio test records boxed breakpoints" {
         &[_]f64{ -1, -1 },
         &[_]f64{ 0, 2 },
         &[_]basis.BasisStatus{ .at_lower, .at_lower },
+        &.{},
         &[_]f64{ 0, 0 },
         &[_]f64{ 1, std.math.inf(f64) },
         &[_]f64{ 0, 0 },
@@ -249,6 +255,7 @@ test "dual ratio ties use the lowest column index" {
         &[_]f64{ -1, -2 },
         &[_]f64{ 1, 2 },
         &[_]basis.BasisStatus{ .at_lower, .at_lower },
+        &.{},
         &[_]f64{ 0, 0 },
         &[_]f64{ std.math.inf(f64), std.math.inf(f64) },
         &[_]f64{ 0, 0 },
@@ -260,4 +267,27 @@ test "dual ratio ties use the lowest column index" {
     );
     try std.testing.expectEqual(@as(?u32, 0), choice.column);
     try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
+}
+
+test "dual Phase-I explicit move overrides bound-status direction" {
+    const test_rule = RatioTest{ .rule = .standard, .tolerance = 1e-9 };
+    var ratios: [1]f64 = undefined;
+    var directions: [1]f64 = undefined;
+    var candidates: [1]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &.{1},
+        &.{1},
+        &.{.at_lower},
+        &.{-1},
+        &.{0},
+        &.{std.math.inf(f64)},
+        &.{0},
+        .at_lower,
+        1,
+        &ratios,
+        &directions,
+        &candidates,
+    );
+    try std.testing.expectEqual(@as(?u32, 0), choice.column);
+    try std.testing.expectApproxEqAbs(@as(f64, -1), choice.direction, 0);
 }

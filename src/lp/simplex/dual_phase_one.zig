@@ -14,6 +14,11 @@ pub const DualPhaseOneWorkspace = struct {
     work_cost: []f64 = &.{},
     dual_infeasibility: []f64 = &.{},
     perturbation: []f64 = &.{},
+    /// Explicit Phase-I nonbasic direction: +1 moves up from the lower
+    /// bound, -1 moves down from the upper bound, and zero is basic/fixed/free.
+    nonbasic_move: []i8 = &.{},
+    /// Residual basic-bound violation after the current ratio-test flip set.
+    remaining_violation: []f64 = &.{},
     basis_epoch: u64 = 0,
     /// Basic-coordinate envelope in the engine's scaled coordinates when the
     /// current Phase-I epoch was installed.
@@ -30,6 +35,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.work_cost);
         self.allocator.free(self.dual_infeasibility);
         self.allocator.free(self.perturbation);
+        self.allocator.free(self.nonbasic_move);
+        self.allocator.free(self.remaining_violation);
         self.* = .{ .allocator = self.allocator };
     }
 
@@ -47,17 +54,25 @@ pub const DualPhaseOneWorkspace = struct {
         errdefer self.allocator.free(infeasibility);
         const perturbation = try self.allocator.alloc(f64, count);
         errdefer self.allocator.free(perturbation);
+        const move = try self.allocator.alloc(i8, count);
+        errdefer self.allocator.free(move);
+        const remaining = try self.allocator.alloc(f64, count);
+        errdefer self.allocator.free(remaining);
 
         self.allocator.free(self.saved_lower);
         self.allocator.free(self.saved_upper);
         self.allocator.free(self.work_cost);
         self.allocator.free(self.dual_infeasibility);
         self.allocator.free(self.perturbation);
+        self.allocator.free(self.nonbasic_move);
+        self.allocator.free(self.remaining_violation);
         self.saved_lower = lower;
         self.saved_upper = upper;
         self.work_cost = cost;
         self.dual_infeasibility = infeasibility;
         self.perturbation = perturbation;
+        self.nonbasic_move = move;
+        self.remaining_violation = remaining;
     }
 
     pub fn begin(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, original_count: usize) !void {
@@ -66,6 +81,8 @@ pub const DualPhaseOneWorkspace = struct {
         @memcpy(self.saved_upper[0..original_count], basis.col_upper[0..original_count]);
         @memset(self.dual_infeasibility[0..original_count], 0.0);
         @memset(self.perturbation[0..original_count], 0.0);
+        @memset(self.nonbasic_move[0..original_count], 0);
+        @memset(self.remaining_violation[0..original_count], 0.0);
         self.basis_epoch +%= 1;
         self.active = true;
     }
@@ -143,15 +160,19 @@ pub const DualPhaseOneWorkspace = struct {
             if (basis.col_lower[column] == basis.col_upper[column]) {
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = basis.col_lower[column];
+                self.nonbasic_move[column] = 0;
             } else if (!lower_finite and !upper_finite) {
                 basis.col_status[column] = .free;
                 basis.primal[column] = 0.0;
+                self.nonbasic_move[column] = 0;
             } else if (!lower_finite) {
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = basis.col_upper[column];
+                self.nonbasic_move[column] = -1;
             } else if (!upper_finite) {
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = basis.col_lower[column];
+                self.nonbasic_move[column] = 1;
             } else {
                 // Preserve the original boxed move. Cost correction performed
                 // before this transition makes either move dual feasible.
@@ -159,6 +180,7 @@ pub const DualPhaseOneWorkspace = struct {
                     basis.col_upper[column]
                 else
                     basis.col_lower[column];
+                self.nonbasic_move[column] = if (basis.col_status[column] == .at_upper) -1 else 1;
             }
         }
         for (basis.basic_index, 0..) |column, row| {
@@ -200,12 +222,54 @@ pub const DualPhaseOneWorkspace = struct {
         self.active = false;
     }
 
+    pub fn noteBoundFlip(self: *DualPhaseOneWorkspace, column: usize) void {
+        if (!self.active or column >= self.nonbasic_move.len) return;
+        self.nonbasic_move[column] = -self.nonbasic_move[column];
+    }
+
+    pub fn notePivot(
+        self: *DualPhaseOneWorkspace,
+        entering_column: usize,
+        leaving_column: usize,
+        leaving_bound: basis_module.BasisStatus,
+    ) void {
+        if (!self.active or entering_column >= self.nonbasic_move.len or leaving_column >= self.nonbasic_move.len) return;
+        self.nonbasic_move[entering_column] = 0;
+        self.nonbasic_move[leaving_column] = switch (leaving_bound) {
+            .at_lower => 1,
+            .at_upper => -1,
+            .fixed => 0,
+            else => 0,
+        };
+    }
+
+    pub fn recordRemainingViolation(
+        self: *DualPhaseOneWorkspace,
+        row: usize,
+        violation: f64,
+        tableau: []const f64,
+        flip_columns: []const u32,
+        lower: []const f64,
+        upper: []const f64,
+    ) void {
+        if (!self.active or row >= self.remaining_violation.len) return;
+        var corrected: f64 = 0.0;
+        for (flip_columns) |column_u32| {
+            const column: usize = @intCast(column_u32);
+            if (column >= tableau.len or column >= lower.len or column >= upper.len) continue;
+            corrected += @abs(tableau[column]) * (upper[column] - lower[column]);
+        }
+        self.remaining_violation[row] = @max(violation - corrected, 0.0);
+    }
+
     pub fn requestedBytes(self: *const DualPhaseOneWorkspace) usize {
         return std.mem.sliceAsBytes(self.saved_lower).len +
             std.mem.sliceAsBytes(self.saved_upper).len +
             std.mem.sliceAsBytes(self.work_cost).len +
             std.mem.sliceAsBytes(self.dual_infeasibility).len +
-            std.mem.sliceAsBytes(self.perturbation).len;
+            std.mem.sliceAsBytes(self.perturbation).len +
+            std.mem.sliceAsBytes(self.nonbasic_move).len +
+            std.mem.sliceAsBytes(self.remaining_violation).len;
     }
 };
 
@@ -223,8 +287,32 @@ test "dual Phase-I workspace maps lower, upper, free and boxed bounds" {
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -1.0, -1.0, -1.0 }, basis.col_lower[0..4]);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 1.0, 1.0 }, basis.col_upper[0..4]);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, 0.0, -1.0 }, basis.primal[0..4]);
+    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 0, 1 }, workspace.nonbasic_move[0..4]);
+    workspace.noteBoundFlip(0);
+    try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[0]);
+    workspace.notePivot(1, 3, .at_upper);
+    try std.testing.expectEqual(@as(i8, 0), workspace.nonbasic_move[1]);
+    try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[3]);
     workspace.restoreOriginalBounds(&basis, 4);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -std.math.inf(f64), -std.math.inf(f64), -2.0 }, basis.col_lower[0..4]);
+}
+
+test "dual Phase-I records violation left after bound flips" {
+    var workspace = DualPhaseOneWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    var basis = try basis_module.BasisState.init(std.testing.allocator, 1, 1);
+    defer basis.deinit();
+    try workspace.begin(&basis, 2);
+
+    workspace.recordRemainingViolation(
+        0,
+        10,
+        &.{ 2, -1 },
+        &.{0},
+        &.{ 0, 0 },
+        &.{ 3, 4 },
+    );
+    try std.testing.expectApproxEqAbs(@as(f64, 4), workspace.remaining_violation[0], 1e-12);
 }
 
 test "dual Phase-I working radius covers scaled basic coordinates and violation" {
