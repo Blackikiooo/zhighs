@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     const degeneracy_strategy: zhighs.lp.simplex.engine.DegeneracyStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "perturb")) .perturbation else if (std.mem.eql(u8, text, "taboo")) .perturbation_taboo else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "baseline")) .baseline else return error.InvalidArguments
     else
-        .baseline;
+        .automatic;
     const phase_one_pricing: zhighs.lp.simplex.engine.PhaseOnePricingStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "dantzig")) .dantzig else if (std.mem.eql(u8, text, "devex")) .devex else if (std.mem.eql(u8, text, "steepest")) .steepest_edge else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
     else
@@ -338,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
 
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",
+        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\ttaboo_retries={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",
         .{
             path,
             simplex_stats.classifiedDegeneratePivots(),
@@ -353,6 +353,7 @@ pub fn main(init: std.process.Init) !void {
             simplex_stats.perturbation_expirations,
             simplex_stats.perturbation_cleanups,
             simplex_stats.taboo_records,
+            simplex_stats.taboo_retries,
             engine.exact_reprices,
             engine.maximum_reduced_cost_drift,
         },

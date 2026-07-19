@@ -329,9 +329,19 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   两类兼容问题，并以 `gfrd-pnc`、`sierra` objective 对照确认未再静默丢失 bounds。
 - [ ] 获取并锁定 `stocfor3`、`truss` 与 QAP8/QAP12/QAP15 五个特殊生成模型；在此之前
   “93/93 可解析”不得表述为完整 Netlib 已通过。
-- [ ] 处理首轮暴露的 `modszk1`、`scsd8`、`wood1p` 数值失败、`tuff` Phase-I 循环及
-  大模型超时；强制 perturbation 已修复 `scsd8`/`wood1p`，但 taboo 在 `tuff`/`wood1p`
-  产生错误 infeasible，未通过默认启用门槛。
+- [x] 修复首轮 `modszk1`、`scsd8`、`wood1p` 数值失败和 `tuff` Phase-I 循环：采用
+  有界 primal perturbation、256 次 automatic 迟滞、taboo 无排除重试、统一 artificial
+  Phase-I 重装及终态 baseline 冷回退。93 模型从 84 optimal / 3 numerical failure /
+  6 timeout 改善到 88 / 0 / 5，88 个完成模型 objective 全部匹配 HiGHS。
+- [x] 降低已指定长尾的 pivot 数：`brandy 3384 -> 1519`、`d6cube 101442 -> 61506`、
+  `d2q06c 100941 -> 98703`；后者仍超过 10 秒，继续列为性能任务而非正确性失败。
+- [ ] 继续处理 `d2q06c`、`fit2p`、`pilot` 三个 zhighs-only 10 秒超时；`dfl001`、
+  `pilot87` 在相同时限下 HiGHS 也超时，需在最终时限确定后重新分类。
+- [ ] 实现完整 Devex 或 projected steepest-edge recurrence 并做 corpus A/B；只更新
+  leaving-column weight 的局部近似已实测回退并删除，禁止重新引入。
+- [ ] 实现可逆 LP presolve（fixed column、empty row/column、singleton row 起步）及
+  primal/dual/ray/certificate postsolve；现有 row/column/objective scaling 已完成并继续
+  使用，但不能把 scaling 等同于 presolve 完成。
 - [ ] 增加固定版本 CLP runner；当前环境没有 CLP，因此只允许报告 zhighs/HiGHS 的
   阶段性数据，不能勾选三方完整对照。
 

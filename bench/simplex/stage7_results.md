@@ -109,12 +109,65 @@ Forced taboo mode produces false infeasible conclusions on `tuff` and
 default. The next change must fix or guard its certificate path before any
 automatic dispatch is considered.
 
+## Validated bounded perturbation update
+
+The initial A/B above is retained as the discovery baseline. A subsequent
+implementation changed perturbation ranks from tie-order-only metadata into
+bounded positive primal margins, while preserving three correctness guards:
+
+1. taboo exhaustion is retried without exclusions before Phase I may stop;
+2. perturbed Phase-I infeasibility restores the logical basis and reinstalls
+   the exact same artificial-column construction used by the initial solve;
+3. failed optimal/unbounded validation cold-restarts the baseline policy.
+
+Automatic mode waits for 256 consecutive degenerate pivots before activating;
+the explicit perturb mode retains the earlier trigger for controlled A/B.
+This separates long faces from frequent short local ties.
+
+Targeted ReleaseFast results are:
+
+| Model | Previous default | Automatic bounded perturbation |
+| --- | ---: | ---: |
+| `tuff` | 1,000,000 iteration limit | optimal, 1,068 iterations, 29 ms |
+| `modszk1` | factorization failure at 18,683 | optimal, 6,448 iterations, 242 ms |
+| `brandy` | 3,384 iterations | optimal, 1,519 iterations, 23 ms |
+| `scsd8` | optimality-check failure | optimal, 3,655 iterations, 133 ms |
+| `wood1p` | factorization failure at 2,281 | optimal, 802 iterations, 90 ms |
+| `d6cube` | 101,442 iterations, 11.9 s | 61,506 iterations, 6.39 s |
+| `d2q06c` | 100,941 iterations, 21.3 s | 98,703 iterations, 17.9 s |
+
+The 40-model status/objective/residual/ray gate passes in automatic mode. A
+fresh 93-model run with a 10-second process cap reports:
+
+| Solver/policy | Optimal | Numerical failure | Timeout |
+| --- | ---: | ---: | ---: |
+| previous zhighs baseline | 84 | 3 | 6 |
+| zhighs automatic bounded perturbation | 88 | 0 | 5 |
+| pinned HiGHS reference | 91 | 0 | 2 |
+
+All 88 completed zhighs objectives match the pinned HiGHS results at `1e-7`
+relative tolerance. Maximum published primal and dual residuals are
+`9.93e-8` and `5.30e-8`. The remaining zhighs timeouts are `d2q06c`,
+`dfl001`, `fit2p`, `pilot`, and `pilot87`; HiGHS also times out on `dfl001`
+and `pilot87` under the same initial cap, leaving three zhighs-only long-tail
+cases. Single-pass corpus median and p95 total times are 43.20 ms and 5.36 s.
+
+An isolated attempt to update only the new nonbasic leaving-column Devex
+weight increased `d6cube` to 136,676 iterations and `d2q06c` to 114,097. It
+was rejected and removed: a production replacement must implement the full
+Devex or projected steepest-edge recurrence, not a one-column approximation.
+
 ## Open acceptance gates
 
 - Acquire and lock the five official Netlib special/generated cases.
 - Add a pinned CLP runner and repeat status/objective/certificate comparison.
-- Fix or explicitly classify the three baseline numerical failures and the
-  `tuff` Phase-I cycle; rerun the entire locked corpus after every fix.
+- Reduce the three zhighs-only 10-second long tails: `d2q06c`, `fit2p`, and
+  `pilot`. The former already improves from 100,941 to 98,703 iterations but
+  remains outside the initial cap.
+- Implement and A/B a complete Devex/projected steepest-edge recurrence; the
+  rejected one-column approximation must not be reintroduced.
+- Add reversible LP presolve (at minimum fixed columns, empty rows/columns and
+  singleton rows) with primal/dual/ray/certificate postsolve validation.
 - Finish 60-second classification for the large models, then choose the final
   Netlib timeout from evidence rather than converting timeout to failure.
 - Acquire and lock the Mittelmann corpus, set both timeout and memory caps, and

@@ -171,9 +171,10 @@ pub const SolveControl = struct {
     /// Optional structural-column cap for deterministic crash-prefix A/B.
     /// Null uses the longest numerically valid prefix within the logical-anchor limit.
     crash_max_columns: ?usize = null,
-    /// Degenerate-pivot policy. Automatic remains baseline until corpus A/B
-    /// demonstrates a robust full-solve improvement.
-    degeneracy_strategy: DegeneracyStrategy = .baseline,
+    /// Degenerate-pivot policy. Automatic enables bounded perturbation after
+    /// the anti-cycling trigger; terminal validation cold-restarts baseline if
+    /// the perturbed epoch cannot publish a valid status or certificate.
+    degeneracy_strategy: DegeneracyStrategy = .automatic,
     phase_one_pricing: PhaseOnePricingStrategy = .inherit,
     adaptive_reprice: bool = false,
     /// Select once per pricing operation; no representation branch exists in
@@ -217,6 +218,7 @@ pub const SimplexStats = struct {
     perturbation_expirations: usize = 0,
     perturbation_cleanups: usize = 0,
     taboo_records: usize = 0,
+    taboo_retries: usize = 0,
     aq_samples: usize = 0,
     aq_nonzeros: usize = 0,
     ep_samples: usize = 0,
@@ -369,7 +371,7 @@ pub const SimplexEngine = struct {
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
-            .automatic => .baseline,
+            .automatic => .automatic,
             .baseline => .baseline,
             .perturbation => .perturbation,
             .perturbation_taboo => .perturbation_taboo,
@@ -504,43 +506,7 @@ pub const SimplexEngine = struct {
             self.iterations = 0;
         }
         self.algorithm = .primal_revised;
-        if (self.basis) |*basis| {
-            self.phase1_needed = false;
-            for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |*value, lower, upper, row| {
-                const logical_col = problem.num_cols + row;
-                const artificial_col = problem.num_cols + problem.num_rows + row;
-                if (!std.math.isFinite(value.*)) return .numerical_failure;
-                if (value.* < lower - self.numerical.primal_tolerance) {
-                    basis.primal[logical_col] = lower;
-                    basis.col_status[logical_col] = .at_lower;
-                    basis.basic_pos[logical_col] = std.math.maxInt(u32);
-                    basis.artificial_sign[row] = -1.0;
-                    value.* = lower - value.*;
-                    basis.basic_index[row] = @intCast(artificial_col);
-                    basis.basic_pos[artificial_col] = @intCast(row);
-                    basis.col_status[artificial_col] = .basic;
-                    basis.col_upper[artificial_col] = std.math.inf(f64);
-                    basis.basic_lower[row] = 0.0;
-                    basis.basic_upper[row] = std.math.inf(f64);
-                    self.phase1_needed = true;
-                } else if (value.* > upper + self.numerical.primal_tolerance) {
-                    basis.primal[logical_col] = upper;
-                    basis.col_status[logical_col] = .at_upper;
-                    basis.basic_pos[logical_col] = std.math.maxInt(u32);
-                    basis.artificial_sign[row] = 1.0;
-                    value.* -= upper;
-                    basis.basic_index[row] = @intCast(artificial_col);
-                    basis.basic_pos[artificial_col] = @intCast(row);
-                    basis.col_status[artificial_col] = .basic;
-                    basis.col_upper[artificial_col] = std.math.inf(f64);
-                    basis.basic_lower[row] = 0.0;
-                    basis.basic_upper[row] = std.math.inf(f64);
-                    self.phase1_needed = true;
-                } else {
-                    basis.primal[logical_col] = value.*;
-                }
-            }
-        }
+        if (self.installArtificialPhaseOneBasis(problem) != .optimal) return .numerical_failure;
         if (self.phase1_needed and self.refactorizeBasis(problem, .phase_one_setup) != .optimal) return .numerical_failure;
         self.numerical.markRefactorized();
         self.iterations = 0;
@@ -574,6 +540,50 @@ pub const SimplexEngine = struct {
             basis.primal[column] = value;
             basis.basic_lower[row] = basis.col_lower[column];
             basis.basic_upper[row] = basis.col_upper[column];
+        }
+        return .optimal;
+    }
+
+    /// Replace each infeasible logical basic with its nonnegative artificial
+    /// column. Initial Phase I and every transactional restart must use this
+    /// exact state transition; rebuilding only the logical identity would
+    /// leave Phase-I costs disconnected from the violated rows.
+    fn installArtificialPhaseOneBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        self.phase1_needed = false;
+        for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |*value, lower, upper, row| {
+            const logical_col = problem.num_cols + row;
+            const artificial_col = problem.num_cols + problem.num_rows + row;
+            if (!std.math.isFinite(value.*)) return .numerical_failure;
+            if (value.* < lower - self.numerical.primal_tolerance) {
+                basis.primal[logical_col] = lower;
+                basis.col_status[logical_col] = .at_lower;
+                basis.basic_pos[logical_col] = std.math.maxInt(u32);
+                basis.artificial_sign[row] = -1.0;
+                value.* = lower - value.*;
+                basis.basic_index[row] = @intCast(artificial_col);
+                basis.basic_pos[artificial_col] = @intCast(row);
+                basis.col_status[artificial_col] = .basic;
+                basis.col_upper[artificial_col] = std.math.inf(f64);
+                basis.basic_lower[row] = 0.0;
+                basis.basic_upper[row] = std.math.inf(f64);
+                self.phase1_needed = true;
+            } else if (value.* > upper + self.numerical.primal_tolerance) {
+                basis.primal[logical_col] = upper;
+                basis.col_status[logical_col] = .at_upper;
+                basis.basic_pos[logical_col] = std.math.maxInt(u32);
+                basis.artificial_sign[row] = 1.0;
+                value.* -= upper;
+                basis.basic_index[row] = @intCast(artificial_col);
+                basis.basic_pos[artificial_col] = @intCast(row);
+                basis.col_status[artificial_col] = .basic;
+                basis.col_upper[artificial_col] = std.math.inf(f64);
+                basis.basic_lower[row] = 0.0;
+                basis.basic_upper[row] = std.math.inf(f64);
+                self.phase1_needed = true;
+            } else {
+                basis.primal[logical_col] = value.*;
+            }
         }
         return .optimal;
     }
@@ -663,7 +673,7 @@ pub const SimplexEngine = struct {
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
-            .automatic => .baseline,
+            .automatic => .automatic,
             .baseline => .baseline,
             .perturbation => .perturbation,
             .perturbation_taboo => .perturbation_taboo,
@@ -1039,13 +1049,12 @@ pub const SimplexEngine = struct {
                 ratio_direction.* = 0.0;
             }
         }
-        // A solve that never entered a perturbation epoch must retain the
-        // proven Bland fallback (notably feasible starts such as kb2). After a
-        // validated Phase-I perturbation cleanup, keep Harris ordering so the
-        // cleaned basis follows the same stable Phase-II path used by the
-        // explicit A/B policy.
+        // Explicit baseline retains the proven Bland fallback (notably
+        // feasible starts such as kb2). Automatic mode keeps Harris during its
+        // 256-pivot hysteresis window, then uses bounded perturbation; this
+        // avoids changing short local ties into weak Bland pivots.
         if (allow_bland and self.numerical.anti_cycling_active and
-            (self.active_degeneracy_strategy == .baseline or !self.degeneracy.ever_active))
+            self.active_degeneracy_strategy == .baseline)
             return self.chooseLeavingBland();
         const choice = if (self.degeneracy.active)
             self.ratio_test.chooseLeavingPerturbed(
@@ -1225,7 +1234,20 @@ pub const SimplexEngine = struct {
             const basis = if (self.basis) |*value| value else return .numerical_failure;
             const original_cols = problem.num_cols + problem.num_rows;
             const pricing_tolerance = self.scaledDualTolerance(problem);
-            const entering = self.choosePrimalEnteringTimed(original_cols, pricing_tolerance) orelse {
+            if (self.prepareDegeneracyPolicy(basis.basic_value.len, original_cols) != .optimal)
+                return .numerical_failure;
+            var entering_candidate = if (self.active_degeneracy_strategy == .baseline)
+                self.choosePrimalEnteringTimed(original_cols, pricing_tolerance)
+            else
+                self.choosePrimalEnteringWeightedTimed(original_cols, pricing_tolerance, true);
+            if (entering_candidate == null and self.active_degeneracy_strategy == .perturbation_taboo and
+                self.degeneracy.active)
+            {
+                self.degeneracy.invalidateTaboo();
+                self.stats.taboo_retries += 1;
+                entering_candidate = self.choosePrimalEnteringWeightedTimed(original_cols, pricing_tolerance, false);
+            }
+            const entering = entering_candidate orelse {
                 // Never certify dual feasibility from an updated BTRAN chain.
                 // Reinvert the unchanged basis once and price again; a stale
                 // transpose solve can otherwise publish a false optimum.
@@ -1239,7 +1261,11 @@ pub const SimplexEngine = struct {
                     continue;
                 }
                 const status = self.finishOptimal(problem);
-                if (status == .numerical_failure) self.failure_site = .optimality_check;
+                if (status == .numerical_failure) {
+                    if (self.active_degeneracy_strategy != .baseline)
+                        return self.restartSolveWithoutPerturbation(problem, control);
+                    self.failure_site = .optimality_check;
+                }
                 return status;
             };
             if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
@@ -1251,23 +1277,29 @@ pub const SimplexEngine = struct {
             // Backward error bounds the full solve but not a tiny pivotal
             // component's forward error. Recompute suspicious pivots from a
             // fresh basis before mutating basis membership.
-            if (leaving.status == .optimal and self.factorization.update_count != 0 and
-                self.pivotNeedsFreshFactorization(leaving.row.?))
-            {
+            if (leaving.status == .optimal and self.pivotNeedsFreshFactorization(leaving.row.?)) {
                 small_pivot_retry = true;
-                // Once a basis exposes a component at the forward-accuracy
-                // boundary, occasional FT updates can steer later ratio tests
-                // onto a different numerical path. Keep reinverting for the
-                // remainder of this solve until column equilibration provides
-                // a stronger scale model.
-                self.fresh_factorization_pivots_remaining = self.numerical.fresh_factorization_recovery_pivots;
-                self.factorization.recordReinversion(.small_pivot);
-                if (self.refactorizeBasis(problem, .small_pivot) != .optimal) return .numerical_failure;
-                if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
-                if (entering.direction < 0) {
-                    for (basis.pivot_direction) |*value| value.* = -value.*;
+                if (self.factorization.update_count != 0) {
+                    // Once a basis exposes a component at the forward-accuracy
+                    // boundary, occasional FT updates can steer later ratio
+                    // tests onto a different numerical path. Recompute from a
+                    // fresh basis before deciding whether the pivot is real.
+                    self.fresh_factorization_pivots_remaining = self.numerical.fresh_factorization_recovery_pivots;
+                    self.factorization.recordReinversion(.small_pivot);
+                    if (self.refactorizeBasis(problem, .small_pivot) != .optimal) return .numerical_failure;
+                    if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
+                    if (entering.direction < 0) {
+                        for (basis.pivot_direction) |*value| value.* = -value.*;
+                    }
+                    leaving = self.chooseLeaving();
                 }
-                leaving = self.chooseLeaving();
+                // A warning that survives fresh FTRAN is not update drift.
+                // Keep Bland's entering choice, but let Harris replace the
+                // numerically weak leaving row before basis membership is
+                // mutated. This prevents a known near-rank pivot from being
+                // handed to reinversion as an already committed basis.
+                if (leaving.status == .optimal and self.pivotNeedsFreshFactorization(leaving.row.?))
+                    leaving = self.chooseLeavingWithPolicy(false);
             }
             const own_step = if (entering.direction > 0)
                 basis.col_upper[entering.column] - basis.primal[entering.column]
@@ -1289,8 +1321,12 @@ pub const SimplexEngine = struct {
                     0,
                 );
             } else {
-                if (leaving.status == .unbounded)
-                    return self.finishUnbounded(problem, entering.column, entering.direction);
+                if (leaving.status == .unbounded) {
+                    const status = self.finishUnbounded(problem, entering.column, entering.direction);
+                    if (status == .numerical_failure and self.active_degeneracy_strategy != .baseline)
+                        return self.restartSolveWithoutPerturbation(problem, control);
+                    return status;
+                }
                 if (leaving.status != .optimal) return leaving.status;
                 const leaving_column = basis.basic_index[@intCast(leaving.row.?)];
                 const objective_change = @abs(basis.reduced_cost[entering.column] * leaving.step);
@@ -1355,7 +1391,12 @@ pub const SimplexEngine = struct {
             );
     }
 
-    fn choosePrimalEnteringWeightedTimed(self: *SimplexEngine, column_count: usize, tolerance: f64) ?pricing_module.EnteringChoice {
+    fn choosePrimalEnteringWeightedTimed(
+        self: *SimplexEngine,
+        column_count: usize,
+        tolerance: f64,
+        respect_taboo: bool,
+    ) ?pricing_module.EnteringChoice {
         const started = self.statisticsTimestamp();
         defer self.recordPricingElapsed(started);
         const basis = if (self.basis) |*value| value else return null;
@@ -1367,7 +1408,7 @@ pub const SimplexEngine = struct {
                 basis.col_status[0..column_count],
                 basis.col_edge_weight[0..column_count],
                 self.degeneracy.column_rank[0..column_count],
-                if (self.active_degeneracy_strategy == .perturbation_taboo)
+                if (respect_taboo and self.active_degeneracy_strategy == .perturbation_taboo)
                     self.degeneracy.taboo_until[0..column_count]
                 else
                     &.{},
@@ -2162,10 +2203,27 @@ pub const SimplexEngine = struct {
             // General bounded Phase I contains artificial columns and is not
             // the standard-form setting required by Bland's proof. Retain the
             // numerically stable Harris candidate set throughout this phase.
-            const entering = self.choosePrimalEnteringWeightedTimed(
+            var entering = self.choosePrimalEnteringWeightedTimed(
                 basis.reduced_cost.len,
                 self.numerical.dual_tolerance,
-            ) orelse {
+                true,
+            );
+            // A taboo cache is a search-order hint, never a feasibility
+            // certificate. If it masks every improving column, expire the
+            // cache and repeat the exact same pricing scan without exclusions
+            // before allowing Phase I to terminate.
+            if (entering == null and self.active_degeneracy_strategy == .perturbation_taboo and
+                self.degeneracy.active)
+            {
+                self.degeneracy.invalidateTaboo();
+                self.stats.taboo_retries += 1;
+                entering = self.choosePrimalEnteringWeightedTimed(
+                    basis.reduced_cost.len,
+                    self.numerical.dual_tolerance,
+                    false,
+                );
+            }
+            const entering_choice = entering orelse {
                 if (self.factorization.update_count != 0) {
                     self.factorization.recordReinversion(.solve_residual);
                     if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
@@ -2174,47 +2232,47 @@ pub const SimplexEngine = struct {
                 }
                 break;
             };
-            if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
-            if (entering.direction < 0) {
+            if (self.computeDirection(problem, entering_choice.column) != .optimal) return .numerical_failure;
+            if (entering_choice.direction < 0) {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
             }
             const leaving = self.chooseLeavingWithPolicy(false);
-            const own_step = if (entering.direction > 0)
-                basis.col_upper[entering.column] - basis.primal[entering.column]
+            const own_step = if (entering_choice.direction > 0)
+                basis.col_upper[entering_choice.column] - basis.primal[entering_choice.column]
             else
-                basis.primal[entering.column] - basis.col_lower[entering.column];
+                basis.primal[entering_choice.column] - basis.col_lower[entering_choice.column];
             if (std.math.isFinite(own_step) and (leaving.status == .unbounded or own_step < leaving.step)) {
                 for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= own_step * direction;
-                basis.primal[entering.column] += entering.direction * own_step;
-                basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
+                basis.primal[entering_choice.column] += entering_choice.direction * own_step;
+                basis.col_status[entering_choice.column] = if (entering_choice.direction > 0) .at_upper else .at_lower;
                 self.observeIterationStep(
                     own_step,
-                    entering.column,
-                    entering.direction,
+                    entering_choice.column,
+                    entering_choice.direction,
                     null,
                     0,
                     null,
-                    @abs(basis.reduced_cost[entering.column] * own_step),
+                    @abs(basis.reduced_cost[entering_choice.column] * own_step),
                     false,
                     0,
                 );
             } else {
                 if (leaving.status != .optimal) return leaving.status;
                 const leaving_column = basis.basic_index[@intCast(leaving.row.?)];
-                const objective_change = @abs(basis.reduced_cost[entering.column] * leaving.step);
+                const objective_change = @abs(basis.reduced_cost[entering_choice.column] * leaving.step);
                 const ratio_tie_count = if ((self.statistics_io != null or self.active_degeneracy_trace.len != 0) and
                     leaving.step <= self.numerical.primal_tolerance)
                     self.countPrimalRatioTies(leaving.step)
                 else
                     0;
-                if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
+                if (self.updateReducedCostsAfterPrimalPivot(problem, entering_choice.column, entering_choice.direction, leaving.row.?) != .optimal)
                     return .numerical_failure;
-                if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
+                if (self.performPivot(problem, entering_choice.column, entering_choice.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
                     return .numerical_failure;
                 self.observeIterationStep(
                     leaving.step,
-                    entering.column,
-                    entering.direction,
+                    entering_choice.column,
+                    entering_choice.direction,
                     leaving_column,
                     ratio_tie_count,
                     own_step,
@@ -2237,12 +2295,29 @@ pub const SimplexEngine = struct {
             }
         }
         if (self.iterations >= control.max_iterations) return .iteration_limit;
-        if (self.recomputeBasicValues(problem) != .optimal) return .numerical_failure;
+        if (self.recomputeBasicValues(problem) != .optimal) {
+            // A bounded perturbation may leave the terminal basis just beyond
+            // an original bound. That invalidates the perturbed path, not the
+            // model. Restore the logical epoch so infeasibility is proved by
+            // the unperturbed Phase-I path instead of escaping as a numerical
+            // failure.
+            if (self.degeneracy.ever_active)
+                return self.restartPhaseOneWithoutPerturbation(problem, control);
+            return .numerical_failure;
+        }
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         const artificial_begin = problem.num_cols + problem.num_rows;
         var infeasibility: f64 = 0.0;
         for (basis.primal[artificial_begin..]) |value| infeasibility += @max(value, 0.0);
-        if (infeasibility > self.numerical.primal_tolerance) return .infeasible;
+        if (infeasibility > self.numerical.primal_tolerance) {
+            // Perturbed or taboo-guided pricing may change the path, but an
+            // infeasibility conclusion must come from the unperturbed logical
+            // epoch. Restore it transactionally and let baseline Phase I
+            // either prove infeasibility or continue searching.
+            if (self.degeneracy.ever_active)
+                return self.restartPhaseOneWithoutPerturbation(problem, control);
+            return .infeasible;
+        }
 
         if (self.cleanupArtificialBasis(problem) != .optimal) {
             if (self.degeneracy.ever_active) return self.restartPhaseOneWithoutPerturbation(problem, control);
@@ -2291,10 +2366,28 @@ pub const SimplexEngine = struct {
         self.dual_edge_weights_valid = true;
         self.observeFactorizationStability();
         if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+        if (self.installArtificialPhaseOneBasis(problem) != .optimal) return .numerical_failure;
         if (!self.phase1_needed) return .optimal;
         if (self.refactorizeBasis(problem, .phase_one_setup) != .optimal) return .numerical_failure;
         self.numerical.markRefactorized();
         return self.solvePhaseOne(problem, control);
+    }
+
+    /// Terminal certificates are always checked in original coordinates. If
+    /// a perturbed path reaches a basis that cannot pass that check, discard
+    /// the entire experimental epoch and cold-start the proven baseline
+    /// policy. This is deliberately broader than Phase-I cleanup because a
+    /// Phase-II perturbation can change basis membership after artificials are
+    /// gone, leaving no smaller transactional snapshot to restore.
+    fn restartSolveWithoutPerturbation(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        control: SolveControl,
+    ) SolveStatus {
+        var baseline_control = control;
+        baseline_control.initial_basis = null;
+        baseline_control.degeneracy_strategy = .baseline;
+        return self.solveProblem(problem, baseline_control);
     }
 
     fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus {
@@ -2382,6 +2475,12 @@ pub const SimplexEngine = struct {
     fn prepareDegeneracyPolicy(self: *SimplexEngine, rows: usize, columns: usize) SolveStatus {
         if (self.active_degeneracy_strategy == .baseline or !self.numerical.anti_cycling_active or
             self.degeneracy.active)
+            return .optimal;
+        // Automatic mode distinguishes a truly long degenerate face from
+        // frequent short local ties. Explicit perturbation remains available
+        // at the normal anti-cycling threshold for controlled A/B runs.
+        if (self.active_degeneracy_strategy == .automatic and
+            self.numerical.consecutive_degenerate_pivots < 256)
             return .optimal;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         self.degeneracy.activate(

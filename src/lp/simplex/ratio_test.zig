@@ -24,9 +24,11 @@ pub const RatioTest = struct {
         };
     }
 
-    /// Harris selection with deterministic virtual bound perturbations used
-    /// only to order an otherwise degenerate minimum-ratio set. Returned steps
-    /// remain exact values from the unperturbed bounds.
+    /// Harris selection with deterministic bounded primal perturbations.
+    /// Positive ranks provide a tiny virtual margin to zero-valued basics, so
+    /// a degenerate face produces real lexicographic progress. The caller
+    /// limits ranks below primal feasibility tolerance and performs a fresh
+    /// unperturbed cleanup before publishing a status.
     pub fn chooseLeavingPerturbed(
         self: *const RatioTest,
         direction: []const f64,
@@ -37,19 +39,20 @@ pub const RatioTest = struct {
         if (direction.len != rhs.len or row_rank.len < direction.len) return .{};
         var relaxed_step = std.math.inf(f64);
         var minimum_step = std.math.inf(f64);
-        for (direction, rhs) |coefficient, value| {
+        for (direction, rhs, row_rank[0..direction.len]) |coefficient, value, rank| {
             if (coefficient <= self.tolerance) continue;
-            minimum_step = @min(minimum_step, @max(value / coefficient, 0.0));
-            relaxed_step = @min(relaxed_step, (@max(value, 0.0) + self.tolerance) / coefficient);
+            const virtual_margin = @max(value + rank, 0.0);
+            minimum_step = @min(minimum_step, virtual_margin / coefficient);
+            relaxed_step = @min(relaxed_step, (virtual_margin + self.tolerance) / coefficient);
         }
         if (!std.math.isFinite(relaxed_step)) return .{ .step = relaxed_step };
         if (minimum_step > degeneracy_tolerance) return self.chooseHarris(direction, rhs);
 
         var maximum_pivot: f64 = 0.0;
-        for (direction, rhs) |coefficient, value| {
+        for (direction, rhs, row_rank[0..direction.len]) |coefficient, value, rank| {
             if (coefficient <= self.tolerance) continue;
-            const exact_step = @max(value / coefficient, 0.0);
-            if (exact_step <= relaxed_step and exact_step <= minimum_step + degeneracy_tolerance)
+            const virtual_step = @max(value + rank, 0.0) / coefficient;
+            if (virtual_step <= relaxed_step and virtual_step <= minimum_step + degeneracy_tolerance)
                 maximum_pivot = @max(maximum_pivot, coefficient);
         }
         var choice = LeavingChoice{ .step = std.math.inf(f64) };
@@ -57,15 +60,15 @@ pub const RatioTest = struct {
         var best_pivot: f64 = 0.0;
         for (direction, rhs, row_rank[0..direction.len], 0..) |coefficient, value, rank, row| {
             if (coefficient <= self.tolerance) continue;
-            const exact_step = @max(value / coefficient, 0.0);
-            if (exact_step > relaxed_step or exact_step > minimum_step + degeneracy_tolerance) continue;
+            const virtual_step = @max(value + rank, 0.0) / coefficient;
+            if (virtual_step > relaxed_step or virtual_step > minimum_step + degeneracy_tolerance) continue;
             // Threshold stability: perturb only candidates retaining at least
             // half the strongest pivot in the degenerate Harris set.
             if (coefficient < maximum_pivot * 0.5) continue;
             if (rank < best_rank or (rank == best_rank and coefficient > best_pivot)) {
                 best_rank = rank;
                 best_pivot = coefficient;
-                choice = .{ .row = @intCast(row), .step = exact_step };
+                choice = .{ .row = @intCast(row), .step = virtual_step };
             }
         }
         return choice;
@@ -208,11 +211,11 @@ test "Harris ratio test prefers stable pivot within relaxed bound" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.000001), choice.step, 1e-12);
 }
 
-test "perturbed Harris changes only a degenerate tie order" {
+test "perturbed Harris gives a bounded positive step on a degenerate tie" {
     const test_rule = RatioTest{ .rule = .harris_two_pass, .tolerance = 1e-9 };
     const choice = test_rule.chooseLeavingPerturbed(&.{ 1, 2 }, &.{ 0, 0 }, &.{ 0.2, 0.1 }, 1e-7);
     try std.testing.expectEqual(@as(?u32, 1), choice.row);
-    try std.testing.expectEqual(@as(f64, 0), choice.step);
+    try std.testing.expect(choice.step > 0.0 and choice.step <= 1e-7);
 }
 
 test "dual bound-flipping ratio test records boxed breakpoints" {

@@ -1,8 +1,8 @@
 //! Reusable state for deterministic degeneracy policies.
 //!
-//! Perturbations are virtual lexicographic ranks: they alter only tie order,
-//! while ratio tests still return the exact unperturbed step. This preserves
-//! basis equations and keeps cleanup in the original model coordinates.
+//! Perturbations are deterministic bounded lexicographic margins. Ratio tests
+//! may take the corresponding sub-tolerance primal step to leave a degenerate
+//! face; terminal cleanup always rebuilds in original model coordinates.
 
 const std = @import("std");
 

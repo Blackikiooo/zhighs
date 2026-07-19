@@ -17,6 +17,8 @@ OUTPUT_FILE=${OUTPUT_FILE:-/tmp/zhighs-stage7-results.tsv}
 BUILD_RUNNERS=${BUILD_RUNNERS:-1}
 RUN_HIGHS=${RUN_HIGHS:-1}
 CLP_RUNNER=${CLP_RUNNER:-}
+DEGENERACY_STRATEGY=${DEGENERACY_STRATEGY:-auto}
+ADAPTIVE_REPRICE=${ADAPTIVE_REPRICE:-fixed}
 
 fail() {
   echo "stage7 corpus: $*" >&2
@@ -85,6 +87,8 @@ trap 'rm -rf -- "$work_dir"' EXIT
   printf '# highs_commit\t%s\n' "${actual_highs_commit:-not-run}"
   printf '# timeout_seconds\t%s\n' "$TIMEOUT_SECONDS"
   printf '# memory_limit_kb\t%s\n' "$MEMORY_LIMIT_KB"
+  printf '# degeneracy_strategy\t%s\n' "$DEGENERACY_STRATEGY"
+  printf '# adaptive_reprice\t%s\n' "$ADAPTIVE_REPRICE"
   printf '# corpus_lock\t%s\n' "$CORPUS_LOCK"
 } >> "$OUTPUT_FILE"
 
@@ -140,7 +144,8 @@ for model in "${MODELS[@]}"; do
   path="$CORPUS_DIR/$model.mps"
   echo "stage7 corpus: $model" >&2
   run_solver "$model" zhighs "$ZHIGHS_RUNNER" "$path" \
-    1000000 100 no-trace 8 2 64 stats 32 primal logical 0 baseline inherit fixed column
+    1000000 100 no-trace 8 2 64 stats 32 primal logical 0 \
+    "$DEGENERACY_STRATEGY" inherit "$ADAPTIVE_REPRICE" column
   if [[ "$RUN_HIGHS" == 1 ]]; then
     run_solver "$model" highs "$HIGHS_RUNNER" "$path"
   fi
