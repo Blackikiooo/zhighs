@@ -78,6 +78,40 @@ pub const DegeneracyTraceEvent = struct {
     objective_change: f64,
     basis_fingerprint: u64,
 };
+pub const DualPhaseOneCandidateReason = enum {
+    small_tableau,
+    basic_or_fixed,
+    wrong_pivot_sign,
+    accepted_bound_flip,
+    eligible_unselected,
+};
+pub const DualPhaseOneCandidateTraceEvent = struct {
+    column: u32,
+    status: basis_module.BasisStatus,
+    tableau: f64,
+    direction: f64,
+    signed_pivot: f64,
+    reduced_cost: f64,
+    lower: f64,
+    upper: f64,
+    primal: f64,
+    flip_capacity: f64,
+    reason: DualPhaseOneCandidateReason,
+};
+pub const DualPhaseOneEpTraceEvent = struct { row: u32, value: f64 };
+pub const DualPhaseOneFailureDiagnostic = struct {
+    iteration: usize,
+    leaving_row: u32,
+    leaving_bound: basis_module.BasisStatus,
+    violation: f64,
+    ep_nonzeros: usize,
+    ep_max_abs: f64,
+    small_tableau: usize,
+    basic_or_fixed: usize,
+    wrong_pivot_sign: usize,
+    accepted_bound_flips: usize,
+    eligible_unselected: usize,
+};
 const PrimalLeavingResult = struct {
     status: SolveStatus,
     row: ?u32 = null,
@@ -116,6 +150,10 @@ pub const SolveControl = struct {
     /// Optional caller-owned storage for mutually exclusive degeneracy causes.
     /// Events beyond the supplied capacity are dropped while counters remain exact.
     degeneracy_trace: []DegeneracyTraceEvent = &.{},
+    /// Optional caller-owned storage populated only when dual Phase I has no
+    /// entering column. These buffers are diagnostic and never affect pricing.
+    dual_phase_one_candidate_trace: []DualPhaseOneCandidateTraceEvent = &.{},
+    dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
     /// Collect phase and kernel timings. Disabled by default so production
     /// solves do not perform clock reads in simplex hot paths.
     collect_statistics: bool = false,
@@ -248,6 +286,11 @@ pub const SimplexEngine = struct {
     degeneracy_basis_fingerprints: [32]u64 = @splat(0),
     degeneracy_basis_fingerprint_count: usize = 0,
     degeneracy_basis_fingerprint_cursor: usize = 0,
+    dual_phase_one_failure: ?DualPhaseOneFailureDiagnostic = null,
+    dual_phase_one_candidate_trace_count: usize = 0,
+    active_dual_phase_one_candidate_trace: []DualPhaseOneCandidateTraceEvent = &.{},
+    dual_phase_one_ep_trace_count: usize = 0,
+    active_dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
     current_phase: SolvePhase = .phase_two,
     direction_requires_reinversion: bool = false,
     fresh_factorization_pivots_remaining: usize = 0,
@@ -1365,6 +1408,8 @@ pub const SimplexEngine = struct {
                 basis.dual_direction[0..original_count],
                 basis.flip_columns[0..original_count],
             );
+            if (entering.column == null)
+                self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_count);
             if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .not_implemented;
             const entering_col = entering.column orelse return .not_implemented;
             const entering_index: usize = @intCast(entering_col);
@@ -1406,6 +1451,110 @@ pub const SimplexEngine = struct {
         if (feasibility.dual) return self.solveDual(problem, control);
         if (feasibility.primal) return self.solvePrimal(problem, control);
         return .not_implemented;
+    }
+
+    /// Capture the first dual Phase-I row for which the ratio test cannot
+    /// select an entering column. This post-decision scan is diagnostic only:
+    /// it reads the already materialized ep/tableau and caller-owned buffers.
+    fn recordDualPhaseOneNoEntering(
+        self: *SimplexEngine,
+        leaving: pricing_module.DualLeavingChoice,
+        flip_count: usize,
+        column_count: usize,
+    ) void {
+        if (self.dual_phase_one_failure != null) return;
+        const basis = if (self.basis) |*value| value else return;
+        var diagnostic = DualPhaseOneFailureDiagnostic{
+            .iteration = self.iterations,
+            .leaving_row = leaving.row,
+            .leaving_bound = leaving.bound,
+            .violation = leaving.violation,
+            .ep_nonzeros = 0,
+            .ep_max_abs = 0.0,
+            .small_tableau = 0,
+            .basic_or_fixed = 0,
+            .wrong_pivot_sign = 0,
+            .accepted_bound_flips = 0,
+            .eligible_unselected = 0,
+        };
+        for (basis.dual_row, 0..) |value, row| {
+            diagnostic.ep_max_abs = @max(diagnostic.ep_max_abs, @abs(value));
+            if (@abs(value) <= self.numerical.zero_tolerance) continue;
+            diagnostic.ep_nonzeros += 1;
+            if (self.dual_phase_one_ep_trace_count < self.active_dual_phase_one_ep_trace.len) {
+                self.active_dual_phase_one_ep_trace[self.dual_phase_one_ep_trace_count] = .{
+                    .row = @intCast(row),
+                    .value = value,
+                };
+                self.dual_phase_one_ep_trace_count += 1;
+            }
+        }
+
+        for (0..column_count) |column| {
+            const alpha = basis.tableau[column];
+            const status = basis.col_status[column];
+            var direction: f64 = 0.0;
+            var signed_pivot: f64 = 0.0;
+            const width = basis.col_upper[column] - basis.col_lower[column];
+            const flip_capacity = if (std.math.isFinite(width)) @abs(alpha) * width else 0.0;
+            const reason: DualPhaseOneCandidateReason = blk: {
+                if (@abs(alpha) <= self.ratio_test.tolerance) {
+                    diagnostic.small_tableau += 1;
+                    break :blk .small_tableau;
+                }
+                direction = switch (status) {
+                    .at_lower => 1.0,
+                    .at_upper => -1.0,
+                    .free, .superbasic => if (leaving.bound == .at_lower)
+                        (if (alpha < 0.0) 1.0 else -1.0)
+                    else
+                        (if (alpha > 0.0) 1.0 else -1.0),
+                    .basic, .fixed => {
+                        diagnostic.basic_or_fixed += 1;
+                        break :blk .basic_or_fixed;
+                    },
+                };
+                signed_pivot = alpha * direction;
+                const eligible = if (leaving.bound == .at_lower)
+                    signed_pivot < -self.ratio_test.tolerance
+                else
+                    signed_pivot > self.ratio_test.tolerance;
+                if (!eligible) {
+                    diagnostic.wrong_pivot_sign += 1;
+                    break :blk .wrong_pivot_sign;
+                }
+                var was_flipped = false;
+                for (basis.flip_columns[0..flip_count]) |flipped| {
+                    if (@as(usize, @intCast(flipped)) == column) {
+                        was_flipped = true;
+                        break;
+                    }
+                }
+                if (was_flipped) {
+                    diagnostic.accepted_bound_flips += 1;
+                    break :blk .accepted_bound_flip;
+                }
+                diagnostic.eligible_unselected += 1;
+                break :blk .eligible_unselected;
+            };
+            if (self.dual_phase_one_candidate_trace_count < self.active_dual_phase_one_candidate_trace.len) {
+                self.active_dual_phase_one_candidate_trace[self.dual_phase_one_candidate_trace_count] = .{
+                    .column = @intCast(column),
+                    .status = status,
+                    .tableau = alpha,
+                    .direction = direction,
+                    .signed_pivot = signed_pivot,
+                    .reduced_cost = basis.reduced_cost[column],
+                    .lower = basis.col_lower[column],
+                    .upper = basis.col_upper[column],
+                    .primal = basis.primal[column],
+                    .flip_capacity = flip_capacity,
+                    .reason = reason,
+                };
+                self.dual_phase_one_candidate_trace_count += 1;
+            }
+        }
+        self.dual_phase_one_failure = diagnostic;
     }
 
     /// Deterministic cold-start selector. Automatic mode remains opt-in until
@@ -2158,6 +2307,11 @@ pub const SimplexEngine = struct {
         self.degeneracy_basis_fingerprints = @splat(0);
         self.degeneracy_basis_fingerprint_count = 0;
         self.degeneracy_basis_fingerprint_cursor = 0;
+        self.dual_phase_one_failure = null;
+        self.active_dual_phase_one_candidate_trace = control.dual_phase_one_candidate_trace;
+        self.dual_phase_one_candidate_trace_count = 0;
+        self.active_dual_phase_one_ep_trace = control.dual_phase_one_ep_trace;
+        self.dual_phase_one_ep_trace_count = 0;
         if (control.time_limit_ns == null) {
             self.solve_start_ns = null;
             self.solve_clock_io = null;

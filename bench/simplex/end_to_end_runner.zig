@@ -97,11 +97,23 @@ pub fn main(init: std.process.Init) !void {
     else
         &.{};
     defer if (trace_enabled) allocator.free(degeneracy_trace);
+    const dual_phase_one_candidates: []zhighs.lp.simplex.engine.DualPhaseOneCandidateTraceEvent = if (trace_enabled)
+        try allocator.alloc(zhighs.lp.simplex.engine.DualPhaseOneCandidateTraceEvent, problem.num_cols + problem.num_rows)
+    else
+        &.{};
+    defer if (trace_enabled) allocator.free(dual_phase_one_candidates);
+    const dual_phase_one_ep: []zhighs.lp.simplex.engine.DualPhaseOneEpTraceEvent = if (trace_enabled)
+        try allocator.alloc(zhighs.lp.simplex.engine.DualPhaseOneEpTraceEvent, problem.num_rows)
+    else
+        &.{};
+    defer if (trace_enabled) allocator.free(dual_phase_one_ep);
     const solve_started = nowNs();
     const status = engine.solveProblem(problem, .{
         .max_iterations = max_iterations,
         .pivot_trace = trace,
         .degeneracy_trace = degeneracy_trace,
+        .dual_phase_one_candidate_trace = dual_phase_one_candidates,
+        .dual_phase_one_ep_trace = dual_phase_one_ep,
         .collect_statistics = collect_statistics,
         .phase_one_strategy = phase_one_strategy,
         .crash_strategy = crash_strategy,
@@ -129,6 +141,45 @@ pub fn main(init: std.process.Init) !void {
         });
         defer allocator.free(trace_line);
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
+    };
+    if (trace_enabled) if (engine.dual_phase_one_failure) |failure| {
+        const failure_line = try std.fmt.allocPrint(allocator, "dual_phase1_failure\t{d}\t{d}\t{s}\t{e:.6}\t{d}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+            failure.iteration,
+            failure.leaving_row,
+            @tagName(failure.leaving_bound),
+            failure.violation,
+            failure.ep_nonzeros,
+            failure.ep_max_abs,
+            failure.small_tableau,
+            failure.basic_or_fixed,
+            failure.wrong_pivot_sign,
+            failure.accepted_bound_flips,
+            failure.eligible_unselected,
+        });
+        defer allocator.free(failure_line);
+        try std.Io.File.stderr().writeStreamingAll(io_context, failure_line);
+        for (dual_phase_one_ep[0..engine.dual_phase_one_ep_trace_count]) |event| {
+            const line = try std.fmt.allocPrint(allocator, "dual_phase1_ep\t{d}\t{e:.17}\n", .{ event.row, event.value });
+            defer allocator.free(line);
+            try std.Io.File.stderr().writeStreamingAll(io_context, line);
+        }
+        for (dual_phase_one_candidates[0..engine.dual_phase_one_candidate_trace_count]) |event| {
+            const line = try std.fmt.allocPrint(allocator, "dual_phase1_candidate\t{d}\t{s}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{s}\n", .{
+                event.column,
+                @tagName(event.status),
+                event.tableau,
+                event.direction,
+                event.signed_pivot,
+                event.reduced_cost,
+                event.lower,
+                event.upper,
+                event.primal,
+                event.flip_capacity,
+                @tagName(event.reason),
+            });
+            defer allocator.free(line);
+            try std.Io.File.stderr().writeStreamingAll(io_context, line);
+        }
     };
 
     var primal_residual: f64 = std.math.inf(f64);
