@@ -228,6 +228,31 @@ shows non-universal iteration changes: `bore3d` 252 -> 333, `scorpion`
 The mode therefore remains explicit until the missing `d2q06c/d6cube` inputs
 and the full Stage 7 corpus are rerun; it is not yet the release default.
 
+## Dual DSE to Devex fallback
+
+The explicit `steepest-devex` dual edge-weight policy now starts each dual
+phase with exact BTRAN-norm DSE weights. A Huangfu pivotal-weight rejection or
+a deterministic recurrence-update budget switches the phase transactionally
+to unit-weight dual Devex. Dual Devex applies the full HiGHS recurrence to all
+row weights using the already hot FTRAN column; the fallback allocates no
+memory and performs no additional basis solve. The inherited default pricing
+policy is unchanged.
+
+Unit coverage includes a real imported-basis dual pivot with a one-update
+budget, direct invalid-framework recovery, and the full row-weight recurrence.
+The default 40-model status/objective/residual/ray gate remains green. A forced
+dual Phase-I `scsd1` correctness A/B produced:
+
+| Policy | iterations | solve time | DSE updates | Devex updates | fallbacks |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| inherited dual Devex | 181 | 6.59 ms | 0 | 0 | 0 |
+| steepest-devex, budget 64 | 115 | 3.84 ms | 64 | 51 | 1 budget |
+
+These are single ReleaseFast diagnostic runs, not a repeated timing claim.
+The explicit result passed the locked status, objective and residual checks;
+the policy remains non-default until a full Stage 7 A/B and repeated timing
+run establish that its extra exact DSE initialization is worthwhile broadly.
+
 ## Open acceptance gates
 
 - Acquire and lock the five official Netlib special/generated cases.
@@ -237,6 +262,8 @@ and the full Stage 7 corpus are rerun; it is not yet the release default.
   remains outside the initial cap.
 - Run the full Devex framework on the Stage 7 corpus, especially
   `d2q06c/d6cube`, before deciding whether it replaces the legacy default.
+- Run the explicit dual `steepest-devex` policy on the full Stage 7 corpus and
+  collect repeated median/p95 data before selecting a default update budget.
 - Add reversible LP presolve (at minimum fixed columns, empty rows/columns and
   singleton rows) with primal/dual/ray/certificate postsolve validation.
 - Finish 60-second classification for the large models, then choose the final

@@ -22,6 +22,10 @@ pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo
 pub const PhaseOnePricingStrategy = enum { inherit, dantzig, devex, steepest_edge };
 pub const PricingKernel = enum { column, row, automatic };
 pub const DevexStrategy = enum { legacy, framework };
+/// Dual edge-weight lifecycle. `inherit` preserves the caller's pricing rule;
+/// `steepest_devex` starts with exact DSE and deterministically falls back to
+/// full dual Devex when the recurrence is rejected or exceeds its work budget.
+pub const DualEdgeWeightStrategy = enum { inherit, steepest_devex };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -184,6 +188,11 @@ pub const SolveControl = struct {
     /// Full reference-framework Devex remains an explicit A/B option until
     /// corpus evidence clears it for the default path.
     devex_strategy: DevexStrategy = .legacy,
+    /// Explicit dual DSE -> Devex A/B policy. It is not enabled by default.
+    dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
+    /// Maximum successful DSE recurrence updates per dual phase before
+    /// switching to dual Devex. Zero disables the budget-triggered switch.
+    dual_dse_update_budget: usize = 64,
 };
 
 pub const SimplexStats = struct {
@@ -215,6 +224,10 @@ pub const SimplexStats = struct {
     bound_flip_ftran_savings: usize = 0,
     dual_reduced_cost_updates: usize = 0,
     dual_exact_reprices: usize = 0,
+    dual_dse_updates: usize = 0,
+    dual_devex_updates: usize = 0,
+    dual_dse_invalid_fallbacks: usize = 0,
+    dual_dse_budget_fallbacks: usize = 0,
     devex_frameworks: usize = 0,
     devex_framework_updates: usize = 0,
     devex_bad_weights: usize = 0,
@@ -338,6 +351,9 @@ pub const SimplexEngine = struct {
     exact_reprices: usize = 0,
     active_pricing_kernel: PricingKernel = .column,
     active_devex_strategy: DevexStrategy = .legacy,
+    active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
+    active_dual_dse_update_budget: usize = 64,
+    dual_dse_updates_since_start: usize = 0,
     devex_framework_iterations: usize = 0,
     devex_bad_weight_count: usize = 0,
     devex_reset_after_pivot: bool = false,
@@ -394,6 +410,9 @@ pub const SimplexEngine = struct {
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
         self.active_devex_strategy = control.devex_strategy;
+        self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
+        self.active_dual_dse_update_budget = control.dual_dse_update_budget;
+        self.dual_dse_updates_since_start = 0;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -697,6 +716,9 @@ pub const SimplexEngine = struct {
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
         self.active_devex_strategy = control.devex_strategy;
+        self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
+        self.active_dual_dse_update_budget = control.dual_dse_update_budget;
+        self.dual_dse_updates_since_start = 0;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -1136,11 +1158,24 @@ pub const SimplexEngine = struct {
         const leaving_col = basis.basic_index[leaving_row];
         const pivot = basis.pivot_direction[leaving_row];
         if (self.pricing.rule == .steepest_edge and self.dual_row_index == @as(u32, @intCast(leaving_row))) {
-            if (self.updateDualSteepestEdgeWeights(leaving_row, pivot) != .optimal)
+            if (self.updateDualSteepestEdgeWeights(leaving_row, pivot) == .optimal) {
+                self.stats.dual_dse_updates += 1;
+                self.dual_dse_updates_since_start += 1;
+                if (self.active_dual_edge_weight_strategy == .steepest_devex and
+                    self.active_dual_dse_update_budget != 0 and
+                    self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget)
+                    self.switchDualDseToDevex(.budget);
+            } else if (self.active_dual_edge_weight_strategy == .steepest_devex) {
+                self.switchDualDseToDevex(.invalid);
+            } else {
                 self.dual_edge_weights_valid = false;
+            }
         } else {
             self.dual_edge_weights_valid = false;
-            if (self.algorithm == .dual_revised or self.active_devex_strategy == .legacy)
+            if (self.algorithm == .dual_revised and self.pricing.rule == .devex and
+                self.active_dual_edge_weight_strategy == .steepest_devex)
+                self.updateDualDevexWeights(leaving_row, pivot)
+            else if (self.algorithm == .dual_revised or self.active_devex_strategy == .legacy)
                 self.updateLegacyDevexWeights(entering_col, leaving_row, pivot);
         }
         self.dual_row_index = null;
@@ -1240,6 +1275,23 @@ pub const SimplexEngine = struct {
             @memset(basis.col_edge_weight, 1.0);
             @memset(basis.row_edge_weight, 1.0);
         }
+    }
+
+    /// Full dual Devex recurrence used by HiGHS-style row pricing. The hot
+    /// FTRAN column is reused directly, so updating every row is allocation
+    /// free and requires no additional basis solve.
+    fn updateDualDevexWeights(self: *SimplexEngine, leaving_row: usize, pivot: f64) void {
+        const basis = if (self.basis) |*value| value else return;
+        if (leaving_row >= basis.row_edge_weight.len or @abs(pivot) <= self.numerical.pivot_tolerance) return;
+        var pivotal_weight = basis.row_edge_weight[leaving_row] / (pivot * pivot);
+        if (!std.math.isFinite(pivotal_weight)) pivotal_weight = 1.0;
+        pivotal_weight = @max(1.0, pivotal_weight);
+        for (basis.row_edge_weight, basis.pivot_direction) |*weight, alpha| {
+            const candidate = pivotal_weight * alpha * alpha;
+            if (std.math.isFinite(candidate)) weight.* = @max(weight.*, candidate);
+        }
+        basis.row_edge_weight[leaving_row] = pivotal_weight;
+        self.stats.dual_devex_updates += 1;
     }
 
     /// Freeze the current nonbasic set as a primal Devex reference framework.
@@ -1504,6 +1556,8 @@ pub const SimplexEngine = struct {
     fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         const phase_started = self.statisticsTimestamp();
         const iteration_started = self.iterations;
+        const saved_pricing_rule = self.beginDualEdgeWeightPhase();
+        defer self.pricing.rule = saved_pricing_rule;
         defer self.recordPhaseElapsed(.phase_two, phase_started);
         defer self.recordPhaseIterations(.phase_two, iteration_started);
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
@@ -1515,6 +1569,9 @@ pub const SimplexEngine = struct {
             const leaving = self.chooseDualLeavingRow() orelse return self.finishOptimal(problem);
 
             if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
+            if (self.active_dual_edge_weight_strategy == .steepest_devex and
+                self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
+                self.switchDualDseToDevex(.invalid);
             const original_cols = problem.num_cols + problem.num_rows;
             var active_ratio_test = self.ratio_test;
             if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
@@ -1584,6 +1641,8 @@ pub const SimplexEngine = struct {
     fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         const phase_started = self.statisticsTimestamp();
         const iteration_started = self.iterations;
+        const saved_pricing_rule = self.beginDualEdgeWeightPhase();
+        defer self.pricing.rule = saved_pricing_rule;
         defer self.recordPhaseElapsed(.dual_phase_one, phase_started);
         defer self.recordPhaseIterations(.dual_phase_one, iteration_started);
         const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -1607,6 +1666,9 @@ pub const SimplexEngine = struct {
                 return .not_implemented;
             const leaving = self.chooseDualLeavingRow() orelse break;
             if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .not_implemented;
+            if (self.active_dual_edge_weight_strategy == .steepest_devex and
+                self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
+                self.switchDualDseToDevex(.invalid);
             var active_ratio_test = self.ratio_test;
             if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
             const entering = active_ratio_test.chooseDualEntering(
@@ -1664,7 +1726,12 @@ pub const SimplexEngine = struct {
         if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
         const feasibility = self.classifyFeasibility(problem);
         if (feasibility.dual) return self.solveDual(problem, control);
-        if (feasibility.primal) return self.solvePrimal(problem, control);
+        if (feasibility.primal) {
+            // The dual-phase edge-weight forcing policy must not leak into a
+            // primal Phase-II selected after restoring the original model.
+            self.pricing.rule = saved_pricing_rule;
+            return self.solvePrimal(problem, control);
+        }
         return .not_implemented;
     }
 
@@ -2068,6 +2135,39 @@ pub const SimplexEngine = struct {
         self.dual_edge_weights_valid = true;
         self.dual_row_index = null;
         return .optimal;
+    }
+
+    const DualDseFallbackReason = enum { invalid, budget };
+
+    /// Start a fresh DSE framework at a dual-phase boundary. Returning the
+    /// previous pricing rule lets callers restore policy without retaining a
+    /// second engine-wide rule or introducing a hot-loop branch.
+    fn beginDualEdgeWeightPhase(self: *SimplexEngine) pricing_module.PricingRule {
+        const saved = self.pricing.rule;
+        if (self.active_dual_edge_weight_strategy == .steepest_devex) {
+            self.pricing.rule = .steepest_edge;
+            self.dual_edge_weights_valid = false;
+            self.dual_row_index = null;
+            self.dual_dse_updates_since_start = 0;
+        }
+        return saved;
+    }
+
+    /// Replace a rejected or over-budget DSE framework with a deterministic
+    /// unit-weight dual Devex framework. Subsequent pivots use the full Devex
+    /// recurrence and never pay for another exact all-row DSE initialization
+    /// in the current phase.
+    fn switchDualDseToDevex(self: *SimplexEngine, reason: DualDseFallbackReason) void {
+        const basis = if (self.basis) |*value| value else return;
+        self.pricing.rule = .devex;
+        @memset(basis.row_edge_weight, 1.0);
+        self.dual_edge_weights_valid = false;
+        self.dual_row_index = null;
+        self.dual_candidate_count = 0;
+        switch (reason) {
+            .invalid => self.stats.dual_dse_invalid_fallbacks += 1,
+            .budget => self.stats.dual_dse_budget_fallbacks += 1,
+        }
     }
 
     /// Forrest--Goldfarb DSE recurrence. `dual_row` is the freshly computed
@@ -4144,6 +4244,19 @@ test "imported dual-feasible basis reoptimizes a changed RHS" {
     try std.testing.expectEqual(SolveStatus.optimal, second_engine.recomputeReducedCostsWithDrift(modified));
     try std.testing.expect(second_engine.maximum_reduced_cost_drift >= 1e-4);
     try std.testing.expectEqual(@as(usize, 1), second_engine.stats.dual_exact_reprices);
+
+    // The explicit steepest-devex lifecycle starts with exact DSE and uses a
+    // one-update budget here to force a deterministic dual Devex fallback.
+    var fallback_engine = SimplexEngine.init(std.testing.allocator);
+    defer fallback_engine.deinit();
+    try std.testing.expectEqual(SolveStatus.optimal, fallback_engine.solveProblem(modified, .{
+        .initial_basis = snapshot.view(),
+        .dual_edge_weight_strategy = .steepest_devex,
+        .dual_dse_update_budget = 1,
+    }));
+    try std.testing.expectEqual(Algorithm.dual_revised, fallback_engine.algorithm);
+    try std.testing.expect(fallback_engine.stats.dual_dse_updates > 0);
+    try std.testing.expectEqual(@as(usize, 1), fallback_engine.stats.dual_dse_budget_fallbacks);
 }
 
 test "singular imported basis is repaired without discarding independent structural basics" {
@@ -4360,6 +4473,44 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
+}
+
+test "dual Devex updates every row from the hot FTRAN column" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    engine.basis.?.row_edge_weight[0] = 1;
+    engine.basis.?.row_edge_weight[1] = 2;
+    engine.basis.?.pivot_direction[0] = 2;
+    engine.basis.?.pivot_direction[1] = 1;
+
+    engine.updateDualDevexWeights(1, 1);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 8), engine.basis.?.row_edge_weight[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), engine.basis.?.row_edge_weight[1], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_devex_updates);
+}
+
+test "rejected dual steepest-edge framework falls back transactionally" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    engine.active_dual_edge_weight_strategy = .steepest_devex;
+    engine.pricing.rule = .steepest_edge;
+    engine.dual_edge_weights_valid = true;
+    engine.dual_row_index = 1;
+    engine.dual_candidate_count = 2;
+    engine.basis.?.row_edge_weight[0] = 9;
+    engine.basis.?.row_edge_weight[1] = 4;
+
+    engine.switchDualDseToDevex(.invalid);
+
+    try std.testing.expectEqual(pricing_module.PricingRule.devex, engine.pricing.rule);
+    try std.testing.expectEqualSlices(f64, &[_]f64{ 1, 1 }, engine.basis.?.row_edge_weight);
+    try std.testing.expect(!engine.dual_edge_weights_valid);
+    try std.testing.expectEqual(@as(?u32, null), engine.dual_row_index);
+    try std.testing.expectEqual(@as(usize, 0), engine.dual_candidate_count);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_dse_invalid_fallbacks);
 }
 
 test "dual rank one reduced cost update uses the old tableau row" {

@@ -370,8 +370,14 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   `22.87 -> 9.70 ms`、p95 `23.50 -> 10.08 ms`；requested bytes `418233 -> 426441`。
   `bore3d/scorpion/seba` 等仍有 iteration 回退，且当前缺少解压的 `d2q06c/d6cube` 文件，
   因此继续保留显式 A/B，完成 Stage 7 后才决定默认化。已证实回退的单点近似不得重引。
-- [ ] 为 dual DSE 增加权重失效或更新预算超限时的 deterministic Devex fallback，并以
-  显式 forcing mode 通过 warm-start dual 与完整 corpus A/B 后再考虑默认切换。
+- [x] 为 dual DSE 增加权重失效或更新预算超限时的 deterministic Devex fallback：显式
+  `steepest-devex` 模式在 dual phase 边界精确初始化 DSE，Huangfu pivotal-weight 防护
+  拒绝 recurrence 或达到固定 update budget 后，以单位权重事务性切换到完整 dual Devex；
+  Devex 直接复用 hot FTRAN column 更新全部 row weights，不增加 solve 或 allocation。
+  warm-start dual 的 1-update budget 测试同时覆盖真实 DSE -> Devex 切换，失效恢复有独立
+  状态测试；默认 40 模型 gate 通过。显式 dual `scsd1` 为 181 -> 115 iterations，64 次
+  DSE update 后发生 1 次预算切换并完成 51 次 Devex update；status/objective/residual gate
+  通过。当前仍为 forcing mode，须完成 Stage 7 corpus A/B 后才考虑默认化。
 - [ ] 实现真正的 partial/multiple pricing：持久维护分段候选与扫描游标，避免宽模型每轮
   扫描全部列；先对 `dfl001/fit2p/pilot` 记录 PRICE 占比、候选命中率和完整 solve A/B。
 - [ ] 完成第 6.3 节 scale-aware dual Phase I 后，再增加 Phase-II primal/dual 自动选择；

@@ -65,6 +65,11 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, text, "framework")) .framework else if (std.mem.eql(u8, text, "legacy")) .legacy else return error.InvalidArguments
     else
         .legacy;
+    const dual_edge_weight_strategy: zhighs.lp.simplex.engine.DualEdgeWeightStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "steepest-devex")) .steepest_devex else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
+    else
+        .inherit;
+    const dual_dse_update_budget = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -143,6 +148,8 @@ pub fn main(init: std.process.Init) !void {
         .adaptive_reprice = adaptive_reprice,
         .pricing_kernel = pricing_kernel,
         .devex_strategy = devex_strategy,
+        .dual_edge_weight_strategy = dual_edge_weight_strategy,
+        .dual_dse_update_budget = dual_dse_update_budget,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -351,8 +358,8 @@ pub fn main(init: std.process.Init) !void {
 
     const dual_reprice_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\n",
-        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices },
+        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\tdual_dse_updates={d}\tdual_devex_updates={d}\tdual_dse_invalid_fallbacks={d}\tdual_dse_budget_fallbacks={d}\n",
+        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices, simplex_stats.dual_dse_updates, simplex_stats.dual_devex_updates, simplex_stats.dual_dse_invalid_fallbacks, simplex_stats.dual_dse_budget_fallbacks },
     );
     defer allocator.free(dual_reprice_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_reprice_stats_line);
