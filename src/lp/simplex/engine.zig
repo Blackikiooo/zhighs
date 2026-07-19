@@ -209,6 +209,8 @@ pub const SimplexStats = struct {
     bound_flips: usize = 0,
     bound_flip_batches: usize = 0,
     bound_flip_ftran_savings: usize = 0,
+    dual_reduced_cost_updates: usize = 0,
+    dual_exact_reprices: usize = 0,
     degeneracy_bound_ties: usize = 0,
     degeneracy_ratio_ties: usize = 0,
     degeneracy_zero_primal_steps: usize = 0,
@@ -1471,6 +1473,8 @@ pub const SimplexEngine = struct {
             const step = (basis.basic_value[leaving_row] - target) / pivot;
             if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
             const leaving_column = basis.basic_index[leaving_row];
+            if (self.updateReducedCostsAfterDualPivot(problem, entering_index, leaving.row) != .optimal)
+                return .numerical_failure;
             if (self.performPivot(
                 problem,
                 entering_index,
@@ -1490,8 +1494,12 @@ pub const SimplexEngine = struct {
                 false,
                 entering.flip_count,
             );
-            if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
-            if (!self.classifyFeasibility(problem).dual) return .numerical_failure;
+            if (self.fresh_factorization_pivots_remaining != 0 or
+                self.reduced_cost_update_count >= self.reduced_cost_refresh_period)
+            {
+                if (self.recomputeReducedCostsWithDrift(problem) != .optimal) return .numerical_failure;
+                if (!self.classifyFeasibility(problem).dual) return .numerical_failure;
+            }
         }
         return .iteration_limit;
     }
@@ -2927,6 +2935,64 @@ pub const SimplexEngine = struct {
         return .optimal;
     }
 
+    /// Exact original-objective reprice with drift observation. This is the
+    /// safety boundary for dual rank-1 updates: exact values replace the
+    /// incrementally maintained vector before feasibility is revalidated.
+    fn recomputeReducedCostsWithDrift(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const count = basis.reduced_cost.len;
+        if (self.degeneracy.reduced_cost_snapshot.len < count) return .numerical_failure;
+        @memcpy(self.degeneracy.reduced_cost_snapshot[0..count], basis.reduced_cost);
+        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+        var maximum_drift: f64 = 0.0;
+        for (basis.reduced_cost, self.degeneracy.reduced_cost_snapshot[0..count]) |exact, updated| {
+            maximum_drift = @max(maximum_drift, @abs(exact - updated) / @max(1.0, @abs(exact)));
+        }
+        self.maximum_reduced_cost_drift = @max(self.maximum_reduced_cost_drift, maximum_drift);
+        self.exact_reprices += 1;
+        self.stats.dual_exact_reprices += 1;
+        if (self.active_adaptive_reprice) {
+            if (maximum_drift > self.numerical.dual_tolerance * 10.0)
+                self.reduced_cost_refresh_period = @max(self.reduced_cost_refresh_period / 2, 1)
+            else if (maximum_drift < self.numerical.dual_tolerance * 0.1)
+                self.reduced_cost_refresh_period = @min(self.reduced_cost_refresh_period * 2, 8);
+        }
+        return .optimal;
+    }
+
+    /// Maintain `r' = r - (r_q / alpha_pq) alpha_p` from the tableau row of
+    /// the old basis. `pivot_direction` may have been negated for movement
+    /// from an upper bound, but basis replacement still installs the original
+    /// `A_q`, so the unsigned tableau pivot is the required denominator.
+    fn updateReducedCostsAfterDualPivot(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        entering_col: usize,
+        leaving_row: u32,
+    ) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const row: usize = @intCast(leaving_row);
+        const original_count = problem.num_cols + problem.num_rows;
+        if (row >= problem.num_rows or entering_col >= original_count) return .numerical_failure;
+        const alpha_pq = basis.tableau[entering_col];
+        if (!std.math.isFinite(alpha_pq) or @abs(alpha_pq) <= self.numerical.pivot_tolerance)
+            return .numerical_failure;
+        const theta = basis.reduced_cost[entering_col] / alpha_pq;
+        if (!std.math.isFinite(theta)) return .numerical_failure;
+
+        for (basis.reduced_cost[0..original_count], basis.tableau[0..original_count]) |*reduced, alpha|
+            reduced.* -= theta * alpha;
+        const artificial_begin = original_count;
+        for (0..problem.num_rows) |logical_row|
+            basis.reduced_cost[artificial_begin + logical_row] -=
+                theta * basis.dual_row[logical_row] * basis.artificial_sign[logical_row];
+        basis.reduced_cost[entering_col] = 0.0;
+        for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+        self.reduced_cost_update_count += 1;
+        self.stats.dual_reduced_cost_updates += 1;
+        return .optimal;
+    }
+
     /// Update all reduced costs after a primal basis replacement using the
     /// pivotal row of the old basis: `r' = r - (r_q / alpha_pq) * alpha_p`.
     /// One BTRAN and one CSC scan replace rebuilding `c_B`, solving for the
@@ -3989,6 +4055,14 @@ test "imported dual-feasible basis reoptimizes a changed RHS" {
     try std.testing.expectEqual(SolveStatus.optimal, second_engine.solveProblem(modified, .{ .initial_basis = snapshot.view() }));
     try std.testing.expectEqual(Algorithm.dual_revised, second_engine.algorithm);
     try std.testing.expectApproxEqAbs(@as(f64, 0), second_engine.basis.?.primal[0], 1e-12);
+    try std.testing.expect(second_engine.stats.dual_reduced_cost_updates > 0);
+
+    // Exact refresh replaces a deliberately drifted incremental value and
+    // records the normalized discrepancy before terminal publication.
+    second_engine.basis.?.reduced_cost[0] += 1e-4;
+    try std.testing.expectEqual(SolveStatus.optimal, second_engine.recomputeReducedCostsWithDrift(modified));
+    try std.testing.expect(second_engine.maximum_reduced_cost_drift >= 1e-4);
+    try std.testing.expectEqual(@as(usize, 1), second_engine.stats.dual_exact_reprices);
 }
 
 test "singular imported basis is repaired without discarding independent structural basics" {
@@ -4205,6 +4279,43 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
+}
+
+test "dual rank one reduced cost update uses the old tableau row" {
+    const rows = [_]foundation.RowId{
+        foundation.RowId.fromUsizeAssumeValid(0),
+        foundation.RowId.fromUsizeAssumeValid(0),
+    };
+    const problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &[_]f64{ 0, 0 },
+        .col_lower = &[_]f64{ 0, 0 },
+        .col_upper = &[_]f64{ 1, 1 },
+        .row_lower = &[_]f64{0},
+        .row_upper = &[_]f64{0},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &rows, &[_]f64{ 4, 3 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 2);
+    engine.basis.?.reduced_cost[0] = 2;
+    engine.basis.?.reduced_cost[1] = -1;
+    engine.basis.?.tableau[0] = 4;
+    engine.basis.?.tableau[1] = 3;
+    engine.basis.?.tableau[2] = 1;
+    engine.basis.?.dual_row[0] = 1;
+    engine.basis.?.artificial_sign[0] = -1;
+
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0));
+    try std.testing.expectApproxEqAbs(@as(f64, 0), engine.basis.?.reduced_cost[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -2.5), engine.basis.?.reduced_cost[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -0.5), engine.basis.?.reduced_cost[2], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), engine.basis.?.reduced_cost[3], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), engine.reduced_cost_update_count);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_reduced_cost_updates);
 }
 
 test "hyper-sparse dual candidate list retains the most attractive rows" {

@@ -344,6 +344,14 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(bound_flip_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, bound_flip_stats_line);
 
+    const dual_reprice_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\n",
+        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices },
+    );
+    defer allocator.free(dual_reprice_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, dual_reprice_stats_line);
+
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\ttaboo_retries={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",

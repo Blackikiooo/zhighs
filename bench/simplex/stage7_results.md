@@ -173,6 +173,27 @@ FTRAN calls. The modest reduction is expected because this model's batches
 are predominantly single flips; the new counters permit corpus-wide
 attribution before any further default-policy change.
 
+## Incremental dual reduced costs
+
+Phase-II `solveDual` now retains the old-basis pivotal tableau row and applies
+the exact rank-1 recurrence `r' = r - (r_q / alpha_pq) alpha_p`. This removes
+the previous full BTRAN and matrix reprice, followed by a complete dual
+feasibility scan, after every dual pivot. The entering reduced cost is pinned
+to zero, while logical and artificial entries are updated in the same scaled
+coordinates as structural columns.
+
+The incremental vector is never accepted as a final certificate. An exact
+reprice runs after eight updates or immediately after a fresh factorization,
+records normalized drift, and revalidates dual feasibility. Adaptive mode may
+shorten the refresh period when drift exceeds its tolerance; terminal
+`finishOptimal` independently recomputes basic values and reduced costs before
+publishing the solution. Formula-level and imported-basis dual integration
+tests pass, including deliberate drift injection and exact recovery. The
+40-model default status/objective/residual/ray gate remains green. Counters
+`dual_reduced_cost_updates` and `dual_exact_reprices` were added to the stats
+runner. Forced dual Phase I on `scsd1` correctly reports zero for these
+Phase-II-only counters because all 181 pivots occur before Phase II.
+
 ## Open acceptance gates
 
 - Acquire and lock the five official Netlib special/generated cases.

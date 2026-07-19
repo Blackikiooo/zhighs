@@ -357,9 +357,12 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   `sum(A_j * delta_j)`，每批只做一次 FTRAN 并一次性更新 basic values/status；不得把
   单条 tableau row 错当成完整 `B^-1 A_j`。已增加 batch/flip/FTRAN-saving 统计；单元
   差分与 40 模型 gate 通过，显式 dual `scsd1` 为 36 flips / 33 batches / 节省 3 FTRAN。
-- [ ] 在 `solveDual` 中用已经计算的 pivotal tableau row 增量更新 reduced cost，替换
+- [x] 在 `solveDual` 中用已经计算的 pivotal tableau row 增量更新 reduced cost，替换
   每轮完整 `recomputeReducedCosts + classifyFeasibility`；沿用 periodic exact reprice、
-  drift 抽样、reinversion 恢复和终态 certificate validation 作为安全网。
+  drift 抽样、reinversion 恢复和终态 certificate validation 作为安全网。已使用旧基
+  tableau 实现 rank-1 更新，每 8 次或 fresh factorization 后 exact reprice；adaptive
+  模式按归一化 drift 收紧刷新周期。公式、warm-start dual pivot、drift 恢复单元测试和
+  40 模型默认 gate 均通过，并增加 update/exact-reprice 统计。
 - [ ] 实现完整 Devex reference framework 或 projected steepest-edge recurrence；增加显式
   forcing flag，并实现 DSE 权重失效或更新预算超限时的 deterministic Devex fallback。
   已证实回退的 leaving-column 单点近似不得重新引入。
