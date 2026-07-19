@@ -22,6 +22,7 @@ pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo
 pub const PhaseOnePricingStrategy = enum { inherit, dantzig, devex, steepest_edge };
 pub const PricingKernel = enum { column, row, automatic };
 pub const DevexStrategy = enum { legacy, framework };
+pub const PrimalPricingStrategy = enum { inherit, partial };
 /// Dual edge-weight lifecycle. `inherit` preserves the caller's pricing rule;
 /// `steepest_devex` starts with exact DSE and deterministically falls back to
 /// full dual Devex when the recurrence is rejected or exceeds its work budget.
@@ -188,6 +189,9 @@ pub const SolveControl = struct {
     /// Full reference-framework Devex remains an explicit A/B option until
     /// corpus evidence clears it for the default path.
     devex_strategy: DevexStrategy = .legacy,
+    /// Explicit segmented primal pricing A/B policy. `inherit` preserves the
+    /// engine pricing rule selected by the embedding application.
+    primal_pricing_strategy: PrimalPricingStrategy = .inherit,
     /// Explicit dual DSE -> Devex A/B policy. It is not enabled by default.
     dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
     /// Maximum successful DSE recurrence updates per dual phase before
@@ -351,6 +355,7 @@ pub const SimplexEngine = struct {
     exact_reprices: usize = 0,
     active_pricing_kernel: PricingKernel = .column,
     active_devex_strategy: DevexStrategy = .legacy,
+    active_primal_pricing_strategy: PrimalPricingStrategy = .inherit,
     active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
     active_dual_dse_update_budget: usize = 64,
     dual_dse_updates_since_start: usize = 0,
@@ -391,6 +396,7 @@ pub const SimplexEngine = struct {
     /// The view must outlive this call; the engine never takes ownership of
     /// model arrays. Basis storage is owned by the engine instance.
     pub fn solveProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        self.pricing.resetPartial();
         self.startSolveClock(control);
         self.resetStatistics(control);
         self.work_used = 0;
@@ -410,6 +416,7 @@ pub const SimplexEngine = struct {
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
         self.active_devex_strategy = control.devex_strategy;
+        self.active_primal_pricing_strategy = control.primal_pricing_strategy;
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
         self.dual_dse_updates_since_start = 0;
@@ -700,6 +707,7 @@ pub const SimplexEngine = struct {
     /// guarantee unchanged matrix structure and values. No model view is
     /// retained after this call.
     pub fn reoptimizeProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        self.pricing.resetPartial();
         self.startSolveClock(control);
         self.resetStatistics(control);
         self.work_used = 0;
@@ -716,6 +724,7 @@ pub const SimplexEngine = struct {
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
         self.active_devex_strategy = control.devex_strategy;
+        self.active_primal_pricing_strategy = control.primal_pricing_strategy;
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
         self.dual_dse_updates_since_start = 0;
@@ -1350,6 +1359,9 @@ pub const SimplexEngine = struct {
     fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         const phase_started = self.statisticsTimestamp();
         const iteration_started = self.iterations;
+        const saved_pricing_rule = self.pricing.rule;
+        if (self.active_primal_pricing_strategy == .partial) self.pricing.rule = .partial;
+        defer self.pricing.rule = saved_pricing_rule;
         defer self.recordPhaseElapsed(.phase_two, phase_started);
         defer self.recordPhaseIterations(.phase_two, iteration_started);
         if (self.recomputeReducedCosts(problem) != .optimal) {
@@ -1511,6 +1523,14 @@ pub const SimplexEngine = struct {
                 basis.col_status[0..column_count],
                 tolerance,
             )
+        else if (self.pricing.rule == .partial)
+            self.pricing.choosePrimalEnteringMultiple(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                basis.col_edge_weight[0..column_count],
+                basis.flip_columns[0..column_count],
+                tolerance,
+            )
         else
             self.pricing.choosePrimalEnteringWeighted(
                 basis.reduced_cost[0..column_count],
@@ -1542,6 +1562,14 @@ pub const SimplexEngine = struct {
                 else
                     &.{},
                 self.iterations,
+                tolerance,
+            )
+        else if (self.pricing.rule == .partial)
+            self.pricing.choosePrimalEnteringMultiple(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                basis.col_edge_weight[0..column_count],
+                basis.flip_columns[0..column_count],
                 tolerance,
             )
         else
@@ -2454,7 +2482,7 @@ pub const SimplexEngine = struct {
         const saved_pricing_rule = self.pricing.rule;
         const phase_two_refresh_period = self.reduced_cost_refresh_period;
         self.pricing.rule = switch (control.phase_one_pricing) {
-            .inherit => saved_pricing_rule,
+            .inherit => if (self.active_primal_pricing_strategy == .partial) .partial else saved_pricing_rule,
             .dantzig => .dantzig,
             .devex => .devex,
             .steepest_edge => .steepest_edge,

@@ -380,6 +380,11 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   通过。当前仍为 forcing mode，须完成 Stage 7 corpus A/B 后才考虑默认化。
 - [ ] 实现真正的 partial/multiple pricing：持久维护分段候选与扫描游标，避免宽模型每轮
   扫描全部列；先对 `dfl001/fit2p/pilot` 记录 PRICE 占比、候选命中率和完整 solve A/B。
+  已完成第一阶段 forcing 实现：全局 refill 将当前 improving columns 写入复用的
+  `flip_columns` workspace，下一次 pivot 仅重新验证候选池，随后强制全局 refill；无新增
+  allocation。更长的 8-update 缓存周期在 `scrs8` 产生 5728 次后的 factorization failure，
+  已拒绝。1-update 周期通过 40 模型 gate，`scrs8` 为 1716 -> 1617 iterations；仍需完成
+  三个宽模型的统计归因和 21 轮 A/B 后才能勾选及调整 refill 周期。
 - [ ] 完成第 6.3 节 scale-aware dual Phase I 后，再增加 Phase-II primal/dual 自动选择；
   logical/crash basis 若既非 primal-feasible 也非 dual-feasible，必须先得到经验证的可行
   basis，不能仅凭 infeasibility 计数直接跳入 dual Phase II。

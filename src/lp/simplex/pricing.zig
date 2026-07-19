@@ -14,6 +14,22 @@ pub const Pricing = struct {
     rule: PricingRule = .devex,
     devex_reset_period: usize = 100,
     iterations: usize = 0,
+    /// Persistent segmented-pricing cursor. A segment is selected once per
+    /// pricing operation; only an all-segment miss can certify optimality.
+    partial_candidate_count: usize = 0,
+    partial_cached_searches: usize = 0,
+    partial_refill_interval: usize = 1,
+    partial_searches: usize = 0,
+    partial_scanned_entries: usize = 0,
+    partial_full_scans: usize = 0,
+
+    pub fn resetPartial(self: *Pricing) void {
+        self.partial_candidate_count = 0;
+        self.partial_cached_searches = 0;
+        self.partial_searches = 0;
+        self.partial_scanned_entries = 0;
+        self.partial_full_scans = 0;
+    }
 
     fn normalizedScore(self: Pricing, violation: f64, weight: f64) f64 {
         return switch (self.rule) {
@@ -113,6 +129,81 @@ pub const Pricing = struct {
         return best;
     }
 
+    /// Multiple pricing over a caller-owned persistent candidate array. A
+    /// global refill records every currently improving column. Later pivots
+    /// rescore only that pool until it is exhausted, at which point another
+    /// full scan is required before optimality can be certified.
+    pub fn choosePrimalEnteringMultiple(
+        self: *Pricing,
+        reduced_cost: []const f64,
+        status: []const basis.BasisStatus,
+        edge_weight: []const f64,
+        candidates: []u32,
+        tolerance: f64,
+    ) ?EnteringChoice {
+        if (status.len < reduced_cost.len or candidates.len < reduced_cost.len) return null;
+        if (edge_weight.len != 0 and edge_weight.len < reduced_cost.len) return null;
+        self.iterations += 1;
+        self.partial_searches += 1;
+
+        if (self.partial_candidate_count != 0 and
+            (self.partial_refill_interval == 0 or self.partial_cached_searches < self.partial_refill_interval))
+        {
+            var retained: usize = 0;
+            var best: ?EnteringChoice = null;
+            var best_score = tolerance;
+            for (candidates[0..self.partial_candidate_count]) |column_u32| {
+                const column: usize = @intCast(column_u32);
+                const choice = primalCandidate(reduced_cost[column], status[column], tolerance) orelse continue;
+                candidates[retained] = column_u32;
+                retained += 1;
+                const weight = if (edge_weight.len == 0) 1.0 else edge_weight[column];
+                const score = self.normalizedScore(choice.violation, weight);
+                if (score > best_score) {
+                    best_score = score;
+                    best = .{ .column = column_u32, .direction = choice.direction };
+                }
+            }
+            self.partial_scanned_entries += self.partial_candidate_count;
+            self.partial_candidate_count = retained;
+            if (best) |choice| {
+                self.partial_cached_searches += 1;
+                return choice;
+            }
+        }
+
+        var best: ?EnteringChoice = null;
+        var best_score = tolerance;
+        var count: usize = 0;
+        for (reduced_cost, status[0..reduced_cost.len], 0..) |value, column_status, column| {
+            const choice = primalCandidate(value, column_status, tolerance) orelse continue;
+            candidates[count] = @intCast(column);
+            count += 1;
+            const weight = if (edge_weight.len == 0) 1.0 else edge_weight[column];
+            const score = self.normalizedScore(choice.violation, weight);
+            if (score > best_score) {
+                best_score = score;
+                best = .{ .column = @intCast(column), .direction = choice.direction };
+            }
+        }
+        self.partial_scanned_entries += reduced_cost.len;
+        self.partial_candidate_count = count;
+        self.partial_cached_searches = 0;
+        self.partial_full_scans += 1;
+        return best;
+    }
+
+    const PrimalCandidate = struct { violation: f64, direction: f64 };
+
+    fn primalCandidate(value: f64, column_status: basis.BasisStatus, tolerance: f64) ?PrimalCandidate {
+        return switch (column_status) {
+            .at_lower => if (-value > tolerance) .{ .violation = -value, .direction = 1 } else null,
+            .at_upper => if (value > tolerance) .{ .violation = value, .direction = -1 } else null,
+            .free, .superbasic => if (@abs(value) > tolerance) .{ .violation = @abs(value), .direction = if (value < 0) 1 else -1 } else null,
+            .basic, .fixed => null,
+        };
+    }
+
     /// Weighted pricing with a deterministic virtual cost perturbation used
     /// solely as a tie-break. Candidate eligibility and reduced costs remain
     /// in the original coordinates.
@@ -129,6 +220,9 @@ pub const Pricing = struct {
         if (status.len < reduced_cost.len or column_rank.len < reduced_cost.len) return null;
         if (edge_weight.len != 0 and edge_weight.len < reduced_cost.len) return null;
         if (taboo_until.len != 0 and taboo_until.len < reduced_cost.len) return null;
+        // Degeneracy perturbation requires a globally stable rank tie-break;
+        // keep its validated full scan until segmented candidate caching also
+        // stores rank and taboo generations.
         self.iterations += 1;
         var best: ?EnteringChoice = null;
         var best_score = tolerance;
@@ -234,4 +328,23 @@ test "Bland pricing selects the first improving nonbasic column" {
     ).?;
     try std.testing.expectEqual(@as(u32, 1), choice.column);
     try std.testing.expectEqual(@as(f64, 1), choice.direction);
+}
+
+test "multiple pricing reuses one validated candidate pool then refills" {
+    var pricing = Pricing{ .rule = .partial, .partial_refill_interval = 1 };
+    const costs = [_]f64{ -2, -5, -9, 1 };
+    var statuses: [4]basis.BasisStatus = @splat(.at_lower);
+    var candidates: [4]u32 = undefined;
+
+    const first = pricing.choosePrimalEnteringMultiple(&costs, &statuses, &.{}, &candidates, 1e-9).?;
+    statuses[first.column] = .basic;
+    const second = pricing.choosePrimalEnteringMultiple(&costs, &statuses, &.{}, &candidates, 1e-9).?;
+    statuses[second.column] = .basic;
+    const third = pricing.choosePrimalEnteringMultiple(&costs, &statuses, &.{}, &candidates, 1e-9).?;
+
+    try std.testing.expectEqual(@as(u32, 2), first.column);
+    try std.testing.expectEqual(@as(u32, 1), second.column);
+    try std.testing.expectEqual(@as(u32, 0), third.column);
+    try std.testing.expectEqual(@as(usize, 2), pricing.partial_full_scans);
+    try std.testing.expectEqual(@as(usize, 11), pricing.partial_scanned_entries);
 }

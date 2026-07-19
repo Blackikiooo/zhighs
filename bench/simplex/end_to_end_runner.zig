@@ -70,6 +70,10 @@ pub fn main(init: std.process.Init) !void {
     else
         .inherit;
     const dual_dse_update_budget = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
+    const primal_pricing_strategy: zhighs.lp.simplex.engine.PrimalPricingStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "partial")) .partial else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
+    else
+        .inherit;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -150,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
         .devex_strategy = devex_strategy,
         .dual_edge_weight_strategy = dual_edge_weight_strategy,
         .dual_dse_update_budget = dual_dse_update_budget,
+        .primal_pricing_strategy = primal_pricing_strategy,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -371,6 +376,14 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(devex_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, devex_stats_line);
+
+    const partial_pricing_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tpartial_searches={d}\tpartial_scanned_entries={d}\tpartial_full_scans={d}\n",
+        .{ path, engine.pricing.partial_searches, engine.pricing.partial_scanned_entries, engine.pricing.partial_full_scans },
+    );
+    defer allocator.free(partial_pricing_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, partial_pricing_stats_line);
 
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
