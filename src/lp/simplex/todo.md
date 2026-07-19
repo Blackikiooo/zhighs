@@ -363,9 +363,15 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   tableau 实现 rank-1 更新，每 8 次或 fresh factorization 后 exact reprice；adaptive
   模式按归一化 drift 收紧刷新周期。公式、warm-start dual pivot、drift 恢复单元测试和
   40 模型默认 gate 均通过，并增加 update/exact-reprice 统计。
-- [ ] 实现完整 Devex reference framework 或 projected steepest-edge recurrence；增加显式
-  forcing flag，并实现 DSE 权重失效或更新预算超限时的 deterministic Devex fallback。
-  已证实回退的 leaving-column 单点近似不得重新引入。
+- [x] 实现完整 primal Devex reference framework 和显式 `legacy/framework` forcing flag：
+  冻结 nonbasic reference bits，以 FTRAN direction 计算 pivotal reference norm，并用完整
+  old-basis tableau row 更新所有候选；累计 4 个 bad weights 后在 pivot 提交后重建 framework。
+  两种策略均通过 40 模型 gate。`brandy` 21 轮为 1519 -> 498 iterations，median
+  `22.87 -> 9.70 ms`、p95 `23.50 -> 10.08 ms`；requested bytes `418233 -> 426441`。
+  `bore3d/scorpion/seba` 等仍有 iteration 回退，且当前缺少解压的 `d2q06c/d6cube` 文件，
+  因此继续保留显式 A/B，完成 Stage 7 后才决定默认化。已证实回退的单点近似不得重引。
+- [ ] 为 dual DSE 增加权重失效或更新预算超限时的 deterministic Devex fallback，并以
+  显式 forcing mode 通过 warm-start dual 与完整 corpus A/B 后再考虑默认切换。
 - [ ] 实现真正的 partial/multiple pricing：持久维护分段候选与扫描游标，避免宽模型每轮
   扫描全部列；先对 `dfl001/fit2p/pilot` 记录 PRICE 占比、候选命中率和完整 solve A/B。
 - [ ] 完成第 6.3 节 scale-aware dual Phase I 后，再增加 Phase-II primal/dual 自动选择；

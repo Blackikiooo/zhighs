@@ -41,6 +41,9 @@ pub const BasisState = struct {
     /// pricing mutates them, while pricing scans remain contiguous SoA loops.
     col_edge_weight: []f64 = &.{},
     row_edge_weight: []f64 = &.{},
+    /// Frozen nonbasic reference set for a primal Devex framework. Bytes keep
+    /// the hot weighted-norm loop branch-light and avoid packed-bit updates.
+    devex_reference: []u8 = &.{},
     dual_row: []f64 = &.{},
     tableau: []f64 = &.{},
     dual_ratio: []f64 = &.{},
@@ -80,6 +83,7 @@ pub const BasisState = struct {
         self.residual_work = try allocator.alloc(f64, rows);
         self.col_edge_weight = try allocator.alloc(f64, total_cols);
         self.row_edge_weight = try allocator.alloc(f64, rows);
+        self.devex_reference = try allocator.alloc(u8, total_cols);
         self.dual_row = try allocator.alloc(f64, rows);
         self.tableau = try allocator.alloc(f64, total_cols);
         self.dual_ratio = try allocator.alloc(f64, total_cols);
@@ -114,6 +118,7 @@ pub const BasisState = struct {
         @memset(self.residual_work, 0.0);
         @memset(self.col_edge_weight, 1.0);
         @memset(self.row_edge_weight, 1.0);
+        @memset(self.devex_reference, 0);
         @memset(self.dual_row, 0.0);
         @memset(self.tableau, 0.0);
         @memset(self.dual_ratio, std.math.inf(f64));
@@ -183,6 +188,7 @@ pub const BasisState = struct {
         self.allocator.free(self.residual_work);
         self.allocator.free(self.col_edge_weight);
         self.allocator.free(self.row_edge_weight);
+        self.allocator.free(self.devex_reference);
         self.allocator.free(self.dual_row);
         self.allocator.free(self.tableau);
         self.allocator.free(self.dual_ratio);
@@ -223,6 +229,7 @@ pub const BasisState = struct {
         total += std.mem.sliceAsBytes(self.residual_work).len;
         total += std.mem.sliceAsBytes(self.col_edge_weight).len;
         total += std.mem.sliceAsBytes(self.row_edge_weight).len;
+        total += std.mem.sliceAsBytes(self.devex_reference).len;
         total += std.mem.sliceAsBytes(self.dual_row).len;
         total += std.mem.sliceAsBytes(self.tableau).len;
         total += std.mem.sliceAsBytes(self.dual_ratio).len;

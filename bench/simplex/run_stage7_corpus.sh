@@ -19,6 +19,7 @@ RUN_HIGHS=${RUN_HIGHS:-1}
 CLP_RUNNER=${CLP_RUNNER:-}
 DEGENERACY_STRATEGY=${DEGENERACY_STRATEGY:-auto}
 ADAPTIVE_REPRICE=${ADAPTIVE_REPRICE:-fixed}
+DEVEX_STRATEGY=${DEVEX_STRATEGY:-legacy}
 
 fail() {
   echo "stage7 corpus: $*" >&2
@@ -89,6 +90,7 @@ trap 'rm -rf -- "$work_dir"' EXIT
   printf '# memory_limit_kb\t%s\n' "$MEMORY_LIMIT_KB"
   printf '# degeneracy_strategy\t%s\n' "$DEGENERACY_STRATEGY"
   printf '# adaptive_reprice\t%s\n' "$ADAPTIVE_REPRICE"
+  printf '# devex_strategy\t%s\n' "$DEVEX_STRATEGY"
   printf '# corpus_lock\t%s\n' "$CORPUS_LOCK"
 } >> "$OUTPUT_FILE"
 
@@ -145,7 +147,7 @@ for model in "${MODELS[@]}"; do
   echo "stage7 corpus: $model" >&2
   run_solver "$model" zhighs "$ZHIGHS_RUNNER" "$path" \
     1000000 100 no-trace 8 2 64 stats 32 primal logical 0 \
-    "$DEGENERACY_STRATEGY" inherit "$ADAPTIVE_REPRICE" column
+    "$DEGENERACY_STRATEGY" inherit "$ADAPTIVE_REPRICE" column "$DEVEX_STRATEGY"
   if [[ "$RUN_HIGHS" == 1 ]]; then
     run_solver "$model" highs "$HIGHS_RUNNER" "$path"
   fi

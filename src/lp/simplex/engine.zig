@@ -21,6 +21,7 @@ pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
 pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo, automatic };
 pub const PhaseOnePricingStrategy = enum { inherit, dantzig, devex, steepest_edge };
 pub const PricingKernel = enum { column, row, automatic };
+pub const DevexStrategy = enum { legacy, framework };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -180,6 +181,9 @@ pub const SolveControl = struct {
     /// Select once per pricing operation; no representation branch exists in
     /// either coefficient inner loop.
     pricing_kernel: PricingKernel = .column,
+    /// Full reference-framework Devex remains an explicit A/B option until
+    /// corpus evidence clears it for the default path.
+    devex_strategy: DevexStrategy = .legacy,
 };
 
 pub const SimplexStats = struct {
@@ -211,6 +215,9 @@ pub const SimplexStats = struct {
     bound_flip_ftran_savings: usize = 0,
     dual_reduced_cost_updates: usize = 0,
     dual_exact_reprices: usize = 0,
+    devex_frameworks: usize = 0,
+    devex_framework_updates: usize = 0,
+    devex_bad_weights: usize = 0,
     degeneracy_bound_ties: usize = 0,
     degeneracy_ratio_ties: usize = 0,
     degeneracy_zero_primal_steps: usize = 0,
@@ -330,6 +337,10 @@ pub const SimplexEngine = struct {
     maximum_reduced_cost_drift: f64 = 0.0,
     exact_reprices: usize = 0,
     active_pricing_kernel: PricingKernel = .column,
+    active_devex_strategy: DevexStrategy = .legacy,
+    devex_framework_iterations: usize = 0,
+    devex_bad_weight_count: usize = 0,
+    devex_reset_after_pivot: bool = false,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{
@@ -382,6 +393,7 @@ pub const SimplexEngine = struct {
         };
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
+        self.active_devex_strategy = control.devex_strategy;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -684,6 +696,7 @@ pub const SimplexEngine = struct {
         };
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
+        self.active_devex_strategy = control.devex_strategy;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -1127,7 +1140,8 @@ pub const SimplexEngine = struct {
                 self.dual_edge_weights_valid = false;
         } else {
             self.dual_edge_weights_valid = false;
-            self.updateDevexWeights(entering_col, leaving_row, pivot);
+            if (self.algorithm == .dual_revised or self.active_devex_strategy == .legacy)
+                self.updateLegacyDevexWeights(entering_col, leaving_row, pivot);
         }
         self.dual_row_index = null;
         var forced_rebuild_reason: ?RebuildReason = null;
@@ -1168,6 +1182,10 @@ pub const SimplexEngine = struct {
         basis.primal[entering_col] = entering_value;
         basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
         basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
+        if (self.devex_reset_after_pivot) {
+            self.initializePrimalDevexFramework();
+            self.devex_reset_after_pivot = false;
+        }
         for (basis.basic_index, basis.basic_value) |global_col, value| basis.primal[global_col] = value;
         if (self.pivot_trace_count < self.active_pivot_trace.len) {
             self.active_pivot_trace[self.pivot_trace_count] = .{
@@ -1205,7 +1223,7 @@ pub const SimplexEngine = struct {
     /// Lightweight Devex reference update. It deliberately uses the already
     /// hot FTRAN direction and does not allocate. Exact steepest-edge weights
     /// can replace this policy without changing basis storage or pivot code.
-    fn updateDevexWeights(self: *SimplexEngine, entering_col: usize, leaving_row: usize, pivot: f64) void {
+    fn updateLegacyDevexWeights(self: *SimplexEngine, entering_col: usize, leaving_row: usize, pivot: f64) void {
         const basis = if (self.basis) |*value| value else return;
         if (entering_col >= basis.col_edge_weight.len or leaving_row >= basis.row_edge_weight.len) return;
         var norm_squared: f64 = 1.0;
@@ -1224,6 +1242,59 @@ pub const SimplexEngine = struct {
         }
     }
 
+    /// Freeze the current nonbasic set as a primal Devex reference framework.
+    /// Subsequent pivots retain these bits until accumulated weight error
+    /// triggers a deterministic reset after the combinatorial pivot commits.
+    fn initializePrimalDevexFramework(self: *SimplexEngine) void {
+        const basis = if (self.basis) |*value| value else return;
+        @memset(basis.col_edge_weight, 1.0);
+        for (basis.devex_reference, basis.col_status) |*reference, status|
+            reference.* = @intFromBool(status != .basic);
+        self.devex_framework_iterations = 0;
+        self.devex_bad_weight_count = 0;
+        self.stats.devex_frameworks += 1;
+    }
+
+    /// Full primal Devex reference recurrence. The pivotal norm is evaluated
+    /// from the frozen reference set and the hot FTRAN direction, then every
+    /// nonbasic weight touched by the complete old-basis tableau row is raised
+    /// to its framework lower bound. No candidate list or allocation is used.
+    fn updatePrimalDevexFramework(
+        self: *SimplexEngine,
+        entering_col: usize,
+        leaving_row: usize,
+        pivot: f64,
+    ) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        if (entering_col >= basis.col_edge_weight.len or leaving_row >= basis.basic_index.len or
+            @abs(pivot) <= self.numerical.pivot_tolerance)
+            return .numerical_failure;
+        var pivotal_norm: f64 = @floatFromInt(basis.devex_reference[entering_col]);
+        for (basis.basic_index, basis.pivot_direction) |basic_column, direction| {
+            if (basis.devex_reference[basic_column] != 0) pivotal_norm += direction * direction;
+        }
+        if (!std.math.isFinite(pivotal_norm) or pivotal_norm <= 0.0) return .numerical_failure;
+        if (basis.col_edge_weight[entering_col] > 3.0 * pivotal_norm) {
+            self.devex_bad_weight_count += 1;
+            self.stats.devex_bad_weights += 1;
+        }
+        const new_pivotal_weight = pivotal_norm / (pivot * pivot);
+        if (!std.math.isFinite(new_pivotal_weight)) return .numerical_failure;
+        for (basis.col_edge_weight, basis.devex_reference, basis.tableau, basis.col_status) |*weight, reference, alpha, status| {
+            if (status == .basic) continue;
+            const candidate = new_pivotal_weight * alpha * alpha + @as(f64, @floatFromInt(reference));
+            if (!std.math.isFinite(candidate)) return .numerical_failure;
+            weight.* = @max(weight.*, candidate);
+        }
+        const leaving_col: usize = @intCast(basis.basic_index[leaving_row]);
+        basis.col_edge_weight[leaving_col] = @max(1.0, new_pivotal_weight);
+        basis.col_edge_weight[entering_col] = 1.0;
+        self.devex_framework_iterations += 1;
+        self.stats.devex_framework_updates += 1;
+        if (self.devex_bad_weight_count > 3) self.devex_reset_after_pivot = true;
+        return .optimal;
+    }
+
     fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         const phase_started = self.statisticsTimestamp();
         const iteration_started = self.iterations;
@@ -1233,6 +1304,8 @@ pub const SimplexEngine = struct {
             self.failure_site = .reduced_cost;
             return .numerical_failure;
         }
+        if (self.pricing.rule == .devex and self.active_devex_strategy == .framework)
+            self.initializePrimalDevexFramework();
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_two)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -2292,6 +2365,8 @@ pub const SimplexEngine = struct {
         defer self.reduced_cost_refresh_period = phase_two_refresh_period;
         defer self.recordPhaseElapsed(.phase_one, phase_started);
         defer self.recordPhaseIterations(.phase_one, iteration_started);
+        if (self.pricing.rule == .devex and self.active_devex_strategy == .framework)
+            self.initializePrimalDevexFramework();
         if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_one)) |status| return status;
@@ -3045,17 +3120,23 @@ pub const SimplexEngine = struct {
                     const row_index = matrix_row.toUsize();
                     tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
                 }
+                basis.tableau[column] = tableau_entry;
                 basis.reduced_cost[column] -= theta * tableau_entry;
             }
         }
         const artificial_begin = problem.num_cols + problem.num_rows;
         for (0..problem.num_rows) |logical_row| {
             const multiplier = theta * basis.residual_work[logical_row];
+            basis.tableau[problem.num_cols + logical_row] = basis.residual_work[logical_row];
+            basis.tableau[artificial_begin + logical_row] = basis.residual_work[logical_row] * basis.artificial_sign[logical_row];
             basis.reduced_cost[problem.num_cols + logical_row] -= multiplier;
             basis.reduced_cost[artificial_begin + logical_row] -= multiplier * basis.artificial_sign[logical_row];
         }
         basis.reduced_cost[entering_col] = 0.0;
         for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+        if (self.pricing.rule == .devex and self.active_devex_strategy == .framework and
+            self.updatePrimalDevexFramework(entering_col, row, actual_pivot) != .optimal)
+            return .numerical_failure;
         self.reduced_cost_update_count += 1;
         return .optimal;
     }
@@ -4316,6 +4397,27 @@ test "dual rank one reduced cost update uses the old tableau row" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), engine.basis.?.reduced_cost[3], 1e-12);
     try std.testing.expectEqual(@as(usize, 1), engine.reduced_cost_update_count);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_reduced_cost_updates);
+}
+
+test "primal Devex framework updates every nonbasic tableau weight" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 2);
+    engine.basis.?.initializeSlackBasis();
+    engine.initializePrimalDevexFramework();
+    engine.basis.?.pivot_direction[0] = 2;
+    engine.basis.?.pivot_direction[1] = 1;
+    engine.basis.?.tableau[0] = 2;
+    engine.basis.?.tableau[1] = 3;
+    engine.basis.?.tableau[2] = 1;
+
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updatePrimalDevexFramework(0, 0, 2));
+    // Initial logical basics are outside the frozen reference set, so the
+    // pivotal reference norm is the entering coordinate alone: 1 / 2^2.
+    try std.testing.expectApproxEqAbs(@as(f64, 3.25), engine.basis.?.col_edge_weight[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), engine.basis.?.col_edge_weight[2], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), engine.basis.?.col_edge_weight[0], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.devex_framework_updates);
 }
 
 test "hyper-sparse dual candidate list retains the most attractive rows" {

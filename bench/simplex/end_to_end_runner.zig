@@ -61,6 +61,10 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, text, "row")) .row else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "column")) .column else return error.InvalidArguments
     else
         .column;
+    const devex_strategy: zhighs.lp.simplex.engine.DevexStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "framework")) .framework else if (std.mem.eql(u8, text, "legacy")) .legacy else return error.InvalidArguments
+    else
+        .legacy;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -138,6 +142,7 @@ pub fn main(init: std.process.Init) !void {
         .phase_one_pricing = phase_one_pricing,
         .adaptive_reprice = adaptive_reprice,
         .pricing_kernel = pricing_kernel,
+        .devex_strategy = devex_strategy,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -351,6 +356,14 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(dual_reprice_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_reprice_stats_line);
+
+    const devex_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tdevex_frameworks={d}\tdevex_framework_updates={d}\tdevex_bad_weights={d}\n",
+        .{ path, simplex_stats.devex_frameworks, simplex_stats.devex_framework_updates, simplex_stats.devex_bad_weights },
+    );
+    defer allocator.free(devex_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, devex_stats_line);
 
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,

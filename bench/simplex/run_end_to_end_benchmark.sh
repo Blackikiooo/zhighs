@@ -6,6 +6,14 @@ readonly REPOSITORY_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 CORPUS_DIR=${CORPUS_DIR:-/home/godv/codefiles/cppfiles/scipoptsuite-10.0.2/soplex/check/instances}
 RUNS=${RUNS:-7}
 WARMUPS=${WARMUPS:-2}
+PHASE_ONE_STRATEGY=${PHASE_ONE_STRATEGY:-primal}
+CRASH_STRATEGY=${CRASH_STRATEGY:-logical}
+CRASH_MAX_COLUMNS=${CRASH_MAX_COLUMNS:-0}
+DEGENERACY_STRATEGY=${DEGENERACY_STRATEGY:-auto}
+PHASE_ONE_PRICING=${PHASE_ONE_PRICING:-inherit}
+ADAPTIVE_REPRICE=${ADAPTIVE_REPRICE:-fixed}
+PRICING_KERNEL=${PRICING_KERNEL:-column}
+DEVEX_STRATEGY=${DEVEX_STRATEGY:-legacy}
 MODELS=("$@")
 if (($# == 0)); then MODELS=(gas11 brandy sc105 scsd1); fi
 
@@ -14,11 +22,14 @@ if (($# == 0)); then MODELS=(gas11 brandy sc105 scsd1); fi
 
 cd "$REPOSITORY_ROOT"
 VERIFY_TRACES=0 "$SCRIPT_DIR/run_end_to_end_corpus.sh" "$CORPUS_DIR" "${MODELS[@]}" >/dev/null
+readonly COMMON_ARGS=(1000000 100 no-trace 8 2 64)
+readonly POLICY_ARGS=(32 "$PHASE_ONE_STRATEGY" "$CRASH_STRATEGY" "$CRASH_MAX_COLUMNS" \
+  "$DEGENERACY_STRATEGY" "$PHASE_ONE_PRICING" "$ADAPTIVE_REPRICE" "$PRICING_KERNEL" "$DEVEX_STRATEGY")
 
 for model in "${MODELS[@]}"; do
   for ((run = 0; run < WARMUPS; run++)); do
-    zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" >/dev/null
-    zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" 1000000 100 no-trace 8 2 64 stats >/dev/null
+    zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" "${COMMON_ARGS[@]}" no-stats "${POLICY_ARGS[@]}" >/dev/null
+    zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" "${COMMON_ARGS[@]}" stats "${POLICY_ARGS[@]}" >/dev/null
     zig-out/bin/highs-end-to-end "$CORPUS_DIR/$model.mps" >/dev/null
   done
 done
@@ -27,8 +38,8 @@ samples=$(mktemp /tmp/zhighs-end-to-end-benchmark.XXXXXX.tsv)
 trap 'rm -f "$samples"' EXIT
 for model in "${MODELS[@]}"; do
   for ((run = 1; run <= RUNS; run++)); do
-    zig_output=$(zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps")
-    stats_output=$(zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" 1000000 100 no-trace 8 2 64 stats)
+    zig_output=$(zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" "${COMMON_ARGS[@]}" no-stats "${POLICY_ARGS[@]}")
+    stats_output=$(zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" "${COMMON_ARGS[@]}" stats "${POLICY_ARGS[@]}")
     highs_output=$(zig-out/bin/highs-end-to-end "$CORPUS_DIR/$model.mps")
     awk -F '\t' -v model="$model" -v run="$run" '
       $1 == "zhighs" && total == "" { total = $18 }

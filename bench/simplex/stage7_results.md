@@ -194,6 +194,40 @@ tests pass, including deliberate drift injection and exact recovery. The
 runner. Forced dual Phase I on `scsd1` correctly reports zero for these
 Phase-II-only counters because all 181 pivots occur before Phase II.
 
+## Full primal Devex reference framework
+
+An explicit `legacy/framework` policy now separates the frozen default from a
+full primal Devex implementation. The framework stores one byte per internal
+column for the frozen nonbasic reference set. Each basis replacement computes
+the pivotal reference norm from the existing FTRAN direction, divides it by
+the squared pivot, and applies the resulting lower bound to every nonbasic
+weight in the complete old-basis tableau row. Four accumulated overestimated
+entering weights trigger a deterministic framework rebuild after the pivot is
+committed. This is the complete recurrence, not the previously rejected
+leaving-column-only approximation.
+
+Both policies pass the 40-model status/objective/residual/ray gate. Framework
+mode gives the following 21-run ReleaseFast result on `brandy`:
+
+| Metric | Legacy median / p95 | Framework median / p95 |
+| --- | ---: | ---: |
+| iterations | 1,519 | 498 |
+| total | 22.87 / 23.50 ms | 9.70 / 10.08 ms |
+| Phase I | 17.79 / 18.44 ms | 7.03 / 7.44 ms |
+| Phase II | 7.39 / 7.68 ms | 3.44 / 3.64 ms |
+| PRICE | 5.88 / 6.06 ms | 2.91 / 3.02 ms |
+| FTRAN | 4.52 / 4.71 ms | 1.65 / 1.89 ms |
+| BTRAN | 2.48 / 2.56 ms | 1.22 / 1.32 ms |
+| requested bytes | 418,233 | 426,441 |
+| peak RSS | 2,016 KiB | 2,012 KiB |
+
+One instrumented framework solve uses seven frameworks, performs 372 full
+weight updates, and records 23 bad entering weights. The 40-model run also
+shows non-universal iteration changes: `bore3d` 252 -> 333, `scorpion`
+512 -> 619, and `seba` 564 -> 704, while many larger paths improve sharply.
+The mode therefore remains explicit until the missing `d2q06c/d6cube` inputs
+and the full Stage 7 corpus are rerun; it is not yet the release default.
+
 ## Open acceptance gates
 
 - Acquire and lock the five official Netlib special/generated cases.
@@ -201,8 +235,8 @@ Phase-II-only counters because all 181 pivots occur before Phase II.
 - Reduce the three zhighs-only 10-second long tails: `d2q06c`, `fit2p`, and
   `pilot`. The former already improves from 100,941 to 98,703 iterations but
   remains outside the initial cap.
-- Implement and A/B a complete Devex/projected steepest-edge recurrence; the
-  rejected one-column approximation must not be reintroduced.
+- Run the full Devex framework on the Stage 7 corpus, especially
+  `d2q06c/d6cube`, before deciding whether it replaces the legacy default.
 - Add reversible LP presolve (at minimum fixed columns, empty rows/columns and
   singleton rows) with primal/dual/ray/certificate postsolve validation.
 - Finish 60-second classification for the large models, then choose the final

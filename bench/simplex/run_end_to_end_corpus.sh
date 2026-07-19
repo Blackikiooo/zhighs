@@ -15,6 +15,7 @@ DEGENERACY_STRATEGY=${DEGENERACY_STRATEGY:-baseline}
 PHASE_ONE_PRICING=${PHASE_ONE_PRICING:-inherit}
 ADAPTIVE_REPRICE=${ADAPTIVE_REPRICE:-fixed}
 PRICING_KERNEL=${PRICING_KERNEL:-column}
+DEVEX_STRATEGY=${DEVEX_STRATEGY:-legacy}
 CORPUS_DIR=${1:-/home/godv/codefiles/cppfiles/scipoptsuite-10.0.2/soplex/check/instances}
 if (($#)); then shift; fi
 
@@ -64,7 +65,7 @@ for model in "${MODELS[@]}"; do
   path="$CORPUS_DIR/$model.mps"
   zig-out/bin/simplex-end-to-end "$path" 1000000 100 no-trace 8 2 64 no-stats 32 \
     "$PHASE_ONE_STRATEGY" "$CRASH_STRATEGY" "$CRASH_MAX_COLUMNS" \
-    "$DEGENERACY_STRATEGY" "$PHASE_ONE_PRICING" "$ADAPTIVE_REPRICE" "$PRICING_KERNEL" | tee -a "$result_file"
+    "$DEGENERACY_STRATEGY" "$PHASE_ONE_PRICING" "$ADAPTIVE_REPRICE" "$PRICING_KERNEL" "$DEVEX_STRATEGY" | tee -a "$result_file"
   zig-out/bin/highs-end-to-end "$path" | tee -a "$result_file"
 done
 
@@ -150,7 +151,7 @@ if [[ ${VERIFY_TRACES:-1} == 1 ]]; then
     trace_file=$(mktemp "/tmp/zhighs-$model-trace.XXXXXX.tsv")
     zig-out/bin/simplex-end-to-end "$CORPUS_DIR/$model.mps" 1000000 100 trace 8 2 64 no-stats 32 \
       "$PHASE_ONE_STRATEGY" "$CRASH_STRATEGY" "$CRASH_MAX_COLUMNS" \
-      "$DEGENERACY_STRATEGY" "$PHASE_ONE_PRICING" "$ADAPTIVE_REPRICE" "$PRICING_KERNEL" \
+      "$DEGENERACY_STRATEGY" "$PHASE_ONE_PRICING" "$ADAPTIVE_REPRICE" "$PRICING_KERNEL" "$DEVEX_STRATEGY" \
       >/dev/null 2>"$trace_file"
     actual_count=$(awk -F '\t' '$1 == "pivot" {count++} END {print count + 0}' "$trace_file")
     # Hash the structural pivot path, not floating diagnostics that may vary
