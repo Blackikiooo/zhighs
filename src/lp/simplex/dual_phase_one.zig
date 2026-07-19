@@ -15,6 +15,9 @@ pub const DualPhaseOneWorkspace = struct {
     dual_infeasibility: []f64 = &.{},
     perturbation: []f64 = &.{},
     basis_epoch: u64 = 0,
+    /// Basic-coordinate envelope in the engine's scaled coordinates when the
+    /// current Phase-I epoch was installed.
+    working_radius: f64 = 1.0,
     active: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) DualPhaseOneWorkspace {
@@ -75,20 +78,40 @@ pub const DualPhaseOneWorkspace = struct {
         basis: *basis_module.BasisState,
         original_count: usize,
     ) void {
+        var radius: f64 = 1.0;
+        for (basis.basic_index, basis.basic_value) |column_u32, value| {
+            const column: usize = @intCast(column_u32);
+            if (column >= original_count or !std.math.isFinite(value)) continue;
+            const lower = self.saved_lower[column];
+            const upper = self.saved_upper[column];
+            const violation = @max(
+                if (std.math.isFinite(lower)) lower - value else 0.0,
+                if (std.math.isFinite(upper)) value - upper else 0.0,
+            );
+            // The envelope must cover both the current coordinate magnitude
+            // and its bound violation. A violation-only radius can become
+            // stale after several bound flips move a different row outside
+            // the initial envelope.
+            radius = @max(radius, @abs(value), violation);
+            if (std.math.isFinite(lower)) radius = @max(radius, @abs(lower));
+            if (std.math.isFinite(upper)) radius = @max(radius, @abs(upper));
+        }
+        self.working_radius = radius;
+
         for (0..original_count) |column| {
             const lower = self.saved_lower[column];
             const upper = self.saved_upper[column];
             const lower_finite = std.math.isFinite(lower);
             const upper_finite = std.math.isFinite(upper);
             if (!lower_finite and !upper_finite) {
-                basis.col_lower[column] = -1000.0;
-                basis.col_upper[column] = 1000.0;
+                basis.col_lower[column] = -radius;
+                basis.col_upper[column] = radius;
             } else if (!lower_finite) {
-                basis.col_lower[column] = -1.0;
+                basis.col_lower[column] = -radius;
                 basis.col_upper[column] = 0.0;
             } else if (!upper_finite) {
                 basis.col_lower[column] = 0.0;
-                basis.col_upper[column] = 1.0;
+                basis.col_upper[column] = radius;
             } else if (lower == upper) {
                 basis.col_lower[column] = 0.0;
                 basis.col_upper[column] = 0.0;
@@ -98,8 +121,8 @@ pub const DualPhaseOneWorkspace = struct {
                 // Phase I. zhighs stores move in BasisStatus, so retain a
                 // symmetric unit interval to preserve the same entering
                 // choices without adding a second membership representation.
-                basis.col_lower[column] = -1.0;
-                basis.col_upper[column] = 1.0;
+                basis.col_lower[column] = -radius;
+                basis.col_upper[column] = radius;
             }
             if (basis.col_status[column] == .basic) continue;
 
@@ -197,9 +220,30 @@ test "dual Phase-I workspace maps lower, upper, free and boxed bounds" {
     basis.reduced_cost[0..4].* = .{ -2.0, 3.0, -4.0, -5.0 };
     try workspace.begin(&basis, 4);
     workspace.installWorkingBounds(&basis, 4);
-    try std.testing.expectEqualSlices(f64, &.{ 0.0, -1.0, -1000.0, -1.0 }, basis.col_lower[0..4]);
-    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 1000.0, 1.0 }, basis.col_upper[0..4]);
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, -1.0, -1.0, -1.0 }, basis.col_lower[0..4]);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 1.0, 1.0 }, basis.col_upper[0..4]);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, 0.0, -1.0 }, basis.primal[0..4]);
     workspace.restoreOriginalBounds(&basis, 4);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -std.math.inf(f64), -std.math.inf(f64), -2.0 }, basis.col_lower[0..4]);
+}
+
+test "dual Phase-I working radius covers scaled basic coordinates and violation" {
+    var basis = try basis_module.BasisState.init(std.testing.allocator, 1, 0);
+    defer basis.deinit();
+    var workspace = DualPhaseOneWorkspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    basis.basic_index[0] = 0;
+    basis.col_status[0] = .basic;
+    basis.col_lower[0] = 0;
+    basis.col_upper[0] = 1;
+    basis.basic_value[0] = 12;
+
+    try workspace.begin(&basis, 1);
+    workspace.installWorkingBounds(&basis, 1);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 12), workspace.working_radius, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -12), basis.col_lower[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), basis.col_upper[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -12), basis.basic_lower[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 12), basis.basic_upper[0], 1e-12);
 }
