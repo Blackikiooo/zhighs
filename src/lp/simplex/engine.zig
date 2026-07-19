@@ -207,6 +207,8 @@ pub const SimplexStats = struct {
     pricing_nonzeros: usize = 0,
     pricing_entries: usize = 0,
     bound_flips: usize = 0,
+    bound_flip_batches: usize = 0,
+    bound_flip_ftran_savings: usize = 0,
     degeneracy_bound_ties: usize = 0,
     degeneracy_ratio_ties: usize = 0,
     degeneracy_zero_primal_steps: usize = 0,
@@ -2158,22 +2160,110 @@ pub const SimplexEngine = struct {
     }
 
     fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
+        if (flip_count == 0) return .optimal;
         self.stats.bound_flips += flip_count;
+        self.stats.bound_flip_batches += 1;
+        self.stats.bound_flip_ftran_savings += flip_count - 1;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
+
+        // Accumulate every bound displacement in equation space, then apply
+        // B^-1 once. A pivotal tableau row cannot update the whole basic
+        // vector; batching the RHS is the exact allocation-free equivalent of
+        // one FTRAN per flipped column.
+        if (self.accumulateBoundFlipRhs(problem, flip_count, basis.residual_work) != .optimal)
+            return .numerical_failure;
+        @memcpy(basis.rhs_work, basis.residual_work);
+        self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
+        for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+        if (!self.boundFlipResidualAcceptable(problem)) {
+            self.factorization.recordReinversion(.solve_residual);
+            if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
+            // Reinversion and its validation reuse row workspaces, so rebuild
+            // the immutable aggregate before retrying the exact same batch.
+            if (self.accumulateBoundFlipRhs(problem, flip_count, basis.residual_work) != .optimal)
+                return .numerical_failure;
+            @memcpy(basis.rhs_work, basis.residual_work);
+            self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
+            for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+            if (!self.boundFlipResidualAcceptable(problem)) return .numerical_failure;
+        }
+
+        // Commit only after the aggregate solve succeeds. Thus an invalid
+        // width, column, or numerical solve never publishes a partial batch.
+        for (basis.basic_value, basis.rhs_work) |*value, displacement| value.* -= displacement;
         for (basis.flip_columns[0..flip_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
-            if (self.computeDirection(problem, column) != .optimal) return .numerical_failure;
+            const delta = switch (basis.col_status[column]) {
+                .at_lower => basis.col_upper[column] - basis.col_lower[column],
+                .at_upper => -(basis.col_upper[column] - basis.col_lower[column]),
+                else => return .numerical_failure,
+            };
+            basis.primal[column] += delta;
+            basis.col_status[column] = if (delta > 0.0) .at_upper else .at_lower;
+        }
+        for (basis.basic_index, basis.basic_value) |basic_column, value| basis.primal[basic_column] = value;
+        return .optimal;
+    }
+
+    /// Check the aggregate solve against the current basis before any flip is
+    /// committed. The same normwise backward-error scale used by entering
+    /// FTRAN protects long FT chains without adding another solve.
+    fn boundFlipResidualAcceptable(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+        const basis = if (self.basis) |*value| value else return false;
+        @memcpy(basis.pivot_direction, basis.residual_work);
+        for (basis.basic_margin, basis.residual_work) |*magnitude, rhs| magnitude.* = @abs(rhs);
+        self.subtractBasisProductWithMagnitude(
+            problem,
+            basis.rhs_work,
+            basis.pivot_direction,
+            basis.basic_margin,
+        ) catch return false;
+        var residual_max: f64 = 0.0;
+        var equation_scale: f64 = 0.0;
+        for (basis.pivot_direction) |value| residual_max = @max(residual_max, @abs(value));
+        for (basis.basic_margin) |value| equation_scale = @max(equation_scale, value);
+        const relative = residual_max / @max(1.0, equation_scale);
+        self.numerical.last_ftran_relative_residual = relative;
+        self.numerical.max_ftran_relative_residual = @max(self.numerical.max_ftran_relative_residual, relative);
+        return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
+    }
+
+    /// Form the combined scaled equation-space displacement for a batch of
+    /// boxed nonbasic bound flips. The caller owns `output`; no column is
+    /// materialized and no allocation occurs in this hot path.
+    fn accumulateBoundFlipRhs(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        flip_count: usize,
+        output: []f64,
+    ) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        if (output.len != problem.num_rows or flip_count > basis.flip_columns.len) return .numerical_failure;
+        @memset(output, 0.0);
+        for (basis.flip_columns[0..flip_count]) |column_u32| {
+            const column: usize = @intCast(column_u32);
+            if (column >= problem.num_cols + problem.num_rows) return .numerical_failure;
             const delta = switch (basis.col_status[column]) {
                 .at_lower => basis.col_upper[column] - basis.col_lower[column],
                 .at_upper => -(basis.col_upper[column] - basis.col_lower[column]),
                 else => return .numerical_failure,
             };
             if (!std.math.isFinite(delta)) return .numerical_failure;
-            for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= direction * delta;
-            basis.primal[column] += delta;
-            basis.col_status[column] = if (delta > 0.0) .at_upper else .at_lower;
-            for (basis.basic_index, basis.basic_value) |basic_column, value| basis.primal[basic_column] = value;
+            if (column < problem.num_cols) {
+                const column_scale = basis.column_scale[column];
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const row_index = row.toUsize();
+                    if (row_index >= output.len) return .numerical_failure;
+                    output[row_index] += delta * coefficient * basis.row_scale[row_index] * column_scale;
+                }
+            } else {
+                output[column - problem.num_cols] += delta;
+            }
         }
+        for (output) |value| if (!std.math.isFinite(value)) return .numerical_failure;
         return .optimal;
     }
 
@@ -3519,6 +3609,60 @@ test "engine flips a nonbasic variable to its finite upper bound" {
     try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{}));
     try std.testing.expectApproxEqAbs(@as(f64, 3), engine.basis.?.primal[0], 1e-12);
     try std.testing.expectEqual(basis_module.BasisStatus.at_upper, engine.basis.?.col_status[0]);
+}
+
+test "dual bound flips share one aggregate FTRAN" {
+    const rows = [_]foundation.RowId{
+        foundation.RowId.fromUsizeAssumeValid(0),
+        foundation.RowId.fromUsizeAssumeValid(1),
+        foundation.RowId.fromUsizeAssumeValid(0),
+        foundation.RowId.fromUsizeAssumeValid(1),
+    };
+    const problem = problem_module.ProblemView{
+        .num_rows = 2,
+        .num_cols = 2,
+        .col_cost = &[_]f64{ 0, 0 },
+        .col_lower = &[_]f64{ 0, 0 },
+        .col_upper = &[_]f64{ 2, 3 },
+        .row_lower = &[_]f64{ -std.math.inf(f64), -std.math.inf(f64) },
+        .row_upper = &[_]f64{ 10, 10 },
+        .matrix = matrix.CscView.initAssumeValid(
+            2,
+            2,
+            &[_]usize{ 0, 2, 4 },
+            &rows,
+            &[_]f64{ 1, 2, 3, 4 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 2);
+    engine.basis.?.initializeSlackBasis();
+    engine.basis.?.col_lower[0] = 0;
+    engine.basis.?.col_lower[1] = 0;
+    engine.basis.?.col_upper[0] = 2;
+    engine.basis.?.col_upper[1] = 3;
+    engine.basis.?.basic_value[0] = 10;
+    engine.basis.?.basic_value[1] = 10;
+    engine.basis.?.primal[2] = 10;
+    engine.basis.?.primal[3] = 10;
+    engine.basis.?.flip_columns[0] = 0;
+    engine.basis.?.flip_columns[1] = 1;
+    try engine.factorization.factorizeIdentity(2);
+
+    try std.testing.expectEqual(SolveStatus.optimal, engine.applyBoundFlips(problem, 2));
+    // Combined equation displacement is [1*2 + 3*3, 2*2 + 4*3] = [11, 16].
+    try std.testing.expectApproxEqAbs(@as(f64, -1), engine.basis.?.basic_value[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -6), engine.basis.?.basic_value[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), engine.basis.?.primal[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), engine.basis.?.primal[1], 1e-12);
+    try std.testing.expectEqual(basis_module.BasisStatus.at_upper, engine.basis.?.col_status[0]);
+    try std.testing.expectEqual(basis_module.BasisStatus.at_upper, engine.basis.?.col_status[1]);
+    try std.testing.expectEqual(@as(usize, 1), engine.factorization.stats.ftran_calls);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_batches);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_ftran_savings);
 }
 
 test "engine pivots a variable downward from its upper bound" {

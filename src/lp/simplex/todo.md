@@ -345,6 +345,36 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
 - [ ] 增加固定版本 CLP runner；当前环境没有 CLP，因此只允许报告 zhighs/HiGHS 的
   阶段性数据，不能勾选三方完整对照。
 
+### 7.1 Netlib 长尾的后续算法路径（按依赖顺序执行）
+
+以下任务吸收外部代码审阅中仍适用于当前实现的部分。审阅所引用的
+`84 optimal / 3 numerical failure / 6 timeout` 是 bounded perturbation 之前的冻结基线；
+`tuff` 循环、`modszk1/scsd8/wood1p` 数值失败、taboo 错误 infeasible 以及 cold/reoptimize
+的 `.automatic` 映射已经修复，不重复列为待办。任何新策略仍须先以 forcing flag A/B，
+禁止按模型名分发或放宽数值容差。
+
+- [x] 批量处理 dual bound flips：在复用的 row workspace 中累计
+  `sum(A_j * delta_j)`，每批只做一次 FTRAN 并一次性更新 basic values/status；不得把
+  单条 tableau row 错当成完整 `B^-1 A_j`。已增加 batch/flip/FTRAN-saving 统计；单元
+  差分与 40 模型 gate 通过，显式 dual `scsd1` 为 36 flips / 33 batches / 节省 3 FTRAN。
+- [ ] 在 `solveDual` 中用已经计算的 pivotal tableau row 增量更新 reduced cost，替换
+  每轮完整 `recomputeReducedCosts + classifyFeasibility`；沿用 periodic exact reprice、
+  drift 抽样、reinversion 恢复和终态 certificate validation 作为安全网。
+- [ ] 实现完整 Devex reference framework 或 projected steepest-edge recurrence；增加显式
+  forcing flag，并实现 DSE 权重失效或更新预算超限时的 deterministic Devex fallback。
+  已证实回退的 leaving-column 单点近似不得重新引入。
+- [ ] 实现真正的 partial/multiple pricing：持久维护分段候选与扫描游标，避免宽模型每轮
+  扫描全部列；先对 `dfl001/fit2p/pilot` 记录 PRICE 占比、候选命中率和完整 solve A/B。
+- [ ] 完成第 6.3 节 scale-aware dual Phase I 后，再增加 Phase-II primal/dual 自动选择；
+  logical/crash basis 若既非 primal-feasible 也非 dual-feasible，必须先得到经验证的可行
+  basis，不能仅凭 infeasibility 计数直接跳入 dual Phase II。
+- [ ] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API，并补齐
+  FT-update-aware reachability；当前 `SparseLU.solveAdaptive` 在存在 FT updates 时会退回
+  dense kernel，仅增加表层 dispatch 不视为完成。密度只在粗粒度 solve 开始时判定。
+- [ ] 完成上述算法路径后再评估 reversible presolve 与其交互，随后对 40 模型 gate、
+  Stage 7 全量、`d2q06c/d6cube/brandy/scsd1` 固定 A/B 做 21 轮 ReleaseFast 验收；报告
+  median/p95、iterations、INVERT/FTRAN/BTRAN/PRICE/UPDATE、requested bytes 和 peak RSS。
+
 - [ ] Netlib 完整求解结果与 HiGHS/CLP 对比。
 - [ ] Mittelmann 完整求解结果与 HiGHS/CLP 对比，并单独记录超时和内存上限。
 - [ ] 汇总 objective、status、iteration count、primal/dual residual、ray 和

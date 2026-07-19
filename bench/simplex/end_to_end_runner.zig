@@ -336,6 +336,14 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, stats_line);
 
+    const bound_flip_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tbound_flip_batches={d}\tbound_flip_ftran_savings={d}\n",
+        .{ path, simplex_stats.bound_flip_batches, simplex_stats.bound_flip_ftran_savings },
+    );
+    defer allocator.free(bound_flip_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, bound_flip_stats_line);
+
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\ttaboo_retries={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",

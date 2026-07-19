@@ -157,6 +157,22 @@ weight increased `d6cube` to 136,676 iterations and `d2q06c` to 114,097. It
 was rejected and removed: a production replacement must implement the full
 Devex or projected steepest-edge recurrence, not a one-column approximation.
 
+## Batched dual bound flips
+
+The next long-tail pass replaces one FTRAN per accepted dual bound flip with
+one allocation-free FTRAN of the accumulated equation-space displacement
+`sum(A_j * delta_j)`. Variable states and basic values are committed only
+after the aggregate solve succeeds. Dedicated tests verify that two flips
+produce the same basic displacement while issuing one FTRAN, and the 40-model
+status/objective/residual/ray gate passes in automatic degeneracy mode.
+
+As a targeted exercised dual path, forced dual Phase I on `scsd1` remains
+optimal at objective `8.666666674333364`, with primal residual `5.55e-17` and
+dual residual `3.52e-8`. It records 36 flips in 33 batches, saving three
+FTRAN calls. The modest reduction is expected because this model's batches
+are predominantly single flips; the new counters permit corpus-wide
+attribution before any further default-policy change.
+
 ## Open acceptance gates
 
 - Acquire and lock the five official Netlib special/generated cases.
