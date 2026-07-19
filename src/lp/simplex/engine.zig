@@ -57,6 +57,27 @@ pub const PivotTraceEvent = struct {
     ftran_relative_residual: f64,
     condition_estimate: f64,
 };
+pub const DegeneracyReason = enum {
+    bound_tie,
+    ratio_tie,
+    zero_primal_step,
+    phase_one_objective_stall,
+    repeated_basis,
+    small_pivot_retry,
+    bound_flip,
+};
+/// Allocation-free diagnostic emitted only for a numerically degenerate
+/// iteration. Storage is owned by the solve caller.
+pub const DegeneracyTraceEvent = struct {
+    phase: SolvePhase,
+    iteration: usize,
+    reason: DegeneracyReason,
+    entering_column: u32,
+    leaving_column: u32,
+    step: f64,
+    objective_change: f64,
+    basis_fingerprint: u64,
+};
 const PrimalLeavingResult = struct {
     status: SolveStatus,
     row: ?u32 = null,
@@ -92,6 +113,9 @@ pub const SolveControl = struct {
     /// Optional caller-owned trace storage used for deterministic pivot-path
     /// differential tests. Events beyond the supplied capacity are dropped.
     pivot_trace: []PivotTraceEvent = &.{},
+    /// Optional caller-owned storage for mutually exclusive degeneracy causes.
+    /// Events beyond the supplied capacity are dropped while counters remain exact.
+    degeneracy_trace: []DegeneracyTraceEvent = &.{},
     /// Collect phase and kernel timings. Disabled by default so production
     /// solves do not perform clock reads in simplex hot paths.
     collect_statistics: bool = false,
@@ -131,6 +155,13 @@ pub const SimplexStats = struct {
     pricing_nonzeros: usize = 0,
     pricing_entries: usize = 0,
     bound_flips: usize = 0,
+    degeneracy_bound_ties: usize = 0,
+    degeneracy_ratio_ties: usize = 0,
+    degeneracy_zero_primal_steps: usize = 0,
+    degeneracy_phase_one_objective_stalls: usize = 0,
+    degeneracy_repeated_bases: usize = 0,
+    degeneracy_small_pivot_retries: usize = 0,
+    degeneracy_bound_flips: usize = 0,
     aq_samples: usize = 0,
     aq_nonzeros: usize = 0,
     ep_samples: usize = 0,
@@ -160,6 +191,13 @@ pub const SimplexStats = struct {
             self.rebuild_update_limit + self.rebuild_update_growth + self.rebuild_direction_refinement +
             self.rebuild_fresh_mode + self.rebuild_update_rejected + self.rebuild_cleanup +
             self.rebuild_edge_weight_reset + self.rebuild_numerical_policy;
+    }
+
+    pub fn classifiedDegeneratePivots(self: SimplexStats) usize {
+        return self.degeneracy_bound_ties + self.degeneracy_ratio_ties +
+            self.degeneracy_zero_primal_steps + self.degeneracy_phase_one_objective_stalls +
+            self.degeneracy_repeated_bases + self.degeneracy_small_pivot_retries +
+            self.degeneracy_bound_flips;
     }
 };
 
@@ -205,6 +243,11 @@ pub const SimplexEngine = struct {
     rank_repair_count: usize = 0,
     pivot_trace_count: usize = 0,
     active_pivot_trace: []PivotTraceEvent = &.{},
+    degeneracy_trace_count: usize = 0,
+    active_degeneracy_trace: []DegeneracyTraceEvent = &.{},
+    degeneracy_basis_fingerprints: [32]u64 = @splat(0),
+    degeneracy_basis_fingerprint_count: usize = 0,
+    degeneracy_basis_fingerprint_cursor: usize = 0,
     current_phase: SolvePhase = .phase_two,
     direction_requires_reinversion: bool = false,
     fresh_factorization_pivots_remaining: usize = 0,
@@ -1088,12 +1131,14 @@ pub const SimplexEngine = struct {
                 for (basis.pivot_direction) |*value| value.* = -value.*;
             }
             var leaving = self.chooseLeaving();
+            var small_pivot_retry = false;
             // Backward error bounds the full solve but not a tiny pivotal
             // component's forward error. Recompute suspicious pivots from a
             // fresh basis before mutating basis membership.
             if (leaving.status == .optimal and self.factorization.update_count != 0 and
                 self.pivotNeedsFreshFactorization(leaving.row.?))
             {
+                small_pivot_retry = true;
                 // Once a basis exposes a component at the forward-accuracy
                 // boundary, occasional FT updates can steer later ratio tests
                 // onto a different numerical path. Keep reinverting for the
@@ -1116,18 +1161,43 @@ pub const SimplexEngine = struct {
                 for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= own_step * direction;
                 basis.primal[entering.column] = if (entering.direction > 0) basis.col_upper[entering.column] else basis.col_lower[entering.column];
                 basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
-                self.numerical.observeStep(own_step);
+                self.observeIterationStep(
+                    own_step,
+                    entering.column,
+                    null,
+                    0,
+                    null,
+                    @abs(basis.reduced_cost[entering.column] * own_step),
+                    small_pivot_retry,
+                    0,
+                );
             } else {
                 if (leaving.status == .unbounded)
                     return self.finishUnbounded(problem, entering.column, entering.direction);
                 if (leaving.status != .optimal) return leaving.status;
+                const leaving_column = basis.basic_index[@intCast(leaving.row.?)];
+                const objective_change = @abs(basis.reduced_cost[entering.column] * leaving.step);
+                const ratio_tie_count = if ((self.statistics_io != null or self.active_degeneracy_trace.len != 0) and
+                    leaving.step <= self.numerical.primal_tolerance)
+                    self.countPrimalRatioTies(leaving.step)
+                else
+                    0;
                 if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
                     return .numerical_failure;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) {
                     if (self.failure_site == .none) self.failure_site = .pivot_update;
                     return .numerical_failure;
                 }
-                self.numerical.observeStep(leaving.step);
+                self.observeIterationStep(
+                    leaving.step,
+                    entering.column,
+                    leaving_column,
+                    ratio_tie_count,
+                    own_step,
+                    objective_change,
+                    small_pivot_retry,
+                    0,
+                );
             }
             if ((self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
                 self.recomputeReducedCosts(problem) != .optimal)
@@ -1225,6 +1295,7 @@ pub const SimplexEngine = struct {
             if (@abs(pivot) <= self.numerical.pivot_tolerance) return .numerical_failure;
             const step = (basis.basic_value[leaving_row] - target) / pivot;
             if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
+            const leaving_column = basis.basic_index[leaving_row];
             if (self.performPivot(
                 problem,
                 entering_index,
@@ -1233,7 +1304,16 @@ pub const SimplexEngine = struct {
                 leaving.bound,
                 @max(step, 0.0),
             ) != .optimal) return .numerical_failure;
-            self.numerical.observeStep(@max(step, 0.0));
+            self.observeIterationStep(
+                @max(step, 0.0),
+                entering_index,
+                leaving_column,
+                0,
+                null,
+                null,
+                false,
+                entering.flip_count,
+            );
             if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
             if (!self.classifyFeasibility(problem).dual) return .numerical_failure;
         }
@@ -1298,9 +1378,19 @@ pub const SimplexEngine = struct {
             if (@abs(pivot) <= self.numerical.pivot_tolerance) return .not_implemented;
             const step = (basis.basic_value[leaving_row] - target) / pivot;
             if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .not_implemented;
+            const leaving_column = basis.basic_index[leaving_row];
             if (self.performPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
                 return .not_implemented;
-            self.numerical.observeStep(@max(step, 0.0));
+            self.observeIterationStep(
+                @max(step, 0.0),
+                entering_index,
+                leaving_column,
+                0,
+                null,
+                null,
+                false,
+                entering.flip_count,
+            );
             if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
         }
         if (self.iterations >= control.max_iterations) return .iteration_limit;
@@ -1695,6 +1785,7 @@ pub const SimplexEngine = struct {
             if (@abs(pivot) <= self.numerical.pivot_tolerance) return .numerical_failure;
             const step = (basis.basic_value[leaving_row] - target) / pivot;
             if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
+            const leaving_column = basis.basic_index[leaving_row];
             if (self.performPivot(
                 problem,
                 entering_index,
@@ -1703,7 +1794,16 @@ pub const SimplexEngine = struct {
                 leaving.bound,
                 @max(step, 0.0),
             ) != .optimal) return .numerical_failure;
-            self.numerical.observeStep(@max(step, 0.0));
+            self.observeIterationStep(
+                @max(step, 0.0),
+                entering_index,
+                leaving_column,
+                0,
+                null,
+                null,
+                false,
+                entering.flip_count,
+            );
             @memset(basis.reduced_cost, 0.0);
         }
         return .iteration_limit;
@@ -1817,14 +1917,39 @@ pub const SimplexEngine = struct {
                 for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= own_step * direction;
                 basis.primal[entering.column] += entering.direction * own_step;
                 basis.col_status[entering.column] = if (entering.direction > 0) .at_upper else .at_lower;
-                self.numerical.observeStep(own_step);
+                self.observeIterationStep(
+                    own_step,
+                    entering.column,
+                    null,
+                    0,
+                    null,
+                    @abs(basis.reduced_cost[entering.column] * own_step),
+                    false,
+                    0,
+                );
             } else {
                 if (leaving.status != .optimal) return leaving.status;
+                const leaving_column = basis.basic_index[@intCast(leaving.row.?)];
+                const objective_change = @abs(basis.reduced_cost[entering.column] * leaving.step);
+                const ratio_tie_count = if ((self.statistics_io != null or self.active_degeneracy_trace.len != 0) and
+                    leaving.step <= self.numerical.primal_tolerance)
+                    self.countPrimalRatioTies(leaving.step)
+                else
+                    0;
                 if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
                     return .numerical_failure;
                 if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
                     return .numerical_failure;
-                self.numerical.observeStep(leaving.step);
+                self.observeIterationStep(
+                    leaving.step,
+                    entering.column,
+                    leaving_column,
+                    ratio_tie_count,
+                    own_step,
+                    objective_change,
+                    false,
+                    0,
+                );
             }
             if ((self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
                 self.recomputePhaseOneReducedCosts(problem) != .optimal)
@@ -1918,9 +2043,121 @@ pub const SimplexEngine = struct {
         };
     }
 
+    /// Count exact-ratio ties after the ratio policy has already selected its
+    /// leaving row. Keeping this read-only diagnostic outside RatioTest makes
+    /// it impossible for instrumentation to perturb pivot selection.
+    fn countPrimalRatioTies(self: *const SimplexEngine, selected_step: f64) u32 {
+        const basis = if (self.basis) |*value| value else return 0;
+        var count: u32 = 0;
+        for (basis.ratio_direction, basis.basic_margin) |direction, margin| {
+            if (direction <= self.ratio_test.tolerance) continue;
+            const step = @max(margin / direction, 0.0);
+            const scale = @max(1.0, @max(@abs(step), @abs(selected_step)));
+            if (@abs(step - selected_step) <= self.ratio_test.tolerance * scale) count += 1;
+        }
+        return count;
+    }
+
+    fn observeIterationStep(
+        self: *SimplexEngine,
+        step: f64,
+        entering_column: usize,
+        leaving_column: ?u32,
+        ratio_tie_count: u32,
+        own_bound_step: ?f64,
+        objective_change: ?f64,
+        small_pivot_retry: bool,
+        bound_flip_count: usize,
+    ) void {
+        self.numerical.observeStep(step);
+        if (std.math.isFinite(step) and step > self.numerical.primal_tolerance) return;
+
+        var fingerprint: u64 = 0;
+        var repeated_basis = false;
+        // Fingerprinting scans basis membership and is intentionally opt-in.
+        // Scalar statistics keep the normal benchmark path O(1) per pivot.
+        if (self.active_degeneracy_trace.len != 0) {
+            fingerprint = self.basisFingerprint();
+            repeated_basis = self.rememberDegenerateBasis(fingerprint);
+        }
+        const bound_tie = if (own_bound_step) |own_step|
+            leaving_column != null and std.math.isFinite(own_step) and
+                @abs(own_step - step) <= self.ratio_test.tolerance * @max(1.0, @max(@abs(own_step), @abs(step)))
+        else
+            false;
+        const change = objective_change orelse std.math.inf(f64);
+        const reason: DegeneracyReason = if (bound_flip_count != 0)
+            .bound_flip
+        else if (small_pivot_retry)
+            .small_pivot_retry
+        else if (repeated_basis)
+            .repeated_basis
+        else if (bound_tie)
+            .bound_tie
+        else if (ratio_tie_count > 1)
+            .ratio_tie
+        else if (self.current_phase == .phase_one and change <= self.numerical.dual_tolerance)
+            .phase_one_objective_stall
+        else
+            .zero_primal_step;
+        switch (reason) {
+            .bound_tie => self.stats.degeneracy_bound_ties += 1,
+            .ratio_tie => self.stats.degeneracy_ratio_ties += 1,
+            .zero_primal_step => self.stats.degeneracy_zero_primal_steps += 1,
+            .phase_one_objective_stall => self.stats.degeneracy_phase_one_objective_stalls += 1,
+            .repeated_basis => self.stats.degeneracy_repeated_bases += 1,
+            .small_pivot_retry => self.stats.degeneracy_small_pivot_retries += 1,
+            .bound_flip => self.stats.degeneracy_bound_flips += 1,
+        }
+        if (self.degeneracy_trace_count < self.active_degeneracy_trace.len) {
+            self.active_degeneracy_trace[self.degeneracy_trace_count] = .{
+                .phase = self.current_phase,
+                .iteration = self.iterations,
+                .reason = reason,
+                .entering_column = @intCast(entering_column),
+                .leaving_column = leaving_column orelse std.math.maxInt(u32),
+                .step = step,
+                .objective_change = change,
+                .basis_fingerprint = fingerprint,
+            };
+            self.degeneracy_trace_count += 1;
+        }
+    }
+
+    fn basisFingerprint(self: *const SimplexEngine) u64 {
+        const basis = if (self.basis) |*value| value else return 0;
+        var fingerprint: u64 = 0xcbf29ce484222325;
+        for (basis.basic_index) |column| {
+            fingerprint = (fingerprint ^ @as(u64, column)) *% 0x100000001b3;
+        }
+        for (basis.col_status) |status| {
+            const status_bits: u8 = @bitCast(@as(i8, @intFromEnum(status)));
+            fingerprint = (fingerprint ^ @as(u64, status_bits)) *% 0x100000001b3;
+        }
+        return fingerprint;
+    }
+
+    fn rememberDegenerateBasis(self: *SimplexEngine, fingerprint: u64) bool {
+        for (self.degeneracy_basis_fingerprints[0..self.degeneracy_basis_fingerprint_count]) |previous| {
+            if (previous == fingerprint) return true;
+        }
+        self.degeneracy_basis_fingerprints[self.degeneracy_basis_fingerprint_cursor] = fingerprint;
+        self.degeneracy_basis_fingerprint_cursor = (self.degeneracy_basis_fingerprint_cursor + 1) % self.degeneracy_basis_fingerprints.len;
+        self.degeneracy_basis_fingerprint_count = @min(
+            self.degeneracy_basis_fingerprint_count + 1,
+            self.degeneracy_basis_fingerprints.len,
+        );
+        return false;
+    }
+
     fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
         self.active_pivot_trace = control.pivot_trace;
         self.pivot_trace_count = 0;
+        self.active_degeneracy_trace = control.degeneracy_trace;
+        self.degeneracy_trace_count = 0;
+        self.degeneracy_basis_fingerprints = @splat(0);
+        self.degeneracy_basis_fingerprint_count = 0;
+        self.degeneracy_basis_fingerprint_cursor = 0;
         if (control.time_limit_ns == null) {
             self.solve_start_ns = null;
             self.solve_clock_io = null;
@@ -2677,9 +2914,16 @@ test "Bland fallback resolves the Beale degenerate cycling example" {
     defer engine.deinit();
     engine.pricing.rule = .dantzig;
     engine.numerical.degenerate_pivot_limit = 1;
+    var degeneracy_trace: [100]DegeneracyTraceEvent = undefined;
 
-    try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{ .max_iterations = 100 }));
+    try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{
+        .max_iterations = 100,
+        .degeneracy_trace = &degeneracy_trace,
+    }));
     try std.testing.expect(engine.numerical.anti_cycling_activations > 0);
+    try std.testing.expect(engine.numerical.degenerate_pivot_count > 0);
+    try std.testing.expectEqual(engine.numerical.degenerate_pivot_count, engine.stats.classifiedDegeneratePivots());
+    try std.testing.expectEqual(engine.numerical.degenerate_pivot_count, engine.degeneracy_trace_count);
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), engine.objective_value, 1e-9);
 }
 

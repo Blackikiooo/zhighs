@@ -92,10 +92,16 @@ pub fn main(init: std.process.Init) !void {
     else
         &.{};
     defer if (trace_enabled) allocator.free(trace);
+    const degeneracy_trace: []zhighs.lp.simplex.engine.DegeneracyTraceEvent = if (trace_enabled)
+        try allocator.alloc(zhighs.lp.simplex.engine.DegeneracyTraceEvent, @min(max_iterations, 100_000))
+    else
+        &.{};
+    defer if (trace_enabled) allocator.free(degeneracy_trace);
     const solve_started = nowNs();
     const status = engine.solveProblem(problem, .{
         .max_iterations = max_iterations,
         .pivot_trace = trace,
+        .degeneracy_trace = degeneracy_trace,
         .collect_statistics = collect_statistics,
         .phase_one_strategy = phase_one_strategy,
         .crash_strategy = crash_strategy,
@@ -106,6 +112,20 @@ pub fn main(init: std.process.Init) !void {
         const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
             @tagName(event.phase), event.iteration, event.entering_column, event.leaving_column,          event.leaving_row,
             event.pivot,           event.step,      event.update_count,    event.ftran_relative_residual, event.condition_estimate,
+        });
+        defer allocator.free(trace_line);
+        try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
+    };
+    if (trace_enabled) for (degeneracy_trace[0..engine.degeneracy_trace_count]) |event| {
+        const trace_line = try std.fmt.allocPrint(allocator, "degenerate\t{s}\t{d}\t{s}\t{d}\t{d}\t{e:.6}\t{e:.6}\t{x}\n", .{
+            @tagName(event.phase),
+            event.iteration,
+            @tagName(event.reason),
+            event.entering_column,
+            event.leaving_column,
+            event.step,
+            event.objective_change,
+            event.basis_fingerprint,
         });
         defer allocator.free(trace_line);
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
@@ -244,6 +264,24 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, stats_line);
+
+    const degeneracy_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\n",
+        .{
+            path,
+            simplex_stats.classifiedDegeneratePivots(),
+            simplex_stats.degeneracy_bound_ties,
+            simplex_stats.degeneracy_ratio_ties,
+            simplex_stats.degeneracy_zero_primal_steps,
+            simplex_stats.degeneracy_phase_one_objective_stalls,
+            simplex_stats.degeneracy_repeated_bases,
+            simplex_stats.degeneracy_small_pivot_retries,
+            simplex_stats.degeneracy_bound_flips,
+        },
+    );
+    defer allocator.free(degeneracy_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, degeneracy_stats_line);
 
     const kernel_stats_line = try std.fmt.allocPrint(
         allocator,
