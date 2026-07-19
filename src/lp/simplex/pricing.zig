@@ -113,6 +113,52 @@ pub const Pricing = struct {
         return best;
     }
 
+    /// Weighted pricing with a deterministic virtual cost perturbation used
+    /// solely as a tie-break. Candidate eligibility and reduced costs remain
+    /// in the original coordinates.
+    pub fn choosePrimalEnteringPerturbed(
+        self: *Pricing,
+        reduced_cost: []const f64,
+        status: []const basis.BasisStatus,
+        edge_weight: []const f64,
+        column_rank: []const f64,
+        taboo_until: []const usize,
+        current_iteration: usize,
+        tolerance: f64,
+    ) ?EnteringChoice {
+        if (status.len < reduced_cost.len or column_rank.len < reduced_cost.len) return null;
+        if (edge_weight.len != 0 and edge_weight.len < reduced_cost.len) return null;
+        if (taboo_until.len != 0 and taboo_until.len < reduced_cost.len) return null;
+        self.iterations += 1;
+        var best: ?EnteringChoice = null;
+        var best_score = tolerance;
+        var best_rank = std.math.inf(f64);
+        for (reduced_cost, status[0..reduced_cost.len], column_rank[0..reduced_cost.len], 0..) |value, column_status, rank, column| {
+            if (taboo_until.len != 0 and taboo_until[column] > current_iteration) continue;
+            const violation = switch (column_status) {
+                .at_lower => -value,
+                .at_upper => value,
+                .free, .superbasic => @abs(value),
+                .basic, .fixed => continue,
+            };
+            const weight = if (edge_weight.len == 0) 1.0 else edge_weight[column];
+            const score = self.normalizedScore(violation, weight);
+            if (score > best_score + tolerance or
+                (score > tolerance and @abs(score - best_score) <= tolerance and rank < best_rank))
+            {
+                best_score = score;
+                best_rank = rank;
+                const direction: f64 = switch (column_status) {
+                    .at_upper => -1.0,
+                    .free, .superbasic => if (value < 0) 1.0 else -1.0,
+                    else => 1.0,
+                };
+                best = .{ .column = @intCast(column), .direction = direction };
+            }
+        }
+        return best;
+    }
+
     /// Dantzig-style dual pricing over the dense basic-value SoA. The most
     /// primal-infeasible row leaves; no temporary candidate objects are built.
     pub fn chooseDualLeaving(self: *Pricing, value: []const f64, lower: []const f64, upper: []const f64, tolerance: f64) ?DualLeavingChoice {

@@ -8,6 +8,8 @@ const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
 const crash_module = @import("crash.zig");
+const degeneracy_module = @import("degeneracy.zig");
+const pricing_workspace_module = @import("pricing_workspace.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
@@ -16,6 +18,9 @@ const matrix = @import("matrix");
 pub const Algorithm = enum { primal_revised, dual_revised };
 pub const PhaseOneStrategy = enum { primal, dual, automatic };
 pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
+pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo, automatic };
+pub const PhaseOnePricingStrategy = enum { inherit, dantzig, devex, steepest_edge };
+pub const PricingKernel = enum { column, row, automatic };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -166,6 +171,14 @@ pub const SolveControl = struct {
     /// Optional structural-column cap for deterministic crash-prefix A/B.
     /// Null uses the longest numerically valid prefix within the logical-anchor limit.
     crash_max_columns: ?usize = null,
+    /// Degenerate-pivot policy. Automatic remains baseline until corpus A/B
+    /// demonstrates a robust full-solve improvement.
+    degeneracy_strategy: DegeneracyStrategy = .baseline,
+    phase_one_pricing: PhaseOnePricingStrategy = .inherit,
+    adaptive_reprice: bool = false,
+    /// Select once per pricing operation; no representation branch exists in
+    /// either coefficient inner loop.
+    pricing_kernel: PricingKernel = .column,
 };
 
 pub const SimplexStats = struct {
@@ -200,6 +213,10 @@ pub const SimplexStats = struct {
     degeneracy_repeated_bases: usize = 0,
     degeneracy_small_pivot_retries: usize = 0,
     degeneracy_bound_flips: usize = 0,
+    perturbation_activations: usize = 0,
+    perturbation_expirations: usize = 0,
+    perturbation_cleanups: usize = 0,
+    taboo_records: usize = 0,
     aq_samples: usize = 0,
     aq_nonzeros: usize = 0,
     ep_samples: usize = 0,
@@ -260,6 +277,8 @@ pub const SimplexEngine = struct {
     factorization: factorization_module.Factorization,
     dual_phase_one: dual_phase_one_module.DualPhaseOneWorkspace,
     crash: crash_module.CrashWorkspace,
+    degeneracy: degeneracy_module.Workspace,
+    pricing_row_view: pricing_workspace_module.RowView,
     pricing: pricing_module.Pricing = .{},
     ratio_test: ratio_module.RatioTest = .{},
     numerical: numerical_module.NumericalState = .{},
@@ -300,6 +319,11 @@ pub const SimplexEngine = struct {
     stats: SimplexStats = .{},
     statistics_io: ?std.Io = null,
     cleanup_active: bool = false,
+    active_degeneracy_strategy: DegeneracyStrategy = .baseline,
+    active_adaptive_reprice: bool = false,
+    maximum_reduced_cost_drift: f64 = 0.0,
+    exact_reprices: usize = 0,
+    active_pricing_kernel: PricingKernel = .column,
 
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{
@@ -307,6 +331,8 @@ pub const SimplexEngine = struct {
             .factorization = factorization_module.Factorization.init(a),
             .dual_phase_one = dual_phase_one_module.DualPhaseOneWorkspace.init(a),
             .crash = crash_module.CrashWorkspace.init(a),
+            .degeneracy = degeneracy_module.Workspace.init(a),
+            .pricing_row_view = pricing_workspace_module.RowView.init(a),
         };
     }
     pub fn deinit(self: *SimplexEngine) void {
@@ -314,11 +340,14 @@ pub const SimplexEngine = struct {
         self.factorization.deinit();
         self.dual_phase_one.deinit();
         self.crash.deinit();
+        self.degeneracy.deinit();
+        self.pricing_row_view.deinit();
     }
 
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes() + self.crash.requestedBytes();
+        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes() +
+            self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes();
     }
     pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
         return .not_implemented;
@@ -338,13 +367,28 @@ pub const SimplexEngine = struct {
         self.failure_site = .none;
         self.unbounded_ray_valid = false;
         self.numerical.resetAntiCycling();
+        self.degeneracy.resetSolve();
+        self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
+            .automatic => .baseline,
+            .baseline => .baseline,
+            .perturbation => .perturbation,
+            .perturbation_taboo => .perturbation_taboo,
+        };
+        self.active_adaptive_reprice = control.adaptive_reprice;
+        self.active_pricing_kernel = control.pricing_kernel;
+        self.reduced_cost_refresh_period = 8;
+        self.maximum_reduced_cost_drift = 0.0;
+        self.exact_reprices = 0;
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
+        if (self.active_pricing_kernel != .column)
+            self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
         if (self.basis) |*old| old.deinit();
         self.basis = basis_module.BasisState.init(self.allocator, problem.num_rows, problem.num_cols) catch return .numerical_failure;
+        self.degeneracy.ensureCapacity(problem.num_rows, self.basis.?.col_status.len) catch return .numerical_failure;
         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
         self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
         self.dual_edge_weights_valid = true;
@@ -617,11 +661,25 @@ pub const SimplexEngine = struct {
         self.rank_repair_count = 0;
         self.fresh_factorization_pivots_remaining = 0;
         self.numerical.resetAntiCycling();
+        self.degeneracy.resetSolve();
+        self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
+            .automatic => .baseline,
+            .baseline => .baseline,
+            .perturbation => .perturbation,
+            .perturbation_taboo => .perturbation_taboo,
+        };
+        self.active_adaptive_reprice = control.adaptive_reprice;
+        self.active_pricing_kernel = control.pricing_kernel;
+        self.reduced_cost_refresh_period = 8;
+        self.maximum_reduced_cost_drift = 0.0;
+        self.exact_reprices = 0;
         if (self.controlledStop(control)) |status| return status;
         problem.validate() catch |err| return switch (err) {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
+        if (self.active_pricing_kernel != .column)
+            self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
         if (!self.refreshProblemStorage(problem)) {
             var cold_control = control;
             cold_control.initial_basis = null;
@@ -981,8 +1039,23 @@ pub const SimplexEngine = struct {
                 ratio_direction.* = 0.0;
             }
         }
-        if (allow_bland and self.numerical.anti_cycling_active) return self.chooseLeavingBland();
-        const choice = self.ratio_test.chooseLeaving(basis.ratio_direction, basis.basic_margin);
+        // A solve that never entered a perturbation epoch must retain the
+        // proven Bland fallback (notably feasible starts such as kb2). After a
+        // validated Phase-I perturbation cleanup, keep Harris ordering so the
+        // cleaned basis follows the same stable Phase-II path used by the
+        // explicit A/B policy.
+        if (allow_bland and self.numerical.anti_cycling_active and
+            (self.active_degeneracy_strategy == .baseline or !self.degeneracy.ever_active))
+            return self.chooseLeavingBland();
+        const choice = if (self.degeneracy.active)
+            self.ratio_test.chooseLeavingPerturbed(
+                basis.ratio_direction,
+                basis.basic_margin,
+                self.degeneracy.row_rank[0..basis.basic_margin.len],
+                self.numerical.primal_tolerance,
+            )
+        else
+            self.ratio_test.chooseLeaving(basis.ratio_direction, basis.basic_margin);
         if (choice.row == null) return .{ .status = .unbounded };
         const row = choice.row.?;
         const bound: basis_module.BasisStatus = if (basis.pivot_direction[@intCast(row)] > 0) .at_lower else .at_upper;
@@ -1207,6 +1280,7 @@ pub const SimplexEngine = struct {
                 self.observeIterationStep(
                     own_step,
                     entering.column,
+                    entering.direction,
                     null,
                     0,
                     null,
@@ -1234,6 +1308,7 @@ pub const SimplexEngine = struct {
                 self.observeIterationStep(
                     leaving.step,
                     entering.column,
+                    entering.direction,
                     leaving_column,
                     ratio_tie_count,
                     own_step,
@@ -1286,12 +1361,26 @@ pub const SimplexEngine = struct {
         const basis = if (self.basis) |*value| value else return null;
         self.observePricingDensity(basis.reduced_cost[0..column_count]);
         self.stats.dense_pricing_dispatches += 1;
-        return self.pricing.choosePrimalEnteringWeighted(
-            basis.reduced_cost[0..column_count],
-            basis.col_status[0..column_count],
-            basis.col_edge_weight[0..column_count],
-            tolerance,
-        );
+        return if (self.degeneracy.active)
+            self.pricing.choosePrimalEnteringPerturbed(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                basis.col_edge_weight[0..column_count],
+                self.degeneracy.column_rank[0..column_count],
+                if (self.active_degeneracy_strategy == .perturbation_taboo)
+                    self.degeneracy.taboo_until[0..column_count]
+                else
+                    &.{},
+                self.iterations,
+                tolerance,
+            )
+        else
+            self.pricing.choosePrimalEnteringWeighted(
+                basis.reduced_cost[0..column_count],
+                basis.col_status[0..column_count],
+                basis.col_edge_weight[0..column_count],
+                tolerance,
+            );
     }
 
     fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
@@ -1350,6 +1439,7 @@ pub const SimplexEngine = struct {
             self.observeIterationStep(
                 @max(step, 0.0),
                 entering_index,
+                entering.direction,
                 leaving_column,
                 0,
                 null,
@@ -1429,6 +1519,7 @@ pub const SimplexEngine = struct {
             self.observeIterationStep(
                 @max(step, 0.0),
                 entering_index,
+                entering.direction,
                 leaving_column,
                 0,
                 null,
@@ -1946,6 +2037,7 @@ pub const SimplexEngine = struct {
             self.observeIterationStep(
                 @max(step, 0.0),
                 entering_index,
+                entering.direction,
                 leaving_column,
                 0,
                 null,
@@ -1966,8 +2058,6 @@ pub const SimplexEngine = struct {
         basis.dual_row[row] = 1.0;
         self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
         self.observeEpDensity(basis.dual_row);
-        const pricing_started = self.statisticsTimestamp();
-        defer self.recordPricingElapsed(pricing_started);
         if (self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid) {
             var exact_weight: f64 = 0.0;
             for (basis.dual_row) |entry| exact_weight += entry * entry;
@@ -1985,16 +2075,33 @@ pub const SimplexEngine = struct {
         }
         self.dual_row_index = leaving_row;
         @memset(basis.tableau, 0.0);
-        for (0..problem.num_cols) |column| {
-            const begin = problem.matrix.col_starts[column];
-            const end = problem.matrix.col_starts[column + 1];
-            var alpha: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const row_index = matrix_row.toUsize();
-                alpha += basis.dual_row[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+        const row_pricing = self.selectRowPricing(basis.dual_row);
+        const pricing_started = self.statisticsTimestamp();
+        defer if (row_pricing)
+            self.recordRowPricingElapsed(pricing_started)
+        else
+            self.recordPricingElapsed(pricing_started);
+        if (row_pricing) {
+            for (basis.dual_row, 0..) |dual_value, row_index| {
+                if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
+                const scaled_dual = dual_value * basis.row_scale[row_index];
+                for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
+                    const column: usize = @intCast(column_u32);
+                    basis.tableau[column] += scaled_dual * coefficient * basis.column_scale[column];
+                }
             }
-            basis.tableau[column] = alpha;
+        } else {
+            for (0..problem.num_cols) |column| {
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                var alpha: f64 = 0.0;
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const row_index = matrix_row.toUsize();
+                    alpha += basis.dual_row[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+                }
+                basis.tableau[column] = alpha;
+            }
         }
         for (0..problem.num_rows) |logical_row| {
             basis.tableau[problem.num_cols + logical_row] = basis.dual_row[logical_row];
@@ -2032,12 +2139,26 @@ pub const SimplexEngine = struct {
     fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
         const phase_started = self.statisticsTimestamp();
         const iteration_started = self.iterations;
+        const saved_pricing_rule = self.pricing.rule;
+        const phase_two_refresh_period = self.reduced_cost_refresh_period;
+        self.pricing.rule = switch (control.phase_one_pricing) {
+            .inherit => saved_pricing_rule,
+            .dantzig => .dantzig,
+            .devex => .devex,
+            .steepest_edge => .steepest_edge,
+        };
+        defer self.pricing.rule = saved_pricing_rule;
+        // Phase-I drift observations do not justify relaxing the original
+        // objective's refresh cadence across the phase boundary.
+        defer self.reduced_cost_refresh_period = phase_two_refresh_period;
         defer self.recordPhaseElapsed(.phase_one, phase_started);
         defer self.recordPhaseIterations(.phase_one, iteration_started);
         if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
         while (self.iterations < control.max_iterations) : (self.iterations += 1) {
             if (self.beginIteration(problem, control, .phase_one)) |status| return status;
             const basis = if (self.basis) |*value| value else return .numerical_failure;
+            if (self.prepareDegeneracyPolicy(basis.basic_value.len, basis.col_status.len) != .optimal)
+                return .numerical_failure;
             // General bounded Phase I contains artificial columns and is not
             // the standard-form setting required by Bland's proof. Retain the
             // numerically stable Harris candidate set throughout this phase.
@@ -2069,6 +2190,7 @@ pub const SimplexEngine = struct {
                 self.observeIterationStep(
                     own_step,
                     entering.column,
+                    entering.direction,
                     null,
                     0,
                     null,
@@ -2092,6 +2214,7 @@ pub const SimplexEngine = struct {
                 self.observeIterationStep(
                     leaving.step,
                     entering.column,
+                    entering.direction,
                     leaving_column,
                     ratio_tie_count,
                     own_step,
@@ -2100,9 +2223,18 @@ pub const SimplexEngine = struct {
                     0,
                 );
             }
-            if ((self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= self.reduced_cost_refresh_period) and
-                self.recomputePhaseOneReducedCosts(problem) != .optimal)
-                return .numerical_failure;
+            const refresh_period = if (self.active_adaptive_reprice and self.degeneracy.active and
+                self.numerical.consecutive_degenerate_pivots >= 32)
+                @min(self.reduced_cost_refresh_period, 4)
+            else
+                self.reduced_cost_refresh_period;
+            if (self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= refresh_period) {
+                const refresh_status = if (self.active_adaptive_reprice)
+                    self.recomputePhaseOneReducedCostsWithDrift(problem)
+                else
+                    self.recomputePhaseOneReducedCosts(problem);
+                if (refresh_status != .optimal) return .numerical_failure;
+            }
         }
         if (self.iterations >= control.max_iterations) return .iteration_limit;
         if (self.recomputeBasicValues(problem) != .optimal) return .numerical_failure;
@@ -2112,7 +2244,10 @@ pub const SimplexEngine = struct {
         for (basis.primal[artificial_begin..]) |value| infeasibility += @max(value, 0.0);
         if (infeasibility > self.numerical.primal_tolerance) return .infeasible;
 
-        if (self.cleanupArtificialBasis(problem) != .optimal) return .numerical_failure;
+        if (self.cleanupArtificialBasis(problem) != .optimal) {
+            if (self.degeneracy.ever_active) return self.restartPhaseOneWithoutPerturbation(problem, control);
+            return .numerical_failure;
+        }
         @memset(basis.col_upper[artificial_begin..], 0.0);
         for (basis.col_status[artificial_begin..]) |*status| {
             if (status.* != .basic) status.* = .fixed;
@@ -2122,7 +2257,44 @@ pub const SimplexEngine = struct {
         }
         self.phase1_needed = false;
         self.numerical.clearAntiCyclingFallback();
+        if (self.degeneracy.ever_active) {
+            self.degeneracy.clearAfterProgress();
+            self.stats.perturbation_cleanups += 1;
+            if (self.refactorizeBasis(problem, .cleanup) != .optimal or
+                self.recomputeBasicValues(problem) != .optimal or
+                self.recomputePhaseOneReducedCosts(problem) != .optimal)
+                return self.restartPhaseOneWithoutPerturbation(problem, control);
+            var cleanup_infeasibility: f64 = 0.0;
+            for (basis.primal[artificial_begin..]) |value| cleanup_infeasibility += @max(value, 0.0);
+            if (cleanup_infeasibility > self.numerical.primal_tolerance)
+                return self.restartPhaseOneWithoutPerturbation(problem, control);
+        }
         return .optimal;
+    }
+
+    /// Transactional fallback for a failed perturbation cleanup. Restore the
+    /// validated logical epoch and rerun Phase I with the baseline policy;
+    /// no perturbed ordering state or reduced cost can escape to publication.
+    fn restartPhaseOneWithoutPerturbation(
+        self: *SimplexEngine,
+        problem: problem_module.ProblemView,
+        control: SolveControl,
+    ) SolveStatus {
+        self.degeneracy.resetSolve();
+        self.active_degeneracy_strategy = .baseline;
+        self.numerical.clearAntiCyclingFallback();
+        self.direction_requires_reinversion = false;
+        self.fresh_factorization_pivots_remaining = 0;
+        self.reduced_cost_update_count = 0;
+        if (self.initializeProblemStorage(problem) != .optimal) return .numerical_failure;
+        self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+        self.dual_edge_weights_valid = true;
+        self.observeFactorizationStability();
+        if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+        if (!self.phase1_needed) return .optimal;
+        if (self.refactorizeBasis(problem, .phase_one_setup) != .optimal) return .numerical_failure;
+        self.numerical.markRefactorized();
+        return self.solvePhaseOne(problem, control);
     }
 
     fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus {
@@ -2207,10 +2379,27 @@ pub const SimplexEngine = struct {
         return count;
     }
 
+    fn prepareDegeneracyPolicy(self: *SimplexEngine, rows: usize, columns: usize) SolveStatus {
+        if (self.active_degeneracy_strategy == .baseline or !self.numerical.anti_cycling_active or
+            self.degeneracy.active)
+            return .optimal;
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        self.degeneracy.activate(
+            basis.row_scale[0..rows],
+            basis.column_scale[0..columns],
+            self.numerical.primal_tolerance,
+            self.numerical.dual_tolerance,
+            self.objective_scale,
+        ) catch return .numerical_failure;
+        self.stats.perturbation_activations += 1;
+        return .optimal;
+    }
+
     fn observeIterationStep(
         self: *SimplexEngine,
         step: f64,
         entering_column: usize,
+        entering_direction: f64,
         leaving_column: ?u32,
         ratio_tie_count: u32,
         own_bound_step: ?f64,
@@ -2219,15 +2408,21 @@ pub const SimplexEngine = struct {
         bound_flip_count: usize,
     ) void {
         self.numerical.observeStep(step);
-        if (std.math.isFinite(step) and step > self.numerical.primal_tolerance) return;
+        if (std.math.isFinite(step) and step > self.numerical.primal_tolerance) {
+            self.degeneracy.clearAfterProgress();
+            return;
+        }
+        if (self.degeneracy.advance(256)) self.stats.perturbation_expirations += 1;
 
         var fingerprint: u64 = 0;
         var repeated_basis = false;
         // Fingerprinting scans basis membership and is intentionally opt-in.
         // Scalar statistics keep the normal benchmark path O(1) per pivot.
-        if (self.active_degeneracy_trace.len != 0) {
+        if (self.active_degeneracy_trace.len != 0 or self.active_degeneracy_strategy == .perturbation_taboo) {
             fingerprint = self.basisFingerprint();
             repeated_basis = self.rememberDegenerateBasis(fingerprint);
+            if (repeated_basis and self.active_degeneracy_strategy == .perturbation_taboo)
+                self.degeneracy.escalateAfterRepeat();
         }
         const bound_tie = if (own_bound_step) |own_step|
             leaving_column != null and std.math.isFinite(own_step) and
@@ -2249,6 +2444,18 @@ pub const SimplexEngine = struct {
             .phase_one_objective_stall
         else
             .zero_primal_step;
+        if (self.active_degeneracy_strategy == .perturbation_taboo) {
+            if (leaving_column) |leaving| {
+                self.degeneracy.recordTaboo(
+                    @intCast(entering_column),
+                    leaving,
+                    entering_direction,
+                    self.iterations,
+                    16,
+                );
+                self.stats.taboo_records += 1;
+            }
+        }
         switch (reason) {
             .bound_tie => self.stats.degeneracy_bound_ties += 1,
             .ratio_tie => self.stats.degeneracy_ratio_ties += 1,
@@ -2378,6 +2585,26 @@ pub const SimplexEngine = struct {
         self.stats.pricing_ns = std.math.add(u64, self.stats.pricing_ns, self.elapsedSince(started)) catch std.math.maxInt(u64);
     }
 
+    /// Choose the matrix orientation once for the complete pricing operation.
+    /// Automatic mode estimates actual CSR work from the active row support;
+    /// coefficient loops remain branch-free with respect to representation.
+    fn selectRowPricing(self: *const SimplexEngine, vector: []const f64) bool {
+        switch (self.active_pricing_kernel) {
+            .column => return false,
+            .row => return self.pricing_row_view.num_rows == vector.len,
+            .automatic => {},
+        }
+        if (self.pricing_row_view.num_rows != vector.len or self.pricing_row_view.nonzeros == 0) return false;
+        var touched_entries: usize = 0;
+        for (vector, 0..) |value, row| {
+            if (@abs(value) <= self.numerical.zero_tolerance) continue;
+            touched_entries = std.math.add(usize, touched_entries, self.pricing_row_view.rowDegree(row)) catch return false;
+        }
+        // Row traversal wins only with a useful work margin, absorbing scatter
+        // stores and the support scan that CSC dot products do not pay.
+        return touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
+    }
+
     fn observeAqDensity(self: *SimplexEngine, vector: []const f64) void {
         if (self.statistics_io == null) return;
         self.stats.aq_samples += 1;
@@ -2446,30 +2673,68 @@ pub const SimplexEngine = struct {
         const artificial_begin = problem.num_cols + problem.num_rows;
         for (basis.basic_index, 0..) |global_col, row| basis.dual[row] = if (global_col >= artificial_begin) 1.0 else 0.0;
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+        const row_pricing = self.selectRowPricing(basis.dual);
         const pricing_started = self.statisticsTimestamp();
-        defer self.recordPricingElapsed(pricing_started);
+        defer if (row_pricing)
+            self.recordRowPricingElapsed(pricing_started)
+        else
+            self.recordPricingElapsed(pricing_started);
 
         // Compute c - A^T*y directly from CSC. The previous generic column
         // loop cleared and dotted a rows-long dense vector for every internal
         // column, turning sparse Phase-I pricing into O(columns * rows).
         // Structural columns use one sparse pass; logical and artificial
         // columns have one known nonzero and are written directly.
-        for (0..problem.num_cols) |column| {
-            const begin = problem.matrix.col_starts[column];
-            const end = problem.matrix.col_starts[column + 1];
-            var reduced: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const row_index = row.toUsize();
-                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+        if (row_pricing) {
+            @memset(basis.reduced_cost[0..problem.num_cols], 0.0);
+            for (basis.dual, 0..) |dual_value, row_index| {
+                if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
+                const scaled_dual = dual_value * basis.row_scale[row_index];
+                for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
+                    const column: usize = @intCast(column_u32);
+                    basis.reduced_cost[column] -= scaled_dual * coefficient * basis.column_scale[column];
+                }
             }
-            basis.reduced_cost[column] = reduced;
+        } else {
+            for (0..problem.num_cols) |column| {
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                var reduced: f64 = 0.0;
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const row_index = row.toUsize();
+                    reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+                }
+                basis.reduced_cost[column] = reduced;
+            }
         }
         for (0..problem.num_rows) |row| {
             basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
             basis.reduced_cost[artificial_begin + row] = 1.0 - basis.artificial_sign[row] * basis.dual[row];
         }
         self.reduced_cost_update_count = 0;
+        return .optimal;
+    }
+
+    fn recomputePhaseOneReducedCostsWithDrift(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const count = basis.reduced_cost.len;
+        if (self.degeneracy.reduced_cost_snapshot.len < count) return .numerical_failure;
+        @memcpy(self.degeneracy.reduced_cost_snapshot[0..count], basis.reduced_cost);
+        if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+        var maximum_drift: f64 = 0.0;
+        for (basis.reduced_cost, self.degeneracy.reduced_cost_snapshot[0..count]) |exact, updated| {
+            maximum_drift = @max(maximum_drift, @abs(exact - updated) / @max(1.0, @abs(exact)));
+        }
+        self.maximum_reduced_cost_drift = @max(self.maximum_reduced_cost_drift, maximum_drift);
+        self.exact_reprices += 1;
+        if (maximum_drift > self.numerical.dual_tolerance * 10.0)
+            self.reduced_cost_refresh_period = @max(self.reduced_cost_refresh_period / 2, 1)
+        else if (maximum_drift < self.numerical.dual_tolerance * 0.1)
+            // Eight is the validated fixed-policy ceiling. Adaptive mode may
+            // refresh more often after drift or a long degenerate chain, but
+            // never weakens the existing numerical safeguard.
+            self.reduced_cost_refresh_period = @min(self.reduced_cost_refresh_period * 2, 8);
         return .optimal;
     }
 
@@ -2497,18 +2762,36 @@ pub const SimplexEngine = struct {
         @memset(basis.residual_work, 0.0);
         basis.residual_work[row] = 1.0;
         self.factorization.solveTranspose(basis.residual_work) catch return .numerical_failure;
+        const row_pricing = self.selectRowPricing(basis.residual_work);
         const pricing_started = self.statisticsTimestamp();
-        defer self.recordPricingElapsed(pricing_started);
-        for (0..problem.num_cols) |column| {
-            const begin = problem.matrix.col_starts[column];
-            const end = problem.matrix.col_starts[column + 1];
-            var tableau_entry: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const row_index = matrix_row.toUsize();
-                tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+        defer if (row_pricing)
+            self.recordRowPricingElapsed(pricing_started)
+        else
+            self.recordPricingElapsed(pricing_started);
+        if (row_pricing) {
+            @memset(basis.tableau[0..problem.num_cols], 0.0);
+            for (basis.residual_work, 0..) |dual_value, row_index| {
+                if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
+                const scaled_dual = dual_value * basis.row_scale[row_index];
+                for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
+                    const column: usize = @intCast(column_u32);
+                    basis.tableau[column] += scaled_dual * coefficient * basis.column_scale[column];
+                }
             }
-            basis.reduced_cost[column] -= theta * tableau_entry;
+            for (basis.reduced_cost[0..problem.num_cols], basis.tableau[0..problem.num_cols]) |*reduced, tableau_entry|
+                reduced.* -= theta * tableau_entry;
+        } else {
+            for (0..problem.num_cols) |column| {
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                var tableau_entry: f64 = 0.0;
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const row_index = matrix_row.toUsize();
+                    tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+                }
+                basis.reduced_cost[column] -= theta * tableau_entry;
+            }
         }
         const artificial_begin = problem.num_cols + problem.num_rows;
         for (0..problem.num_rows) |logical_row| {
@@ -2532,18 +2815,33 @@ pub const SimplexEngine = struct {
                 0.0;
         }
         self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+        const row_pricing = self.selectRowPricing(basis.dual);
         const pricing_started = self.statisticsTimestamp();
-        defer self.recordPricingElapsed(pricing_started);
-        for (0..problem.num_cols) |col| {
-            var reduced = (if (maximize) -problem.col_cost[col] else problem.col_cost[col]) * self.objective_scale * basis.column_scale[col];
-            const begin = problem.matrix.col_starts[col];
-            const end = problem.matrix.col_starts[col + 1];
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
-                const row_index = row.toUsize();
-                reduced -= basis.row_scale[row_index] * value * basis.column_scale[col] * basis.dual[row_index];
+        defer if (row_pricing)
+            self.recordRowPricingElapsed(pricing_started)
+        else
+            self.recordPricingElapsed(pricing_started);
+        for (0..problem.num_cols) |col|
+            basis.reduced_cost[col] = (if (maximize) -problem.col_cost[col] else problem.col_cost[col]) * self.objective_scale * basis.column_scale[col];
+        if (row_pricing) {
+            for (basis.dual, 0..) |dual_value, row_index| {
+                if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
+                const scaled_dual = dual_value * basis.row_scale[row_index];
+                for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
+                    const column: usize = @intCast(column_u32);
+                    basis.reduced_cost[column] -= scaled_dual * coefficient * basis.column_scale[column];
+                }
             }
-            basis.reduced_cost[col] = reduced;
+        } else {
+            for (0..problem.num_cols) |col| {
+                const begin = problem.matrix.col_starts[col];
+                const end = problem.matrix.col_starts[col + 1];
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
+                    const row_index = row.toUsize();
+                    basis.reduced_cost[col] -= basis.row_scale[row_index] * value * basis.column_scale[col] * basis.dual[row_index];
+                }
+            }
         }
         for (0..problem.num_rows) |row| basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
         @memset(basis.reduced_cost[problem.num_cols + problem.num_rows ..], 0.0);

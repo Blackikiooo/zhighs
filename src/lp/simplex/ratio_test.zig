@@ -24,6 +24,53 @@ pub const RatioTest = struct {
         };
     }
 
+    /// Harris selection with deterministic virtual bound perturbations used
+    /// only to order an otherwise degenerate minimum-ratio set. Returned steps
+    /// remain exact values from the unperturbed bounds.
+    pub fn chooseLeavingPerturbed(
+        self: *const RatioTest,
+        direction: []const f64,
+        rhs: []const f64,
+        row_rank: []const f64,
+        degeneracy_tolerance: f64,
+    ) LeavingChoice {
+        if (direction.len != rhs.len or row_rank.len < direction.len) return .{};
+        var relaxed_step = std.math.inf(f64);
+        var minimum_step = std.math.inf(f64);
+        for (direction, rhs) |coefficient, value| {
+            if (coefficient <= self.tolerance) continue;
+            minimum_step = @min(minimum_step, @max(value / coefficient, 0.0));
+            relaxed_step = @min(relaxed_step, (@max(value, 0.0) + self.tolerance) / coefficient);
+        }
+        if (!std.math.isFinite(relaxed_step)) return .{ .step = relaxed_step };
+        if (minimum_step > degeneracy_tolerance) return self.chooseHarris(direction, rhs);
+
+        var maximum_pivot: f64 = 0.0;
+        for (direction, rhs) |coefficient, value| {
+            if (coefficient <= self.tolerance) continue;
+            const exact_step = @max(value / coefficient, 0.0);
+            if (exact_step <= relaxed_step and exact_step <= minimum_step + degeneracy_tolerance)
+                maximum_pivot = @max(maximum_pivot, coefficient);
+        }
+        var choice = LeavingChoice{ .step = std.math.inf(f64) };
+        var best_rank = std.math.inf(f64);
+        var best_pivot: f64 = 0.0;
+        for (direction, rhs, row_rank[0..direction.len], 0..) |coefficient, value, rank, row| {
+            if (coefficient <= self.tolerance) continue;
+            const exact_step = @max(value / coefficient, 0.0);
+            if (exact_step > relaxed_step or exact_step > minimum_step + degeneracy_tolerance) continue;
+            // Threshold stability: perturb only candidates retaining at least
+            // half the strongest pivot in the degenerate Harris set.
+            if (coefficient < maximum_pivot * 0.5) continue;
+            if (rank < best_rank or (rank == best_rank and coefficient > best_pivot)) {
+                best_rank = rank;
+                best_pivot = coefficient;
+                choice = .{ .row = @intCast(row), .step = exact_step };
+            }
+        }
+        return choice;
+    }
+
     fn chooseStandard(self: *const RatioTest, direction: []const f64, rhs: []const f64) LeavingChoice {
         var choice = LeavingChoice{ .step = std.math.inf(f64) };
         for (direction, rhs, 0..) |coefficient, value, i| {
@@ -159,6 +206,13 @@ test "Harris ratio test prefers stable pivot within relaxed bound" {
     const choice = test_rule.chooseLeaving(&[_]f64{ 1e-4, 1.0 }, &[_]f64{ 1e-4, 1.000001 });
     try std.testing.expectEqual(@as(?u32, 1), choice.row);
     try std.testing.expectApproxEqAbs(@as(f64, 1.000001), choice.step, 1e-12);
+}
+
+test "perturbed Harris changes only a degenerate tie order" {
+    const test_rule = RatioTest{ .rule = .harris_two_pass, .tolerance = 1e-9 };
+    const choice = test_rule.chooseLeavingPerturbed(&.{ 1, 2 }, &.{ 0, 0 }, &.{ 0.2, 0.1 }, 1e-7);
+    try std.testing.expectEqual(@as(?u32, 1), choice.row);
+    try std.testing.expectEqual(@as(f64, 0), choice.step);
 }
 
 test "dual bound-flipping ratio test records boxed breakpoints" {

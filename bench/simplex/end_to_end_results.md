@@ -167,3 +167,50 @@ re-enabled. It contains 538 events instead of 536 and is deterministic across
 repeated runs. The updated trace, objective, residuals, and all 40 corpus
 models pass the acceptance gate. Against the frozen HiGHS median, the `scsd1`
 gap falls from about 2.01x to 1.36x.
+
+## Stage 6.5 degeneracy and pricing A/B
+
+The 2026-07-19 Stage 6.5 run uses the same pinned corpus, Zig ReleaseFast, and
+frozen HiGHS revision described above. Timings include construction of the
+optional CSR pricing view. Each reported median and p95 uses 21 complete solves;
+all strategy correctness gates use the full 40-model corpus with trace checking
+disabled only because an explicit strategy intentionally changes the pivot path.
+
+Virtual basis-epoch perturbations preserve the exact unperturbed ratio step and
+reduced costs. Deterministic tolerance-bounded ranks only resolve stable Harris
+and pricing ties. A fixed 64-entry generation-marked ring adds short-lived taboo
+columns for bad `(entering, leaving, direction)` changes. Cleanup removes all
+artificial columns, performs a fresh factorization and exact Phase-I reprice,
+and transactionally restarts from the logical epoch with baseline ordering if
+validation fails.
+
+| brandy policy | iterations | degenerate pivots | solve median | solve p95 |
+|---|---:|---:|---:|---:|
+| baseline / column | 3384 | 3101 | 64.65 ms | 66.03 ms |
+| taboo / column | 1237 | 947 | 23.29 ms | 23.81 ms |
+| taboo / row | 1237 | 947 | 22.20 ms | 22.45 ms |
+
+The taboo policy reduces total iterations by 63.4%, degenerate pivots by 69.5%,
+and column-kernel median solve time by 64.0%. Its Phase I falls from 2987 to 900
+iterations. This clears the Stage 6.5 brandy gate, but it is not yet the automatic
+default: several non-target models take longer alternative valid paths. The
+automatic policy therefore remains baseline instead of using a model-name rule.
+
+Phase-I pricing was isolated with forced Dantzig, Devex, and approximate
+steepest-edge modes. Dantzig regresses brandy Phase I to 9195 iterations.
+Steepest-edge leaves the taboo path at 900 Phase-I iterations while increasing
+BTRAN calls from 899 to 4199. Devex remains the default; all three forced modes
+pass the 40-model correctness gate. Adaptive exact repricing records normalized
+drift (maximum `5.21e-10` in the measured taboo run), may only shorten the
+validated eight-update cadence, and resets that cadence across the Phase-I/II
+boundary.
+
+The reusable CSR companion view adds 29.3 KiB for brandy and 29.9 KiB for
+scsd1. It reduces scsd1 PRICE median from 4.03 ms to 3.24 ms and total median
+from 10.05 ms to 9.83 ms, but changes the floating accumulation order: scsd1
+iterations rise from 587 to 652 and p95 rises from 10.19 ms to 11.24 ms.
+Consequently column, row, and density-dispatched automatic kernels remain
+explicit A/B choices, with column retained as the default. Forced perturbation,
+taboo, every Phase-I pricing rule, adaptive reprice, row/automatic kernels, and
+the combined taboo+adaptive+row path each pass all 40 status, objective,
+residual, and ray checks.

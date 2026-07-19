@@ -45,6 +45,22 @@ pub fn main(init: std.process.Init) !void {
         const value = try std.fmt.parseUnsigned(usize, text, 10);
         break :blk if (value == 0) null else value;
     } else null;
+    const degeneracy_strategy: zhighs.lp.simplex.engine.DegeneracyStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "perturb")) .perturbation else if (std.mem.eql(u8, text, "taboo")) .perturbation_taboo else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "baseline")) .baseline else return error.InvalidArguments
+    else
+        .baseline;
+    const phase_one_pricing: zhighs.lp.simplex.engine.PhaseOnePricingStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "dantzig")) .dantzig else if (std.mem.eql(u8, text, "devex")) .devex else if (std.mem.eql(u8, text, "steepest")) .steepest_edge else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
+    else
+        .inherit;
+    const adaptive_reprice = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "adaptive")) true else if (std.mem.eql(u8, text, "fixed")) false else return error.InvalidArguments
+    else
+        false;
+    const pricing_kernel: zhighs.lp.simplex.engine.PricingKernel = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "row")) .row else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "column")) .column else return error.InvalidArguments
+    else
+        .column;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -118,6 +134,10 @@ pub fn main(init: std.process.Init) !void {
         .phase_one_strategy = phase_one_strategy,
         .crash_strategy = crash_strategy,
         .crash_max_columns = crash_max_columns,
+        .degeneracy_strategy = degeneracy_strategy,
+        .phase_one_pricing = phase_one_pricing,
+        .adaptive_reprice = adaptive_reprice,
+        .pricing_kernel = pricing_kernel,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -318,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
 
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\n",
+        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",
         .{
             path,
             simplex_stats.classifiedDegeneratePivots(),
@@ -329,6 +349,12 @@ pub fn main(init: std.process.Init) !void {
             simplex_stats.degeneracy_repeated_bases,
             simplex_stats.degeneracy_small_pivot_retries,
             simplex_stats.degeneracy_bound_flips,
+            simplex_stats.perturbation_activations,
+            simplex_stats.perturbation_expirations,
+            simplex_stats.perturbation_cleanups,
+            simplex_stats.taboo_records,
+            engine.exact_reprices,
+            engine.maximum_reduced_cost_drift,
         },
     );
     defer allocator.free(degeneracy_stats_line);
