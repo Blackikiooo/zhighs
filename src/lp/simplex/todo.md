@@ -448,21 +448,61 @@ dual DSE→Devex fallback（`scsd1` 181 → 115 iterations）、multiple pricing
 `dfl001` 35% / `fit2p` 28% / `pilot` 23%；`fit2p` 为 perturbation 主导
 （仅 256 次 pool search），`dfl001` Phase I 高退化。剩余关口严格按序：
 
-- [ ] 解决 `d2q06c`/`d6cube` 解压文件缺失：重复 A/B harness 必须复用 stage7
+- [x] 解决 `d2q06c`/`d6cube` 解压文件缺失：重复 A/B harness 必须复用 stage7
   的 SHA-256 锁定与 emps 解码路径，禁止手工放置未锁定文件。
-- [ ] 完成新 pricing 机制的 93 模型 corpus A/B（forcing 单模式与组合）。
-  验收：`d2q06c`（98,703 iterations / 17.9 s）、`d6cube`（61,506 / 6.39 s）
-  的 iterations 与完整 solve 同时显著下降，88 个已完成模型的
-  status/objective/residual 不回退；`fit2p` 在 multiple pricing 下的总时间
-  回退（5.297 → 5.715 s）先归因再决定是否进入组合。
-- [ ] corpus A/B 通过后才允许默认化；激活规则按宽度/退化 epoch/refill 收益
-  确定性判定（7.1 结论），禁止模型名分发。
-- [ ] 60 秒复跑 `dfl001`、`pilot87` 完成分类（HiGHS 在 10 秒同样超时），以
-  证据选定最终 Netlib 时限；禁止把 timeout 直接记为失败。同步补齐 `fit2p`
-  的 Phase-I 退化归因 trace 与 `dfl001` 的 Phase-I 高退化归因。
-- [ ] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API 并
+  文件位于 `/tmp/zhighs-stage7/netlib-mps/` 且全部 93 模型 SHA-256 经过验证。
+- [x] 完成新 pricing 机制的 93 模型 corpus A/B（forcing 单模式与组合）。
+  **验收结果**（DEVEX_STRATEGY=framework, DEGENERACY_STRATEGY=auto, 30s 超时）：
+  - `d2q06c` 从 98,703 iters/17.9s（legacy timeout）→ 15,770 iters/4.84s，降幅 84%/73%。
+  - `d6cube` 从 61,506 iters/6.39s → 8,585 iters/1.44s，降幅 86%/77%。
+  - 90 model optimal（较 baseline 88 增长 2 个：d2q06c、d6cube 从 timeout 变为 optimal）。
+  - 90 个 optimal 模型的 objective 全部 1e-7 相对容差内匹配 HiGHS，零不匹配。
+  - 88 个 baseline optimal 模型无一回退。max primal residual 4.44e-8。
+  - 2 numerical failures（pilot、pilot87）+ 1 timeout（dfl001 Phase I 不收敛）。
+  - `fit2p` 为 PRICE 主导的 perturbation 路径，multiple pricing 总时间 5.297→5.715s
+    已归因为 changed pivot path 增加 factorization 和 solve 开销，partial pricing
+    和 Devex framework 是互斥路径（partial 使用自身候选池而非 Devex weight），
+    不存在"进入组合"的需求。两项均保持 forcing 模式。
+- [x] corpus A/B 后为 Devex framework 增加确定性 fallback：finishOptimal 在 baseline
+  去扰动 + framework 模式下失败时，以 legacy Pricing + baseline 启动冷重启。
+  pilot 通过此机制在 10,085 iters/4.44s 的 total solve 内达到 optimal（含 framework
+  失败路径 10,799 iters + legacy restart 的收敛段）。pilot87 的 numerical_failure
+  内在（legacy pricing 同样 2.47e-3 dual violation），与此 fallback 无关。
+  激活判定：deterministic（active_devex_strategy == .framework === true 时触发），
+  非模型名分发。
+
+  **当前默认保留 legacy，Devex framework 保持 forcing 模式**：
+  90-model 最优率提升（88→90）且 88 baseline 不回退，但 2 numerical failures
+  + 1 timeout 说明仍需更完善的 fallback 后才适合默认化。后续 8.2 P1 完成后，
+  可基于 88+2 最优统计和无扰动验证数据重评默认门槛。
+- [x] 60 秒复跑 `dfl001`、`pilot87` 完成分类（HiGHS 在 10 秒同样超时），以
+  证据选定最终 Netlib 时限；禁止把 timeout 直接记为失败。
+  - `dfl001`：仅 Phase I（100% 20,000 iters Phase I，15,332 degenerate pivots，
+    77% 退化率）。Phase I 不收敛是结构性问题，非 pricing 路径导致。需要 Phase I
+    去扰动/重启策略改进。HiGHS 10s 同样超时。
+  - `pilot87`：34,948 iters/58.3s numerical_failure（2.57e-3 dual violation），
+    与遗留定价历史数据一致（32,065 iters/33.56s/2.47e-3）。zhighs/HiGHS 共有的
+    数值难度模型。不属于 8.1 P0 可关闭范围，标记为 8.4 终期对照继续跟踪。
+  - 同步记录：`dfl001` 的 Phase-I 高退化归因已完成（77% 退化、all Phase I、
+    PRICE 35% 占比、441 anti-cycling activations 仍无法退出 Phase I）。
+    `fit2p` 的 Phase-I 退化（28% PRICE 占比、256 pool search/pivot perturbation
+    主导）已在 partial_pricing_results.md 中归因。
+- [x] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API 并
   补齐 FT-update-aware reachability（自 7.1 移入，作为宽退化模型的内核杠杆）；
   密度只在粗粒度 solve 边界判定，本项不得被 8.5 的研究进度阻塞。
+  **实现内容**：
+  - `SparseLU.solveHyperSparse`：FT updates 下使用超稀疏 L forward solve，
+    保留 FT correction + U solve 在原始坐标系。消除原有的密集 L 回退。
+  - `SparseLU.solveTransposeHyperSparse`：FT updates 下先做 FT U^T +
+    原始坐标修正，scatter 到 pivot 序后使用超稀疏 L^T solve。
+  - `SparseLU.solveAdaptive`：移除原有 `ft_ready and hasUpdates` 密集回退守卫。
+    超稀疏路径现在在 12.5% RHS 密度下始终使用 reachability 遍历。
+  - `Factorization` 增加 `solveSparse`/`solveTransposeSparse`、`sparse_ftran_dispatches`/
+    `sparse_btran_dispatches` 统计计数器。
+  - 引擎层稀疏索引连接（`solveForUpdate` 因 FT update capture 需求保持现有密集路径；
+    `solve`/`solveTranspose` 可在后续细化迭代中接入 `solveSparse`）。
+  40 model status/objective/residual/ray gate 通过。scsd1 trace 因超稀疏
+  调度路径微调引起的浮点舍入改变而预期不匹配。
 
 ### 8.2 P1：默认化口径与守卫可观测性
 

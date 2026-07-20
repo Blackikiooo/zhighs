@@ -400,13 +400,32 @@ pub const SparseLU = struct {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
         if (self.ft_ready and self.ft.hasUpdates()) {
-            @memset(self.work[0..n], 0.0);
+            // FT-aware hyper-sparse FTRAN: L is unaffected by FT updates, so
+            // hyper-sparse L avoids visiting unrelated rows. FT corrections
+            // and the modified U solve operate on the (denser) result in
+            // original column space.
+            self.ensureHyperViews();
+            self.clearActive();
             for (input_indices) |row| {
                 if (row >= n) return error.DimensionMismatch;
-                self.work[row] = rhs[row];
+                const position = self.row_position[row];
+                self.activate(position, rhs[row]);
             }
-            @memcpy(rhs, self.work[0..n]);
-            try self.solve(rhs);
+            var k: usize = 0;
+            while (k < n) : (k += 1) if (self.marked[k]) {
+                const solved = self.work[k];
+                for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, value|
+                    self.accumulate(self.row_position[row], -value * solved);
+            };
+            // Scatter hyper-sparse L result to original column space.
+            @memset(rhs[0..n], 0.0);
+            for (self.active[0..self.active_count]) |position| {
+                const column = self.pivot_columns[position];
+                rhs[column] = self.work[position];
+            }
+            // FT corrections and modified U solve on original-space rhs.
+            try self.ft.prepareFtran(rhs, false);
+            try self.ft.solveUpper(rhs);
             var output_count: usize = 0;
             for (rhs, 0..) |value, index| if (value != 0.0) {
                 output_indices[output_count] = @intCast(index);
@@ -454,13 +473,30 @@ pub const SparseLU = struct {
         const n = self.dimension;
         if (rhs.len != n or output_indices.len < n) return error.DimensionMismatch;
         if (self.ft_ready and self.ft.hasUpdates()) {
-            @memset(self.work[0..n], 0.0);
-            for (input_indices) |column| {
-                if (column >= n) return error.DimensionMismatch;
-                self.work[column] = rhs[column];
+            // FT-aware hyper-sparse BTRAN: U^T and corrections in original
+            // space (already sparse via FT linked lists), then hyper-sparse
+            // L^T in pivot order to avoid visiting unrelated rows.
+            try self.ft.solveUpperTranspose(rhs);
+            self.ensureHyperViews();
+            self.clearActive();
+            for (0..n) |position| {
+                const column = self.pivot_columns[position];
+                if (rhs[column] != 0.0)
+                    self.activate(position, rhs[column]);
             }
-            @memcpy(rhs, self.work[0..n]);
-            try self.solveTranspose(rhs);
+            var k = n;
+            while (k > 0) {
+                k -= 1;
+                if (!self.marked[k]) continue;
+                const solved = self.work[k];
+                for (self.l_row_columns[self.l_row_starts[k]..self.l_row_starts[k + 1]], self.l_row_values[self.l_row_starts[k]..self.l_row_starts[k + 1]]) |column, value|
+                    self.accumulate(column, -value * solved);
+            }
+            @memset(rhs[0..n], 0.0);
+            for (self.active[0..self.active_count]) |position| {
+                const row = self.pivot_rows[position];
+                rhs[row] = self.work[position];
+            }
             var output_count: usize = 0;
             for (rhs, 0..) |value, index| if (value != 0.0) {
                 output_indices[output_count] = @intCast(index);
@@ -500,9 +536,12 @@ pub const SparseLU = struct {
     }
 
     /// Select hyper-sparse traversal below 12.5% RHS density, otherwise use
-    /// the sequential packed kernel. The returned RHS is always dense.
+    /// the sequential packed kernel. Hyper-sparse now handles FT updates via
+    /// an FT-aware L-only traversal, so the FT-update guard is removed: the
+    /// L factor is unaffected by Forrest-Tomlin modifications and visiting
+    /// only the active rows still saves work on sparse RHS. The returned RHS
+    /// is always dense.
     pub fn solveAdaptive(self: *SparseLU, rhs: []f64, input_indices: []const u32, transpose: bool) SparseLuError!void {
-        if (self.ft_ready and self.ft.hasUpdates()) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         if (input_indices.len * 8 >= self.dimension) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         const count = if (transpose)
             try self.solveTransposeHyperSparse(rhs, input_indices, self.hyper_output)

@@ -46,6 +46,10 @@ pub const FactorizationStats = struct {
     dense_btran_dispatches: usize = 0,
     hyper_ftran_dispatches: usize = 0, // Reserved for hyper-sparse dispatches
     hyper_btran_dispatches: usize = 0,
+    /// Sparse-index dispatches where the caller provided nonzero positions
+    /// and the sparse LU backend used adaptive (hyper-sparse vs dense) solve.
+    sparse_ftran_dispatches: usize = 0,
+    sparse_btran_dispatches: usize = 0,
     update_dimension_failures: usize = 0,
     update_unsupported_failures: usize = 0,
     update_singular_failures: usize = 0,
@@ -277,6 +281,82 @@ pub const Factorization = struct {
         }
         // Apply pending Eta updates (dense backend only).
         for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
+    }
+
+    /// FTRAN with caller-provided nonzero positions for the sparse-index
+    /// adaptive dispatch. Pass `null` input_indices for the standard dense
+    /// solve (e.g. iterative refinement residuals). The returned RHS is
+    /// always dense.
+    pub fn solveSparse(self: *Factorization, rhs: []f64, input_indices: []const u32) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.ftran_ns, started);
+        self.stats.ftran_calls += 1;
+        self.observeFtranRhs(rhs);
+        if (self.backend_kind == .sparse_lu and input_indices.len * 8 < self.dimension) {
+            self.stats.hyper_ftran_dispatches += 1;
+            self.stats.sparse_ftran_dispatches += 1;
+            self.sparse_lu.solveAdaptive(rhs, input_indices, false) catch |err| return switch (err) {
+                error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+            };
+        } else {
+            self.stats.dense_ftran_dispatches += 1;
+            switch (self.backend_kind) {
+                .dense_lu => self.dense_lu.solve(rhs) catch |err| return switch (err) {
+                    error.DimensionMismatch => error.DimensionMismatch,
+                    error.Singular => error.Singular,
+                    error.NumericalFailure => error.NumericalFailure,
+                    error.OutOfMemory => error.OutOfMemory,
+                },
+                .sparse_lu => self.sparse_lu.solve(rhs) catch |err| return switch (err) {
+                    error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+                    error.Singular => error.Singular,
+                    error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                    error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+                },
+            }
+        }
+        for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
+    }
+
+    pub fn solveTransposeSparse(self: *Factorization, rhs: []f64, input_indices: []const u32) FactorizationError!void {
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.btran_ns, started);
+        self.stats.btran_calls += 1;
+        self.observeBtranRhs(rhs);
+        var update_index = self.eta_count;
+        while (update_index > 0) {
+            update_index -= 1;
+            self.applyEtaInverseTranspose(update_index, rhs);
+        }
+        if (self.backend_kind == .sparse_lu and input_indices.len * 8 < self.dimension) {
+            self.stats.hyper_btran_dispatches += 1;
+            self.stats.sparse_btran_dispatches += 1;
+            self.sparse_lu.solveAdaptive(rhs, input_indices, true) catch |err| return switch (err) {
+                error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+                error.Singular => error.Singular,
+                error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+            };
+        } else {
+            self.stats.dense_btran_dispatches += 1;
+            switch (self.backend_kind) {
+                .dense_lu => self.dense_lu.solveTranspose(rhs) catch |err| return switch (err) {
+                    error.DimensionMismatch => error.DimensionMismatch,
+                    error.Singular => error.Singular,
+                    error.NumericalFailure => error.NumericalFailure,
+                    error.OutOfMemory => error.OutOfMemory,
+                },
+                .sparse_lu => self.sparse_lu.solveTranspose(rhs) catch |err| return switch (err) {
+                    error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+                    error.Singular => error.Singular,
+                    error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+                    error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+                },
+            }
+        }
     }
 
     /// FTRAN used for an entering column. SparseLU retains the partial `aq`

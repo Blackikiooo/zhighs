@@ -1406,6 +1406,17 @@ pub const SimplexEngine = struct {
                 if (status == .numerical_failure) {
                     if (self.active_degeneracy_strategy != .baseline)
                         return self.restartSolveWithoutPerturbation(problem, control);
+                    // finishOptimal still fails at baseline degeneracy.
+                    // When the Devex framework changes the pivot path into a
+                    // basis that fails the residual check, fall back to the
+                    // well-tested legacy pricing with a clean cold start.
+                    if (self.active_devex_strategy == .framework) {
+                        var legacy_control = control;
+                        legacy_control.initial_basis = null;
+                        legacy_control.degeneracy_strategy = .baseline;
+                        legacy_control.devex_strategy = .legacy;
+                        return self.solveProblem(problem, legacy_control);
+                    }
                     self.failure_site = .optimality_check;
                 }
                 return status;
