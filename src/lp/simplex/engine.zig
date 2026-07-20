@@ -1415,6 +1415,7 @@ pub const SimplexEngine = struct {
                     // basis that fails the residual check, fall back to the
                     // well-tested legacy pricing with a clean cold start.
                     if (self.active_devex_strategy == .framework) {
+                        self.stats.cold_restart_solves += 1;
                         var legacy_control = control;
                         legacy_control.initial_basis = null;
                         legacy_control.degeneracy_strategy = .baseline;
@@ -2972,7 +2973,16 @@ pub const SimplexEngine = struct {
     }
 
     fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
+        const saved_cold_restarts = .{
+            self.stats.cold_restart_solves,
+            self.stats.cold_restart_phase_one,
+        };
         self.stats = .{};
+        // Preserve cold-restart counters across recursive solveProblem calls
+        // so that restartSolveWithoutPerturbation and restartPhaseOneWithout-
+        // Perturbation counts survive the nested resetStatistics.
+        self.stats.cold_restart_solves = saved_cold_restarts[0];
+        self.stats.cold_restart_phase_one = saved_cold_restarts[1];
         self.statistics_io = if (control.collect_statistics)
             control.clock_io orelse std.Io.Threaded.global_single_threaded.io()
         else

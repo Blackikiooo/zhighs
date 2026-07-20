@@ -284,10 +284,15 @@ pub const Factorization = struct {
     }
 
     /// FTRAN with caller-provided nonzero positions for the sparse-index
-    /// adaptive dispatch. Pass `null` input_indices for the standard dense
-    /// solve (e.g. iterative refinement residuals). The returned RHS is
-    /// always dense.
+    /// adaptive dispatch. Pass an empty slice for the standard dense solve
+    /// (e.g. iterative refinement residuals). The returned RHS is always
+    /// dense. NOTE: this method is not yet wired into the simplex engine
+    /// hot path; it is reserved for future integration.
     pub fn solveSparse(self: *Factorization, rhs: []f64, input_indices: []const u32) FactorizationError!void {
+        // Empty indices or dense-LU backend: fall through to the standard
+        // dense solve so callers don't need a separate null-guard path.
+        if (input_indices.len == 0 or self.backend_kind != .sparse_lu)
+            return self.solve(rhs);
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.ftran_ns, started);
         self.stats.ftran_calls += 1;
@@ -321,7 +326,12 @@ pub const Factorization = struct {
         for (0..self.eta_count) |update_index| self.applyEtaInverse(update_index, rhs);
     }
 
+    /// BTRAN with caller-provided nonzero positions for sparse-index
+    /// adaptive dispatch. Pass an empty slice for the standard dense solve.
+    /// NOTE: not yet wired into the simplex engine hot path.
     pub fn solveTransposeSparse(self: *Factorization, rhs: []f64, input_indices: []const u32) FactorizationError!void {
+        if (input_indices.len == 0 or self.backend_kind != .sparse_lu)
+            return self.solveTranspose(rhs);
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.btran_ns, started);
         self.stats.btran_calls += 1;

@@ -525,8 +525,11 @@ dual DSE→Devex fallback（`scsd1` 181 → 115 iterations）、multiple pricing
   新增 `cold_restart_solves` 和 `cold_restart_phase_one` 两个统计指标，
   在 2 个 solve 和 6 个 Phase-I 回退位置计数；输出到 stats 行。
 - [x] 将 published primal/dual residual 上限（当前实测 9.93e-8 / 5.30e-8）作为
-  corpus gate 的显式断言。primal 收紧为 `2e-7`、dual 保持 `1e-7` 但附
-  baseline-max 标注；新增注释引用实测 Stage 7 上限。
+  corpus gate 的显式断言。primal 设为 `2e-7`（实测 max 9.93e-8 的 2× 护栏）、
+  dual 保持 `1e-7`（实测 5.30e-8）；基线上限注释写入脚本，新增注释引用实测
+  Stage 7 最大值。注意：primal 阈值从 1e-7 改为 2e-7 是放宽而非收紧，但因
+  原始 gate 的 primal residual 断言本就在 1e-7 不变而实际 max=9.93e-8 已接近，
+  `2e-7` 提供必要的数值波动的回旋空间，且脚本注释诚实记载了实测上限。
 
 ### 8.3 P2：可逆 LP presolve（8.1 关闭前不得启动）
 
