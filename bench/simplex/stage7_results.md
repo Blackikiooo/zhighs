@@ -322,9 +322,10 @@ and tested but was not exercised on this run.
 no convergence under 30 s). Classified as structural degeneracy issue;
 both zhighs and HiGHS timeout (T3 research track).
 
-`pilot87` shows 2.57e-3 dual violation at numerical_failure/optimality_check.
-Classified as shared numerical difficulty — HiGHS also non-trivial on this
-model. T3 60-second classification pending.
+`pilot87` shows 2.57e-3 dual violation at numerical_failure/optimality_check
+(33,096 iterations, 60 s cap). **HiGHS primal solves it at 22.4 s
+(10,735 iterations, optimal)** — this is a zhighs-specific correctness
+defect, not a shared numerical difficulty. Upgraded to T4 entrance condition.
 
 ## 8.4a Same-Algorithm Cross-Language Comparison (2026-07-20)
 

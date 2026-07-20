@@ -705,11 +705,14 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 - [x] 以 60 秒证据最终确定 Netlib 时限，并据此重分类 `dfl001`（Phase I 77%
   退化不收敛，HiGHS 同样超时）与 `pilot87`（2.57e-3 dual violation，
   HiGHS 同病的数值难度模型）。
-  **2026-07-20 结果**：`dfl001` 双方 60 秒均 timeout（zhighs 11,136 iters
-  后 60s timeout，HiGHS primal 类似）。`pilot87` zhighs 60s 仍
-  numerical_failure（33,674 iters，dual violation 2.49e-3），HiGHS primal
-  60s timeout。双方均非 trivial 求解对象，归类为共享数值困难模型。
-  Netlib 时限建议保持 30s，`dfl001`/`pilot87` 报告为已知限制。
+  **2026-07-20 结果**：`dfl001` 双方 60 秒均 timeout——zhighs 在 65s 超时
+  触发前无结果行输出，HiGHS primal 同样无结果（双方 timeout）。归类为其享
+  结构性退化困难。
+  `pilot87`：zhighs 60s 仍 numerical_failure（33,096 iters，dual violation
+  ∼2.5e-3），但 **HiGHS primal 在 22.4s 解出 optimal**（10,735 iters）。
+  这不是双方共享的数值困难——zhighs 存在可修复的正确性缺陷。Netlib 时限
+  建议保持 30s，`dfl001` 报告为已知限制，`pilot87` 升级为 T4 评估的入口
+  条件之一。
 - [ ] 重跑 Stage 7 全量确认 90 optimal 稳定可复现，记录 median/p95、
   requested bytes、peak RSS。
 
