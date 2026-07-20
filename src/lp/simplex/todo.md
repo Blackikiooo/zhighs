@@ -748,9 +748,17 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 
 ### T5（P2）可逆 LP presolve（原 8.3，T1–T4 关闭前不得启动）
 
-- 按根 todo 顺序：reduction 记录与 `PostsolveStack` → fixed column、empty
-  row/column、singleton row → primal/dual/ray/certificate postsolve；以 presolve
-  开关前后状态与目标一致为验收。启动后重估 8.6 口径 3。
+- [x] **Phase 1 基础设施已完成**：`src/lp/presolve/presolve.zig` 实现
+  `PresolvedProblem`、`FixedColumnRecord`、`presolve()`（固定列消除 +
+  紧凑 CSC 构建）、`postsolve()`（primal/dual/reduced_cost/ray 恢复）、
+  4 个单元测试。模块化在 `src/lp/presolve/`，不耦合 simplex 引擎。
+  `zig build test` 和 40 模型 gate PASS。
+- [ ] Phase 2（empty row/column）+ Phase 3（singleton row）：待启动。
+- **2026-07-20 策略调整**：presolve 引擎集成（full A/B、runner 开关、
+  默认化）推迟到 dual simplex Phase II 完成之后。理由：presolve 是乘法器，
+  缩小模型后仍需 simplex 求解；当前 primal simplex 已追平 HiGHS dual
+  median 1.02x，优先补齐 dual Phase II 比在未完成的算法栈上叠加 presolve
+  更具杠杆。presolve 基础设施已可独立编译和测试，不阻塞任何后续工作。
 
 ### T6（P3）对照与报告（原 8.4 其余项）
 
