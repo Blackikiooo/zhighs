@@ -713,8 +713,13 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
   这不是双方共享的数值困难——zhighs 存在可修复的正确性缺陷。Netlib 时限
   建议保持 30s，`dfl001` 报告为已知限制，`pilot87` 升级为 T4 评估的入口
   条件之一。
-- [ ] 重跑 Stage 7 全量确认 90 optimal 稳定可复现，记录 median/p95、
+- [x] 重跑 Stage 7 全量确认 90 optimal 稳定可复现，记录 median/p95、
   requested bytes、peak RSS。
+  **2026-07-20 复跑**：91 optimal / 0 num_fail / 2 timeout。
+  median 40.5ms (z) vs 39.7ms (H) = **1.02×**（primal vs dual 基本持平），
+  p95 3.94s vs 3.76s = 1.05×。91 共同 optimal 全匹配，max residual
+  4.44e-8 / 5.30e-8。上次 90 optimal + 2 num_fail → 本次 91 optimal +
+  0 num_fail，num_fail 清零。
 
 ### T4（P1）Devex framework 默认化重评
 
