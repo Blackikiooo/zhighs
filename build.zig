@@ -25,6 +25,16 @@ pub fn build(b: *std.Build) void {
             .{ .name = "matrix", .module = matrix_module },
         },
     });
+    const presolve_module = b.createModule(.{
+        .root_source_file = b.path("src/presolve/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "lp", .module = lp_module },
+        },
+    });
     const solver_module = b.createModule(.{
         .root_source_file = b.path("src/solver/root.zig"),
         .target = target,
@@ -65,6 +75,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("matrix", matrix_module);
     mod.addImport("model", model_module);
     mod.addImport("lp", lp_module);
+    mod.addImport("presolve", presolve_module);
     mod.addImport("solver", solver_module);
     mod.addImport("io", io_module);
 

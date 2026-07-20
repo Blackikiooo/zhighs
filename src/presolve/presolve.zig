@@ -12,12 +12,10 @@
 const std = @import("std");
 const foundation = @import("foundation");
 const matrix = @import("matrix");
-const problem_module = @import("../simplex/problem.zig");
-const solution_module = @import("../simplex/solution.zig");
-
-pub const ProblemView = problem_module.ProblemView;
-pub const SolveStatus = solution_module.SolveStatus;
-pub const SolutionView = solution_module.SolutionView;
+const lp = @import("lp");
+const ProblemView = lp.ProblemView;
+const SolveStatus = lp.SolveStatus;
+const SolutionView = lp.SolutionView;
 
 /// Record for one eliminated fixed column.
 pub const FixedColumnRecord = struct {
@@ -42,7 +40,7 @@ pub const PresolvedProblem = struct {
     row_lower: []f64,
     row_upper: []f64,
     objective_offset: f64,
-    objective_sense: problem_module.ObjectiveSense,
+    objective_sense: lp.ObjectiveSense,
 
     /// Reduced constraint matrix (owning CSC).
     matrix_storage: matrix.CscMatrix = undefined,
@@ -190,7 +188,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     std.debug.assert(rc == reduced_cols);
 
     // ── Build compact CSC ──
-    var csc = try matrix.CscMatrix.initPackedUninitialized(allocator, problem.num_rows, reduced_cols, fixed_nnz);
+    var csc = matrix.CscMatrix.initPackedUninitialized(allocator, problem.num_rows, reduced_cols, fixed_nnz) catch return error.OutOfMemory;
     errdefer csc.deinit(allocator);
     pp._matrix_valid = true;
 
@@ -216,7 +214,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
 }
 
 /// Build a trivial presolved problem that clones the original.
-fn triviallyPresolved(allocator: std.mem.Allocator, problem: ProblemView) !PresolvedProblem {
+fn triviallyPresolved(allocator: std.mem.Allocator, problem: ProblemView) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     const nc = problem.num_cols;
     const nr = problem.num_rows;
     var pp = PresolvedProblem{
@@ -242,7 +240,7 @@ fn triviallyPresolved(allocator: std.mem.Allocator, problem: ProblemView) !Preso
         pp.reduced_to_original_col[j] = @intCast(j);
         pp.original_to_reduced_col[j] = @intCast(j);
     }
-    pp.matrix_storage = try matrix.CscMatrix.initPackedUninitialized(allocator, nr, nc, problem.matrix.values.len);
+    pp.matrix_storage = matrix.CscMatrix.initPackedUninitialized(allocator, nr, nc, problem.matrix.values.len) catch return error.OutOfMemory;
     pp._matrix_valid = true;
     for (0..nc + 1) |j| pp.matrix_storage.col_starts[j] = problem.matrix.col_starts[j];
     @memcpy(pp.matrix_storage.row_indices[0..problem.matrix.values.len], problem.matrix.row_indices);
