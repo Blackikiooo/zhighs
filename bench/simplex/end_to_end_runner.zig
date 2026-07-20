@@ -387,7 +387,7 @@ pub fn main(init: std.process.Init) !void {
 
     const degeneracy_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\ttaboo_records={d}\ttaboo_retries={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",
+        "stats\t{s}\tdegenerate_classified={d}\tdegenerate_bound_tie={d}\tdegenerate_ratio_tie={d}\tdegenerate_zero_step={d}\tdegenerate_phase1_stall={d}\tdegenerate_repeated_basis={d}\tdegenerate_small_pivot={d}\tdegenerate_bound_flip={d}\tperturbation_activations={d}\tperturbation_expirations={d}\tperturbation_cleanups={d}\tcold_restart_solves={d}\tcold_restart_phase_one={d}\ttaboo_records={d}\ttaboo_retries={d}\texact_reprices={d}\tmax_reduced_cost_drift={e:.6}\n",
         .{
             path,
             simplex_stats.classifiedDegeneratePivots(),
@@ -401,6 +401,8 @@ pub fn main(init: std.process.Init) !void {
             simplex_stats.perturbation_activations,
             simplex_stats.perturbation_expirations,
             simplex_stats.perturbation_cleanups,
+            simplex_stats.cold_restart_solves,
+            simplex_stats.cold_restart_phase_one,
             simplex_stats.taboo_records,
             simplex_stats.taboo_retries,
             engine.exact_reprices,

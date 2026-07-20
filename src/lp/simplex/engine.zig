@@ -245,6 +245,8 @@ pub const SimplexStats = struct {
     perturbation_activations: usize = 0,
     perturbation_expirations: usize = 0,
     perturbation_cleanups: usize = 0,
+    cold_restart_solves: usize = 0,
+    cold_restart_phase_one: usize = 0,
     taboo_records: usize = 0,
     taboo_retries: usize = 0,
     aq_samples: usize = 0,
@@ -1404,8 +1406,10 @@ pub const SimplexEngine = struct {
                 }
                 const status = self.finishOptimal(problem);
                 if (status == .numerical_failure) {
-                    if (self.active_degeneracy_strategy != .baseline)
+                    if (self.active_degeneracy_strategy != .baseline) {
+                        self.stats.cold_restart_solves += 1;
                         return self.restartSolveWithoutPerturbation(problem, control);
+                    }
                     // finishOptimal still fails at baseline degeneracy.
                     // When the Devex framework changes the pivot path into a
                     // basis that fails the residual check, fall back to the
@@ -1476,8 +1480,10 @@ pub const SimplexEngine = struct {
             } else {
                 if (leaving.status == .unbounded) {
                     const status = self.finishUnbounded(problem, entering.column, entering.direction);
-                    if (status == .numerical_failure and self.active_degeneracy_strategy != .baseline)
+                    if (status == .numerical_failure and self.active_degeneracy_strategy != .baseline) {
+                        self.stats.cold_restart_solves += 1;
                         return self.restartSolveWithoutPerturbation(problem, control);
+                    }
                     return status;
                 }
                 if (leaving.status != .optimal) return leaving.status;
@@ -2626,8 +2632,10 @@ pub const SimplexEngine = struct {
             // model. Restore the logical epoch so infeasibility is proved by
             // the unperturbed Phase-I path instead of escaping as a numerical
             // failure.
-            if (self.degeneracy.ever_active)
+            if (self.degeneracy.ever_active) {
+                self.stats.cold_restart_phase_one += 1;
                 return self.restartPhaseOneWithoutPerturbation(problem, control);
+            }
             return .numerical_failure;
         }
         const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -2639,13 +2647,18 @@ pub const SimplexEngine = struct {
             // infeasibility conclusion must come from the unperturbed logical
             // epoch. Restore it transactionally and let baseline Phase I
             // either prove infeasibility or continue searching.
-            if (self.degeneracy.ever_active)
+            if (self.degeneracy.ever_active) {
+                self.stats.cold_restart_phase_one += 1;
                 return self.restartPhaseOneWithoutPerturbation(problem, control);
+            }
             return .infeasible;
         }
 
         if (self.cleanupArtificialBasis(problem) != .optimal) {
-            if (self.degeneracy.ever_active) return self.restartPhaseOneWithoutPerturbation(problem, control);
+            if (self.degeneracy.ever_active) {
+                self.stats.cold_restart_phase_one += 1;
+                return self.restartPhaseOneWithoutPerturbation(problem, control);
+            }
             return .numerical_failure;
         }
         @memset(basis.col_upper[artificial_begin..], 0.0);
@@ -2663,11 +2676,16 @@ pub const SimplexEngine = struct {
             if (self.refactorizeBasis(problem, .cleanup) != .optimal or
                 self.recomputeBasicValues(problem) != .optimal or
                 self.recomputePhaseOneReducedCosts(problem) != .optimal)
+            {
+                self.stats.cold_restart_phase_one += 1;
                 return self.restartPhaseOneWithoutPerturbation(problem, control);
+            }
             var cleanup_infeasibility: f64 = 0.0;
             for (basis.primal[artificial_begin..]) |value| cleanup_infeasibility += @max(value, 0.0);
-            if (cleanup_infeasibility > self.numerical.primal_tolerance)
+            if (cleanup_infeasibility > self.numerical.primal_tolerance) {
+                self.stats.cold_restart_phase_one += 1;
                 return self.restartPhaseOneWithoutPerturbation(problem, control);
+            }
         }
         return .optimal;
     }
