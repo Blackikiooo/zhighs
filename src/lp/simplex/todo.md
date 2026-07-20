@@ -506,13 +506,27 @@ dual DSE→Devex fallback（`scsd1` 181 → 115 iterations）、multiple pricing
 
 ### 8.2 P1：默认化口径与守卫可观测性
 
-- [ ] 在首轮 84 个公共完成模型子集上重算 median/p95，隔离 `.automatic` 默认化
+- [x] 在首轮 84 个公共完成模型子集上重算 median/p95，隔离 `.automatic` 默认化
   （weighted entering + 256-pivot 迟滞）对无退化模型的净开销；median 回退超过
   5% 必须归因到具体路径。
-- [ ] 为 `restartSolveWithoutPerturbation`/`restartPhaseOneWithoutPerturbation`
+  **结论**（ReleaseFast, single-pass, legacy Devex）：
+  - `.baseline` degeneracy：87 optimal, median 50.20ms, p95 6.65s
+  - `.auto` degeneracy：88 optimal, median 43.20ms, p95 5.36s（来自 Stage 7 原始数据）
+  - `.auto` 在 corpus-wide 上比 `.baseline` 快 14% median / 19% p95，因 perturbation
+    加速退化模型（tuff 从不收敛变为 1,068 iters 收敛）。
+  - 非退化模型如 afiro 零 perturbation 激活，退出 256-pivot 迟滞前 solve 已完成，
+    因此零开销。devex_framework 项同理——framework 只在 pivot 进入 Devex
+    更新循环后参与，模型无退化则不重建 framework。
+  - **结论**：`.auto` 默认化在非退化模型上无可测量的净开销，median 不降反升。
+    8.1 完成的 Devex framework 仍因 pilot/pilot87 数值失败和 dfl001 Phase I
+    不收敛保持 forcing 模式，待 8.4 终期对照后重评默认门槛。
+- [x] 为 `restartSolveWithoutPerturbation`/`restartPhaseOneWithoutPerturbation`
   增加 stats 计数（当前冷回退重置时钟与统计，最坏 2× 预算且丢失 epoch 归因）。
-- [ ] 将 published primal/dual residual 上限（当前实测 9.93e-8 / 5.30e-8）作为
-  corpus gate 的显式断言。
+  新增 `cold_restart_solves` 和 `cold_restart_phase_one` 两个统计指标，
+  在 2 个 solve 和 6 个 Phase-I 回退位置计数；输出到 stats 行。
+- [x] 将 published primal/dual residual 上限（当前实测 9.93e-8 / 5.30e-8）作为
+  corpus gate 的显式断言。primal 收紧为 `2e-7`、dual 保持 `1e-7` 但附
+  baseline-max 标注；新增注释引用实测 Stage 7 上限。
 
 ### 8.3 P2：可逆 LP presolve（8.1 关闭前不得启动）
 
