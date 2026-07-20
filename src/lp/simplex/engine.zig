@@ -1703,8 +1703,10 @@ pub const SimplexEngine = struct {
 
         self.buildDualPhaseOneCosts(problem);
         if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
-        self.shiftDualPhaseOneCosts(problem);
-        if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+        // Infeasibility is encoded in nonbasic primal values (±1/0), not
+        // shifted costs. The raw scaled LP cost + perturbation keeps the
+        // reduced cost magnitude intact so the Phase-I objective correctly
+        // measures remaining infeasibility.
         self.dual_phase_one.installWorkingBounds(basis, original_count);
         if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
         self.algorithm = .dual_revised;
@@ -2012,31 +2014,6 @@ pub const SimplexEngine = struct {
     /// boundary. Unlike the former zero-objective repair, feasible reduced
     /// costs and all basic costs remain intact, so Phase I retains a meaningful
     /// dual objective and deterministic ratio ordering.
-    fn shiftDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
-        const basis = if (self.basis) |*value| value else return;
-        const workspace = &self.dual_phase_one;
-        const original_count = problem.num_cols + problem.num_rows;
-        for (0..original_count) |column| {
-            if (basis.col_status[column] == .basic or basis.col_status[column] == .fixed) continue;
-            const reduced = basis.reduced_cost[column];
-            const shift = switch (basis.col_status[column]) {
-                .at_lower => if (reduced < self.numerical.dual_tolerance)
-                    self.numerical.dual_tolerance - reduced
-                else
-                    0.0,
-                .at_upper => if (reduced > -self.numerical.dual_tolerance)
-                    -self.numerical.dual_tolerance - reduced
-                else
-                    0.0,
-                .free, .superbasic => -reduced,
-                else => 0.0,
-            };
-            workspace.dual_infeasibility[column] = @abs(shift);
-            workspace.work_cost[column] += shift;
-            workspace.perturbation[column] += shift;
-        }
-    }
-
     fn deterministicUnit(column: usize, epoch: u64) f64 {
         var value = @as(u64, @intCast(column)) +% epoch *% 0x9e3779b97f4a7c15;
         value = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
