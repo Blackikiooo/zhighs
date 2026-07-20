@@ -546,6 +546,35 @@ presolve 开关前后状态与目标一致为验收。
 - [ ] 获取并锁定 Mittelmann corpus，设置 timeout 与 memory cap。
 - [ ] warmup 多轮 median/p95、requested bytes、peak RSS 汇总报告。
 
+### 8.4a 同算法跨语言性能异常追踪（2026-07-20）
+
+2026-07-20 增设 `highs_end_to_end_primal.cpp`（simplex_strategy=4），使 HiGHS
+也跑 primal simplex，实现与 zhighs（primal + Devex framework + auto deg）的
+同算法对比。66 个双方均 optimal 的模型统计：
+
+- 中位数 `z/h solve time` ratio = **0.33x**（zhighs 快 3 倍）
+- 77% 模型 zhighs 更快，仅 **3 个模型（5%）zhighs 更慢**。
+- 结论：Zig 语言/零分配热路径的执行效率已被证实；之前的中位数 1.21x / p95
+  8.68x 差距源于 primal vs dual 算法路径差异。
+
+以下 3 个反常态模型需要归因并修复：
+
+- [ ] **fit2p（1.75x 更慢）**：z 16,463 iters / 5,213ms vs H 6,990 iters /
+  2,963ms。迭代数 2.3x 是主因。当前 pricing kernel 热路径在该模型上效率
+  不足或 Devex framework 产生异常多的 bad weights。需要 per-iteration 成本
+  分解（PRICE/FTRAN/BTRAN/UPDATE 占比 vs HiGHS），确认是算法路径（iteration
+  数）还是引擎实现（per-iteration 成本）的问题。
+- [ ] **etamacro（1.52x 更慢）**：z 912 iters / 61ms vs H 739 iters / 40ms。
+  迭代数接近（1.2x），但 per-iteration 成本 z 更高。需要检查 etamacro 的
+  矩阵结构是否导致 FTRAN/BTRAN 密度异常高，使 allocation-free 优势被抵消。
+- [ ] **cycle（1.07x 更慢）**：z 1,999 iters / 321ms vs H 2,918 iters / 299ms。
+  HiGHS iteration 多 46% 但总时间接近，说明 z 的 per-iteration 成本更高。
+  需要检查 cycle 的列/行比例和 factorization 更新效率。
+
+修复策略：对每个异常模型，先通过统计收集 per-iteration 成本分解，再进行
+针对性优化（如：hyper-sparse FTRAN/BTRAN 接入引擎、特定结构的 pricing
+kernel 选择）。禁止模型名特判。
+
 ### 8.5 scale-aware dual Phase I（研究轨道，不阻塞 8.1）
 
 作为 7.1 "Phase-II primal/dual 自动选择" 的前置研究可继续推进（scale-aware
