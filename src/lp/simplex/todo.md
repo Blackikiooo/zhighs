@@ -640,26 +640,97 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
   下降，口径 2 上调；若收益不足，禁止继续叠加启发式，回到归因阶段重新评估
   定价路径。
 
-## 9. 当前执行顺序（2026-07-20 重整，唯一权威）
+## 9. 当前执行顺序（2026-07-20 最终重整，唯一权威）
 
-本节取代第 8 节小节编号作为剩余工作的唯一执行顺序。背景：8.1/8.2 已完成并
-通过复核（`zig build test` 与 40 模型 corpus gate 均绿；实现与记录一致）。
-完成某项后勾选本条，并回填第 7/7.1/8 节对应条目与 git 可追踪的报告文件。
+本节取代第 8 节和之前的第 9 节。战略调整：**先补齐核心算法（primal + dual
+simplex），在全部算法路径上与 HiGHS 进行公平 A/B，确定默认路径全面超越
+HiGHS 后，再推进 IPM、presolve、并行和 MIP。**
 
-复核结论（2026-07-20）：
+核心理由：
+- 同算法对比已证明引擎 per-iteration 速度中位 0.33×（3 倍于 HiGHS primal）
+- 剩余差距是算法路径的（d6cube primal 9,269 vs HiGHS dual 458 = 20×）
+- 补齐 dual simplex 后，才具备在全部路径上 A/B 选出最优默认的条件
+- Presolve 是乘法器——核心算法不完整时叠加 presolve 会掩盖路径选择问题
 
-- 8.1/8.2 的代码、统计、gate 断言与记录一致，方法学纪律（forcing A/B、无模型
-  名特判、certificate 出自无扰动 fresh rebuild）保持良好。
-- 已发现并已修正的管理问题：第 7/7.1 节三个条目在 8.1 完成后未回填勾选
-  （本次已补）；8.1 的 90 模型 A/B 与 8.4a 的 66 模型同算法对比只写入了本
-  文件，`bench/simplex/stage7_results.md` 的 "Open acceptance gates" 仍旧
-  （见 T2）。
-- 8.6 口径更新：8.1 corpus A/B 已使 `d2q06c`/`d6cube` 的 iterations 与完整
-  solve 同时显著下降（84%/86% 与 73%/77%），按 8.6 既定规则口径 2 上调；
-  同算法对照进一步证明 per-iteration 内核速度已非瓶颈（中位 0.33x），剩余
-  差距集中在少数模型的算法路径选择上。
+已完成基础（第 1-8 节 + T1-T4）：
+- Primal simplex 完整：Phase I/II、Devex framework（默认）、Harris ratio test、
+  bound flip、退化策略（epoch perturbation + taboo）
+- 93 模型 Stage 7：91 optimal / 0 num_fail / 2 timeout（median 1.02× vs HiGHS）
+- Dual Phase I 基础设施：`DualPhaseOneWorkspace`、cost perturbation、
+  工作边界、nonbasic move 表示
+- 同算法跨语言对比：66 模型 median z/h = 0.33×，引擎效率已验证
+- Presolve 基础设施：`src/presolve/` 独立模块，固定列消除 + postsolve
 
-### T1（P0）同算法异常归因与引擎稀疏 solve 接入（原 8.4a + 8.1 遗留）
+---
+### Phase A（P0）Dual simplex Phase II ← 当前
+
+目标：补齐 `solveDual` 的完整 Phase II pivot 循环，使 dual simplex 成为可用
+算法路径。dual Phase I 基础设施（`DualPhaseOneWorkspace`、cost perturbation、
+bound flip）已在第 6.3 节完成。
+
+- [ ] 分析 HiGHS `HDual::solvePhase2()` 和 `HDualRow::update()` 的 pivot 循环结构
+- [ ] 实现 dual Phase II pricing：从 leaving row 的 `ep` (BTRAN) 出发，扫描
+  候选 entering columns，计算 `alpha_pq` 和 reduced cost ratio
+- [ ] 实现 dual ratio test：从 entering candidates 中选择 pivot（含 Harris bound
+  tolerance 和 bound-flip 候选处理）
+- [ ] 实现 dual pivot commit：basis replacement、`alpha_p` update、incremental
+  dual 更新（rank-1 reduced cost recurrence 已就绪）
+- [ ] 实现 dual Phase II → optimal/infeasible/unbounded 判定和 certificate
+- [ ] 以显式 forcing flag（`PHASE_ONE_STRATEGY=dual`）通过 40 模型 gate，
+  然后做 dual vs primal A/B（重点：`d6cube`、`brandy`）
+- [ ] A/B 通过后启用 `AlgorithmSelection.automatic`（primal/dual 自动选择），
+  以 93 模型 Stage 7 验收
+- [ ] **目标**：dual simplex 全面超越 HiGHS dual 在 presolve-off 配置下的表现
+
+### Phase B（P0）全路径 A/B + 默认路径确定
+
+dual simplex 就绪后，对所有算法组合做系统性 A/B：
+- primal vs dual simplex per-model comparison
+- Devex framework vs steepest-edge (primal)
+- DSE vs Devex fallback (dual)
+- `AlgorithmSelection.automatic` 综合表现 vs HiGHS
+
+确定唯一默认路径后，更新 `SolveControl` 默认参数，93 模型验收。
+
+### Phase C（P1）内点法 (IPM)
+
+作为 LP 求解的第二引擎。`src/ipm/` 目录已有骨架。目标：
+- Mehrotra predictor-corrector 框架
+- 稀疏 Cholesky / LDL^T 分解
+- 与 simplex 共享 presolve（Phase E 完成后）
+- 交叉验证 simplex 结果的正确性
+
+### Phase D（P1）并行工具
+
+- 多线程 FTRAN/BTRAN（稀疏 LU 的并行 triangular solve）
+- 并行 pricing（列分块稀疏 dot-product）
+- MIP 树搜索并行化
+
+### Phase E（P2）Presolve 完整实现
+
+Phase A/B 核心算法稳定后，完整推进 presolve：
+- 基于 Phase 1 基础设施（`src/presolve/` 已就绪）
+- empty row/column → singleton row → 双重约束替代
+- 全量 postsolve（primal/dual/ray/certificate）
+- presolve 开关 A/B 验收
+
+### Phase F（P3）MIP
+
+分支定界框架、割平面、启发式节点选择。
+
+### 研究轨道（不阻塞 Phase A–F）
+
+- scale-aware dual Phase I（8.5）：`brandy` wrong-sign move 闭环
+- `dfl001` Phase I 去扰动策略
+- multiple pricing 分发规则
+- hyper-sparse FTRAN/BTRAN 全引擎接入
+
+### 全程约束
+
+- 禁止模型名特判；禁止放宽容差换取通过
+- 已拒绝方案不得重引（一列 Devex、8-update 缓存、2× radius 等）
+- Certificate 必须出自原始坐标的 fresh rebuild/reprice
+- 每次提交前：`zig build test` + 40 model corpus gate PASS
 
 2026-07-20 归因分析（ReleaseFast, single-pass）：
 
