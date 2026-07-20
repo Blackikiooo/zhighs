@@ -698,9 +698,18 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 
 - [ ] 获取并锁定 `stocfor3`、`truss`、QAP8/QAP12/QAP15（SHA-256 + emps 解码
   路径与 stage7 一致）；锁定前不得表述为"完整 Netlib 已通过"。
-- [ ] 以 60 秒证据最终确定 Netlib 时限，并据此重分类 `dfl001`（Phase I 77%
+  **2026-07-20 状态**：`stocfor3` 和 `truss` 为 shell archive 分发，内含
+  Fortran 源码 + 输入数据，需要 `gfortran` 编译和模型生成脚本才能产
+  出 MPS。QAP8/12/15 为独立 QAP 生成程序。此三项为数据工程任务，不
+  涉及 simplex 算法。目录下 `.err` 文件已确认非 MPS 格式。
+- [x] 以 60 秒证据最终确定 Netlib 时限，并据此重分类 `dfl001`（Phase I 77%
   退化不收敛，HiGHS 同样超时）与 `pilot87`（2.57e-3 dual violation，
   HiGHS 同病的数值难度模型）。
+  **2026-07-20 结果**：`dfl001` 双方 60 秒均 timeout（zhighs 11,136 iters
+  后 60s timeout，HiGHS primal 类似）。`pilot87` zhighs 60s 仍
+  numerical_failure（33,674 iters，dual violation 2.49e-3），HiGHS primal
+  60s timeout。双方均非 trivial 求解对象，归类为共享数值困难模型。
+  Netlib 时限建议保持 30s，`dfl001`/`pilot87` 报告为已知限制。
 - [ ] 重跑 Stage 7 全量确认 90 optimal 稳定可复现，记录 median/p95、
   requested bytes、peak RSS。
 
