@@ -346,10 +346,17 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   6 timeout 改善到 88 / 0 / 5，88 个完成模型 objective 全部匹配 HiGHS。
 - [x] 降低已指定长尾的 pivot 数：`brandy 3384 -> 1519`、`d6cube 101442 -> 61506`、
   `d2q06c 100941 -> 98703`；后者仍超过 10 秒，继续列为性能任务而非正确性失败。
-- [ ] 继续处理 `d2q06c`、`fit2p`、`pilot` 三个 zhighs-only 10 秒超时；`dfl001`、
+- [x] 继续处理 `d2q06c`、`fit2p`、`pilot` 三个 zhighs-only 10 秒超时；`dfl001`、
   `pilot87` 在相同时限下 HiGHS 也超时，需在最终时限确定后重新分类。
-- [ ] 实现完整 Devex 或 projected steepest-edge recurrence 并做 corpus A/B；只更新
+  已由 8.1 关闭：`d2q06c` 15,770 iterations/4.84 s、`d6cube` 8,585/1.44 s 转 optimal；
+  `fit2p` 在帽内；`pilot` 经 framework→legacy 冷回退 10,085 iterations/4.44 s optimal。
+  `dfl001`（Phase I 77% 退化不收敛）与 `pilot87`（2.57e-3 dual violation，HiGHS 同病）
+  已按 60 秒复跑证据归类为终期对照项，见 8.1 与 8.4。
+- [x] 实现完整 Devex 或 projected steepest-edge recurrence 并做 corpus A/B；只更新
   leaving-column weight 的局部近似已实测回退并删除，禁止重新引入。
+  完整 primal Devex reference framework 已实现（7.1），93 模型 corpus A/B 已完成（8.1）：
+  90 optimal、88 baseline 无回退；因 `pilot87`/`dfl001` 残留暂保持 forcing 模式，
+  默认化重评见第 9 节 T4。PSE recurrence 未实施，如重评需要再单列。
 - [ ] 实现可逆 LP presolve（fixed column、empty row/column、singleton row 起步）及
   primal/dual/ray/certificate postsolve；现有 row/column/objective scaling 已完成并继续
   使用，但不能把 scaling 等同于 presolve 完成。
@@ -403,9 +410,14 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
 - [ ] 完成第 6.3 节 scale-aware dual Phase I 后，再增加 Phase-II primal/dual 自动选择；
   logical/crash basis 若既非 primal-feasible 也非 dual-feasible，必须先得到经验证的可行
   basis，不能仅凭 infeasibility 计数直接跳入 dual Phase II。
-- [ ] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API，并补齐
+- [x] 将 hyper-sparse FTRAN/BTRAN 接入 `Factorization` 的 sparse-index API，并补齐
   FT-update-aware reachability；当前 `SparseLU.solveAdaptive` 在存在 FT updates 时会退回
   dense kernel，仅增加表层 dispatch 不视为完成。密度只在粗粒度 solve 开始时判定。
+  内核侧已由 8.1 完成：`solveHyperSparse`/`solveTransposeHyperSparse` 在 FT updates 下
+  不再退回 dense，`Factorization.solveSparse`/`solveTransposeSparse` 与 dispatch 统计
+  就位，40 模型 gate 通过。**遗留**：引擎热路径 `solve`/`solveTranspose` 尚未消费
+  `solveSparse`（`solveForUpdate` 因 FT capture 保持 dense 属预期），作为 8.4a
+  异常模型 per-iteration 成本归因的一部分完成，见第 9 节 T1。
 - [ ] 完成上述算法路径后再评估 reversible presolve 与其交互，随后对 40 模型 gate、
   Stage 7 全量、`d2q06c/d6cube/brandy/scsd1` 固定 A/B 做 21 轮 ReleaseFast 验收；报告
   median/p95、iterations、INVERT/FTRAN/BTRAN/PRICE/UPDATE、requested bytes 和 peak RSS。
@@ -422,6 +434,10 @@ pivot 路径后重复生成大规模报告。快速 corpus 仍须在第 6 节每
   明确性能改善、回退、已知失败和下一轮优化候选。
 
 ## 8. 下一阶段严格执行顺序（2026-07-19 外部评审，已对齐 7.1）
+
+> **2026-07-20 重整说明**：本节各小节为功能分组与历史验收记录，编号不再代表
+> 执行顺序（8.1/8.2 已完成，当前最优先工作原记在 8.4a）。剩余工作的唯一权威
+> 执行顺序见文末第 9 节；完成第 9 节任务即勾选对应小节与本节/第 7 节的联动条目。
 
 本节规定第 7 节（含 7.1）剩余项的唯一执行顺序，禁止并行挑选。第 7 节与 7.1
 未勾选项的对应关系：三个 zhighs-only 超时、`dfl001`/`pilot87` 重分类、
@@ -623,3 +639,101 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 - 若 8.1 corpus A/B 使 `d2q06c`/`d6cube` 的 iterations 与完整 solve 同时显著
   下降，口径 2 上调；若收益不足，禁止继续叠加启发式，回到归因阶段重新评估
   定价路径。
+
+## 9. 当前执行顺序（2026-07-20 重整，唯一权威）
+
+本节取代第 8 节小节编号作为剩余工作的唯一执行顺序。背景：8.1/8.2 已完成并
+通过复核（`zig build test` 与 40 模型 corpus gate 均绿；实现与记录一致）。
+完成某项后勾选本条，并回填第 7/7.1/8 节对应条目与 git 可追踪的报告文件。
+
+复核结论（2026-07-20）：
+
+- 8.1/8.2 的代码、统计、gate 断言与记录一致，方法学纪律（forcing A/B、无模型
+  名特判、certificate 出自无扰动 fresh rebuild）保持良好。
+- 已发现并已修正的管理问题：第 7/7.1 节三个条目在 8.1 完成后未回填勾选
+  （本次已补）；8.1 的 90 模型 A/B 与 8.4a 的 66 模型同算法对比只写入了本
+  文件，`bench/simplex/stage7_results.md` 的 "Open acceptance gates" 仍旧
+  （见 T2）。
+- 8.6 口径更新：8.1 corpus A/B 已使 `d2q06c`/`d6cube` 的 iterations 与完整
+  solve 同时显著下降（84%/86% 与 73%/77%），按 8.6 既定规则口径 2 上调；
+  同算法对照进一步证明 per-iteration 内核速度已非瓶颈（中位 0.33x），剩余
+  差距集中在少数模型的算法路径选择上。
+
+### T1（P0）同算法异常归因与引擎稀疏 solve 接入（原 8.4a + 8.1 遗留）
+
+- [ ] 引擎热路径 `solve`/`solveTranspose` 消费 `Factorization.solveSparse`/
+  `solveTransposeSparse`（`solveForUpdate` 因 FT update capture 保持 dense 属
+  预期，不在本项范围）。密度只在粗粒度 solve 边界判定；40 模型 gate 必须通过，
+  scsd1 trace 若因浮点累加顺序变化需按既定流程更新 lock 并记录原因。
+- [ ] `fit2p`（z 16,463 iters/5,213 ms vs H 6,990/2,963）：先做 per-iteration
+  成本分解（INVERT/FTRAN/BTRAN/PRICE/UPDATE 占比 vs HiGHS primal runner），
+  区分算法路径（2.3x iterations）与引擎实现问题；重点检查 Devex framework
+  bad-weight 重建频率与 perturbation 主导路径的交互。
+- [ ] `etamacro`（z 912/61 ms vs H 739/40 ms）：iterations 接近而 per-iteration
+  偏高，检查 FTRAN/BTRAN 密度与超稀疏 dispatch 是否生效。
+- [ ] `cycle`（z 1,999/321 ms vs H 2,918/299 ms）：z 迭代更少但更慢，检查
+  factorization 更新效率与列/行比例导致的 kernel 选择。
+- 每项修复以同算法（primal vs `highs_end_to_end_primal`）21 轮 ReleaseFast
+  median/p95 验收；禁止模型名特判；无收益不默认化。
+
+### T2（P0）报告刷新（承接 6.6 提交规则）
+
+- [ ] 将 8.1 的 90 模型 corpus A/B（含 `d2q06c`/`d6cube` 前后对照、
+  pilot fallback 数据、`dfl001`/`pilot87` 60 秒归类证据）写入
+  `bench/simplex/stage7_results.md`，并刷新其 "Open acceptance gates" 清单。
+- [ ] 将 8.4a 同算法对比的方法（`highs_end_to_end_primal.cpp`、66 模型口径）
+  与三个异常模型的原始数据写入 git 可追踪报告；T1 归因完成后在同一报告更新结论。
+
+### T3（P1）Stage 7 收尾
+
+- [ ] 获取并锁定 `stocfor3`、`truss`、QAP8/QAP12/QAP15（SHA-256 + emps 解码
+  路径与 stage7 一致）；锁定前不得表述为"完整 Netlib 已通过"。
+- [ ] 以 60 秒证据最终确定 Netlib 时限，并据此重分类 `dfl001`（Phase I 77%
+  退化不收敛，HiGHS 同样超时）与 `pilot87`（2.57e-3 dual violation，
+  HiGHS 同病的数值难度模型）。
+- [ ] 重跑 Stage 7 全量确认 90 optimal 稳定可复现，记录 median/p95、
+  requested bytes、peak RSS。
+
+### T4（P1）Devex framework 默认化重评
+
+- [ ] 基于 88+2 最优统计、framework→legacy 冷回退就位、T3 终期对照数据，
+  重评 `.automatic` 是否切换默认 Devex 策略；门槛维持 6.5 既定标准（其他
+  corpus 无不可解释回退）。`pilot87`/`dfl001` 残留不排除时，fallback 的
+  触发率与 2× 预算开销必须纳入决策记录。
+
+### T5（P2）可逆 LP presolve（原 8.3，T1–T4 关闭前不得启动）
+
+- 按根 todo 顺序：reduction 记录与 `PostsolveStack` → fixed column、empty
+  row/column、singleton row → primal/dual/ray/certificate postsolve；以 presolve
+  开关前后状态与目标一致为验收。启动后重估 8.6 口径 3。
+
+### T6（P3）对照与报告（原 8.4 其余项）
+
+- [ ] 固定版本 CLP runner，重复 status/objective/certificate 三方对照。
+- [ ] 获取并锁定 Mittelmann corpus，设置 timeout 与 memory cap。
+- [ ] 汇总报告：objective/status/iterations/residual/ray/certificate、
+  Phase I/II iterations、退化 pivot、reinversion 原因、FT chain、factor
+  growth、INVERT/FTRAN/BTRAN/PRICE/UPDATE/rebuild 与完整 solve 的
+  median/p95、requested bytes、peak RSS；并对第 5 节 baseline 与各阶段提交
+  生成 git 可追踪对比报告。
+
+### 研究轨道（不阻塞 T1–T6，原 8.5 + 7.1 联动项）
+
+- scale-aware dual Phase I：`brandy` 140 pivots 后回退原因（169 wrong-sign
+  move、3 个可 flip move）未闭环前不得扩大 eligible bounds 或重引 2x radius；
+  闭环后才允许评估 Phase-II primal/dual 自动选择，且默认化需 8.1 同级证据。
+- `dfl001` Phase I 去扰动/重启策略（77% 退化、441 次 anti-cycling 激活仍不
+  收敛）属结构性问题，可在研究轨道先行归因，但修复进入默认路径需完整 A/B。
+- multiple pricing 仅在按 width/degeneracy/refill 收益的可验证分发规则建立后
+  才考虑非 forcing 启用（`fit2p` 总耗时回退 5.297→5.715 s 已记录）。
+
+### 全程有效约束（违反即回退）
+
+- 禁止按模型名称特判；禁止放宽 feasibility/pivot/residual 容差换取通过。
+- 已被数据拒绝的方案不得重新引入：一列 Devex 近似、8-update 候选缓存、
+  2x dual Phase-I working radius、dual Phase I 默认启用、LTSSF/Bixby 默认
+  crash、无守卫的 taboo 自动分发、动态扩容 eligible bounds。
+- 任何启发式的最终状态与 certificate 必须来自原始坐标下的 fresh
+  rebuild/reprice；冷回退路径必须计入 `cold_restart_*` 统计。
+- 每次提交前运行单元测试与 40 模型 corpus 差分；结果写入 git 可追踪报告，
+  报告保留测试环境、编译模式和 HiGHS 版本。
