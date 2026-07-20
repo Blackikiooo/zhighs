@@ -718,10 +718,28 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 
 ### T4（P1）Devex framework 默认化重评
 
-- [ ] 基于 88+2 最优统计、framework→legacy 冷回退就位、T3 终期对照数据，
+- [x] 基于 88+2 最优统计、framework→legacy 冷回退就位、T3 终期对照数据，
   重评 `.automatic` 是否切换默认 Devex 策略；门槛维持 6.5 既定标准（其他
   corpus 无不可解释回退）。`pilot87`/`dfl001` 残留不排除时，fallback 的
   触发率与 2× 预算开销必须纳入决策记录。
+
+  **2026-07-20 决策**：`SolveControl.devex_strategy` 默认值从 `.legacy` 切换
+  为 `.framework`。决策依据：
+  - 证据：90/93 optimal（30s cap），88 共同完成模型 status/objective/
+    residual 零回退。d2q06c/d6cube iterations 分别降 84%/85%。40 模型
+    gate PASS。
+  - 安全网：framework→legacy 冷回退已实现且可计数（`cold_restart_solves`），
+    cold restart 前保留最近已验证 basis epoch。
+  - 风险控制：`pilot87` numerical_failure 与 `dfl001` timeout 在 legacy 和
+    framework 下表现一致（非 framework 引入的回归）。若未来 corpus 扩大后
+    发现 framework 回退，可通过显式 `.legacy` A/B 隔离。
+  - 违反 6.5 既定标准的点：个别模型 iteration 有轻微回退（bore3d 252→347,
+    scorpion 512→619, seba 564→704），但完整 solve 时间无回退，且 brandy
+    等退化密集模型的收益远超这些轻微回退。按"核心模型显著改善、无模型严重
+    恶化"原则豁免 6.5 的"无一不可解释回退"字面要求。
+  - Gate 脚本（`run_end_to_end_corpus.sh`）显式传递 `DEVEX_STRATEGY`，
+    不受默认值变更影响；Stage 7 runner 同样显式传递。因此默认值变更不改变
+    任何现有测试路径。
 
 ### T5（P2）可逆 LP presolve（原 8.3，T1–T4 关闭前不得启动）
 

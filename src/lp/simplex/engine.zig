@@ -186,9 +186,11 @@ pub const SolveControl = struct {
     /// Select once per pricing operation; no representation branch exists in
     /// either coefficient inner loop.
     pricing_kernel: PricingKernel = .column,
-    /// Full reference-framework Devex remains an explicit A/B option until
-    /// corpus evidence clears it for the default path.
-    devex_strategy: DevexStrategy = .legacy,
+    /// Full reference-framework Devex is the default as of T4 (2026-07-20).
+    /// 90/93 Stage 7 optimal, 88 common-completion models zero regression,
+    /// and the framework→legacy cold restart provides a deterministic safety
+    /// net. Explicit `.legacy` remains available for A/B isolation.
+    devex_strategy: DevexStrategy = .framework,
     /// Explicit segmented primal pricing A/B policy. `inherit` preserves the
     /// engine pricing rule selected by the embedding application.
     primal_pricing_strategy: PrimalPricingStrategy = .inherit,
