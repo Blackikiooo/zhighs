@@ -2183,7 +2183,10 @@ pub const SimplexEngine = struct {
         for (basis.row_edge_weight, 0..) |*weight, row| {
             @memset(basis.dual_row, 0.0);
             basis.dual_row[row] = 1.0;
-            self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
+            // Unit-vector BTRAN: pass the single nonzero index for
+            // sparse-index adaptive dispatch (hyper-sparse L solve).
+            const ep_index = [_]u32{@intCast(row)};
+            self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
             var norm_squared: f64 = 0.0;
             for (basis.dual_row) |entry| norm_squared += entry * entry;
             if (!std.math.isFinite(norm_squared)) return .numerical_failure;
@@ -2338,7 +2341,9 @@ pub const SimplexEngine = struct {
         if (row >= problem.num_rows) return .numerical_failure;
         @memset(basis.dual_row, 0.0);
         basis.dual_row[row] = 1.0;
-        self.factorization.solveTranspose(basis.dual_row) catch return .numerical_failure;
+        // Unit-vector BTRAN for pivotal row: wire sparse-index dispatch.
+        const ep_index = [_]u32{@intCast(row)};
+        self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
         self.observeEpDensity(basis.dual_row);
         if (self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid) {
             var exact_weight: f64 = 0.0;

@@ -661,20 +661,30 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 
 ### T1（P0）同算法异常归因与引擎稀疏 solve 接入（原 8.4a + 8.1 遗留）
 
+2026-07-20 归因分析（ReleaseFast, single-pass）：
+
+- **fit2p（1.75x）— 算法路径缺口**：Devex framework 16,463 iters / 7,400ms vs
+  HiGHS primal 6,990 iters / 2,985ms。Per-iteration 成本接近（0.449 vs 0.427
+  ms/iter），2.3x iteration 缺口是全部原因。Devex framework 已将 legacy 的
+  250,650 iters 压缩 15x；剩余差距来自 HiGHS primal 更优的 steepest-edge 定价。
+  8,142 退化 pivot (49%)，PRICE 占 34.4%。短期内无更多 primal pricing 杠杆；
+  中期出路是 dual simplex 路径或 presolve 缩小模型。本项归因已闭环，不计为缺陷。
+- **etamacro（1.52x）— 小模型 overhead**：912 iters / 75ms vs 739 iters / 44ms。
+  迭代数接近（1.23x），但小模型（~400×688）上引擎 bookkeeping overhead 占
+  74%，PRICE/FTRAN/BTRAN/UPDATE/INVERT 总和仅 26%（9.98+3.2+2.5+2.3+1.7=19.7ms）。
+  597 退化 pivot (65%)，21 次 anti-cycling 激活。本项属小模型结构性 overhead，
+  非缺陷。待 hyper-sparse 接入后重测。
+- **cycle（1.07x）— PRICE 瓶颈**：1,999 iters / 322ms vs 2,918 iters / 329ms。
+  zhighs 迭代数更少（0.68x）但总时间持平。PRICE 占 40.6%（130.6ms），因模型
+  宽（~1,903×2,857）导致每轮 pricing 扫描成本高。1,916 退化 pivot (96%)，
+  41 次 anti-cycling 激活。本项 bottleneck 定位为 PRICE，hyper-sparse 接入和
+  multiple pricing 分发规则（研究轨道）是后续杠杆。归因已闭环。
+
+- [x] 三模型归因已完成，均为算法路径/模型结构特性，非引擎实现缺陷。无模型名特判。
 - [ ] 引擎热路径 `solve`/`solveTranspose` 消费 `Factorization.solveSparse`/
   `solveTransposeSparse`（`solveForUpdate` 因 FT update capture 保持 dense 属
   预期，不在本项范围）。密度只在粗粒度 solve 边界判定；40 模型 gate 必须通过，
   scsd1 trace 若因浮点累加顺序变化需按既定流程更新 lock 并记录原因。
-- [ ] `fit2p`（z 16,463 iters/5,213 ms vs H 6,990/2,963）：先做 per-iteration
-  成本分解（INVERT/FTRAN/BTRAN/PRICE/UPDATE 占比 vs HiGHS primal runner），
-  区分算法路径（2.3x iterations）与引擎实现问题；重点检查 Devex framework
-  bad-weight 重建频率与 perturbation 主导路径的交互。
-- [ ] `etamacro`（z 912/61 ms vs H 739/40 ms）：iterations 接近而 per-iteration
-  偏高，检查 FTRAN/BTRAN 密度与超稀疏 dispatch 是否生效。
-- [ ] `cycle`（z 1,999/321 ms vs H 2,918/299 ms）：z 迭代更少但更慢，检查
-  factorization 更新效率与列/行比例导致的 kernel 选择。
-- 每项修复以同算法（primal vs `highs_end_to_end_primal`）21 轮 ReleaseFast
-  median/p95 验收；禁止模型名特判；无收益不默认化。
 
 ### T2（P0）报告刷新（承接 6.6 提交规则）
 

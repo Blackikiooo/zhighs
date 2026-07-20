@@ -482,7 +482,7 @@ pub const SparseLU = struct {
             for (0..n) |position| {
                 const column = self.pivot_columns[position];
                 if (rhs[column] != 0.0)
-                    self.activate(position, rhs[column]);
+                    self.activate(@intCast(position), rhs[column]);
             }
             var k = n;
             while (k > 0) {
