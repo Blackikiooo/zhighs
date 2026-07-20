@@ -682,6 +682,58 @@ bound flip）已在第 6.3 节完成。
   以 93 模型 Stage 7 验收
 - [ ] **目标**：dual simplex 全面超越 HiGHS dual 在 presolve-off 配置下的表现
 
+#### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
+
+deepseek 提出"重构 `buildDualPhaseOneCosts` 为单位 cost ±1/0 -> 删除
+`shiftDualPhaseOneCosts` -> 再改 `installWorkingBounds`"的三步方案。已对照本地
+HiGHS 源码核实，结论：**诊断方向正确，但关键前提错误，不得按该顺序开工。**
+
+HiGHS dual Phase I 的真实机制（`HEkk.cpp::initialiseBound`，kDual + kSolvePhase1）：
+
+- **cost 不变**：`workCost_` 保持原始 LP cost（仅退化时 perturbation，cleanup 时
+  移除）。HiGHS 从不把 Phase-I cost 改成 ±1/0。
+- **bound 映射**：free → `[-1000, 1000]`；upper-only → `[-1, 0]`；
+  lower-only → `[0, 1]`；**boxed/fixed → `[0, 0]`（折叠，不是对称区间）**。
+- **infeasibility 由 primal value 编码**：`initialiseNonbasicValueAndMove` 按
+  reduced cost 符号把非基值放到 ±1（infeasible）或 0（feasible），于是
+  dual objective = Σ value_j·d_j = **负的 dual infeasibility 之和**，且该恒等式
+  在每个迭代、fresh reprice 后都成立。dual simplex 最大化该目标即消除
+  infeasibility；目标归零 = Phase I 出口。
+
+对 deepseek 诊断的判定：
+
+- "当前 zhighs Phase I cost = 原始 cost + perturbation" —— 属实
+  （`engine.zig:1968`）。
+- "HiGHS 用单位 cost ±1/0" —— **不成立**，±1/0 是 primal value/bound，不是 cost。
+- "boxed 边界 [-1,1] 与 cost 1000 量级不匹配导致 ratio 错误" —— 机制不成立：
+  dual ratio = d_j/α_ij 不含 bound width，HiGHS 正是以原始 cost + `[0,1]` 边界
+  运行。真实根因有二：(1) `shiftDualPhaseOneCosts` 把 infeasible 列的 d_j 压到
+  ±dual_tolerance，抹掉了 infeasibility 的量级信息，Phase-I 目标不再度量
+  infeasibility；(2) boxed 用对称 `[-r, r]` 而非 `[0,0]`，把 boxed 列留在
+  Phase-I 目标与 flip 容量核算里（brandy 首轮"容量 7 < 124.5"即此后果；
+  HiGHS 方案下 boxed 不承担 flip 任务，违反由 pivot 消除）。
+- 现行出口判据（工作问题上 primal feasible）不对应原始问题的 dual feasibility，
+  是另一独立缺陷。
+
+纠正后的修复顺序（替换 deepseek 的三步，按序执行）：
+
+1. 改 `installWorkingBounds` 为 HiGHS 映射（free ±1000、one-sided `[0,1]`/`[-1,0]`、
+   boxed/fixed `[0,0]`），并按 reduced cost 符号设置非基 value（±1/0）与
+   `nonbasic_move`；恢复 dual objective = -Σ infeasibilities 恒等式。
+2. 删除 `shiftDualPhaseOneCosts` —— 理由是 infeasibility 量级必须保留在 d_j 中
+   （它就是 Phase-I 目标），不是"单位 cost 不需要 shift"。
+   `buildDualPhaseOneCosts` 保留原始 scaled cost + 确定性退化扰动即可。
+3. 出口判据改为 fresh reprice 后 dual infeasibility 计数为 0；
+   `restoreOriginalBounds` 用 `nonbasic_move` 决定 boxed 的原始 bound（按 d 符号）；
+   保留事务性 epoch 恢复、fresh rebuild 验证，并补 HiGHS 式 phase-1 cleanup
+   levels（re-perturb 后重入 Phase I，级别上限可配置）。
+
+明确否决：不得把 Phase-I cost 重写为 ±1/0 单位 cost（`d' = c' - A^T y` 在 y
+演化后不再对应原始 infeasibility，出口判据失效）；不得先改 cost 再改 bound。
+
+验收：brandy 显式 dual Phase I 不再首轮 false-infeasible；40 模型 gate；
+scsd1/gas11 回归；与 HiGHS dual 的 A/B 对照（d6cube 458 iters 为参照）。
+
 ### Phase B（P0）全路径 A/B + 默认路径确定
 
 dual simplex 就绪后，对所有算法组合做系统性 A/B：
