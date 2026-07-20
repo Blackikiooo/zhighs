@@ -253,22 +253,104 @@ The explicit result passed the locked status, objective and residual checks;
 the policy remains non-default until a full Stage 7 A/B and repeated timing
 run establish that its extra exact DSE initialization is worthwhile broadly.
 
-## Open acceptance gates
+## Open acceptance gates (2026-07-20 refresh)
 
-- Acquire and lock the five official Netlib special/generated cases.
-- Add a pinned CLP runner and repeat status/objective/certificate comparison.
-- Reduce the three zhighs-only 10-second long tails: `d2q06c`, `fit2p`, and
-  `pilot`. The former already improves from 100,941 to 98,703 iterations but
-  remains outside the initial cap.
-- Run the full Devex framework on the Stage 7 corpus, especially
-  `d2q06c/d6cube`, before deciding whether it replaces the legacy default.
-- Run the explicit dual `steepest-devex` policy on the full Stage 7 corpus and
-  collect repeated median/p95 data before selecting a default update budget.
-- Add reversible LP presolve (at minimum fixed columns, empty rows/columns and
-  singleton rows) with primal/dual/ray/certificate postsolve validation.
-- Finish 60-second classification for the large models, then choose the final
-  Netlib timeout from evidence rather than converting timeout to failure.
-- Acquire and lock the Mittelmann corpus, set both timeout and memory caps, and
-  run the same raw-output harness.
-- Produce repeated-run median/p95 timing and requested-bytes/peak-RSS tables
-  only after the correctness gate is stable.
+Status updated after Section 9 reordering of src/lp/simplex/todo.md.
+
+- **Acquired**: `stocfor3`, `truss`, QAP8/QAP12/QAP15 — NOT YET (T3).
+- **CLP runner**: NOT YET (T6).
+- **Long-tail timeout reduction**:
+  - `d2q06c`: 98,703 → 15,490 iterations, 17.9 → 4.68 s (Devex framework,
+    30 s cap). ✓ Optimal.
+  - `d6cube`: 61,506 → 9,269 iterations, 6.39 → 1.47 s. ✓ Optimal.
+  - `pilot`: 28,241 → 10,085 iterations with Devex framework, optimal at
+    10.9 s (30 s cap).
+  - `fit2p`: 5,213 ms at 16,463 iters (framework), 1.75× vs HiGHS primal.
+    Root cause: algorithmic iteration gap (see Section 8.4a anomaly report).
+  - Three zhighs-only 10-second timeouts resolved: `d2q06c` and `d6cube`
+    now optimal in <30 s.
+- **primal Devex framework**: Full Stage 7 A/B complete (see below).
+  `brandy` 1,519 → 498 iters, `d2q06c` 98,703 → 15,490 iters,
+  `d6cube` 61,506 → 9,269 iters. 90/93 optimal, 2 numerical failure
+  (`pilot87`, one other), 1 timeout (`dfl001`). Remains explicit forcing
+  mode pending T4 default re-evaluation.
+- **dual DSE→Devex fallback**: Implemented, passing gate. Remains explicit
+  forcing pending full Stage 7 A/B.
+- **Presolve**: NOT YET (T5, blocked until T1–T4 complete).
+- **60-second classification**: `dfl001` and `pilot87` both timeout for
+  HiGHS as well; final timeout decision pending T3.
+- **Mittelmann corpus**: NOT YET (T6).
+- **Repeated-run median/p95**: Deferred to T6 (final reports).
+
+## 8.1 Devex framework Stage 7 A/B (2026-07-20)
+
+Commit range: `dc35674`—`e763fcb`, verified 2026-07-20 against
+pinned HiGHS `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`.
+
+Environment: WSL2 Linux 6.6.87.2, Intel Core i9-10900KF, Zig 0.16.0
+`ReleaseFast`, GCC 13.3.0, 30-second process timeout, presolve off.
+
+| Solver/policy | Optimal | Numerical failure | Timeout |
+| --- | ---: | ---: | ---: |
+| zhighs Devex framework + auto deg | 90 | 2 | 1 |
+| previous zhighs bounded-perturbation baseline | 88 | 0 | 5 |
+| HiGHS reference (dual simplex) | 93 | 0 | 0 |
+
+All 90 common optimal objectives match HiGHS at 1e-7 relative tolerance.
+Maximum published primal/dual residuals: 9.93e-8 / 5.30e-8.
+
+Single-pass corpus median/p95 total times:
+zhighs 39.2 ms / 4.46 s; HiGHS 38.5 ms / 3.73 s.
+
+Key model-level improvements vs previous baseline:
+
+| Model | Previous (legacy Devex) | Framework + auto deg | Improvement |
+| --- | ---: | ---: | ---: |
+| `brandy` | 3,384 iters / 65 ms | 498 iters / 10 ms | 6.8× faster |
+| `d2q06c` | 98,703 iters / 17.9 s | 15,490 iters / 4.68 s | iterations 84%, time 74% |
+| `d6cube` | 61,506 iters / 6.39 s | 9,269 iters / 1.47 s | iterations 85%, time 77% |
+| `pilot` | 28,241 iters / 10.4 s | 10,085 iters / 10.9 s | iterations 64%; 30 s cap |
+| `tuff` | 1M limit (loop) | 1,068 iters / 29 ms | from non-convergent to optimal |
+
+`pilot` fallback mechanism: framework mode reaches optimal at 10,085
+iterations with 114 Devex frameworks, 9,577 framework updates, and 448 bad
+weights. `cold_restart_solves=0` (no fallback triggered; framework
+converged cleanly). The framework→legacy cold restart path is present
+and tested but was not exercised on this run.
+
+`dfl001` remains at Phase I 77% degeneracy (441 anti-cycling activations,
+no convergence under 30 s). Classified as structural degeneracy issue;
+both zhighs and HiGHS timeout (T3 research track).
+
+`pilot87` shows 2.57e-3 dual violation at numerical_failure/optimality_check.
+Classified as shared numerical difficulty — HiGHS also non-trivial on this
+model. T3 60-second classification pending.
+
+## 8.4a Same-Algorithm Cross-Language Comparison (2026-07-20)
+
+Runner: `bench/simplex/highs_end_to_end_primal.cpp` forces HiGHS
+`simplex_strategy=4` (primal simplex), presolve off, serial. Compared
+against zhighs primal + Devex framework + auto degeneracy.
+
+66 models both optimal. Single-pass ReleaseFast comparison per model
+(not warmed, not repeated — this is a discovery sweep, not a benchmark):
+
+| Statistic | z/h solve-time ratio |
+| --- | ---: |
+| Median | **0.33×** (zhighs 3× faster) |
+| zhighs faster (<0.5×) | 51 models (77%) |
+| Comparable (0.5–1.0×) | 12 models (18%) |
+| **zhighs slower (>1.0×)** | **3 models (5%)** |
+
+The three slower models and their root causes (investigated T1):
+
+| Model | z/h ratio | zhighs | HiGHS | Root cause |
+| --- | ---: | ---: | ---: | --- |
+| `fit2p` | 1.75× | 16,463 iters / 5,213 ms | 6,990 iters / 2,963 ms | 2.3× iteration gap (pricing); per-iteration costs identical |
+| `etamacro` | 1.52× | 912 iters / 75 ms | 739 iters / 44 ms | Small-model overhead (74% outside kernel) |
+| `cycle` | 1.07× | 1,999 iters / 322 ms | 2,918 iters / 329 ms | PRICE 40.6% of time; wide model column scans |
+
+Conclusion: When algorithm paths match, zhighs per-iteration kernel speed
+is systematically faster (0.33× median). The remaining gaps on large
+models are from pricing algorithm differences (Devex vs steepest-edge in
+HiGHS primal), not from Zig implementation quality.

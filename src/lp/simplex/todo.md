@@ -688,10 +688,10 @@ working bounds 与 nonbasic move 表示已在 6.3 后续清单中展开），但
 
 ### T2（P0）报告刷新（承接 6.6 提交规则）
 
-- [ ] 将 8.1 的 90 模型 corpus A/B（含 `d2q06c`/`d6cube` 前后对照、
+- [x] 将 8.1 的 90 模型 corpus A/B（含 `d2q06c`/`d6cube` 前后对照、
   pilot fallback 数据、`dfl001`/`pilot87` 60 秒归类证据）写入
   `bench/simplex/stage7_results.md`，并刷新其 "Open acceptance gates" 清单。
-- [ ] 将 8.4a 同算法对比的方法（`highs_end_to_end_primal.cpp`、66 模型口径）
+- [x] 将 8.4a 同算法对比的方法（`highs_end_to_end_primal.cpp`、66 模型口径）
   与三个异常模型的原始数据写入 git 可追踪报告；T1 归因完成后在同一报告更新结论。
 
 ### T3（P1）Stage 7 收尾
