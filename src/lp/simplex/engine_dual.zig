@@ -177,7 +177,16 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         if (entering.column == null)
             self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_count);
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .not_implemented;
-        const entering_col = entering.column orelse return .not_implemented;
+        // Flips were applied but no entering column survived the ratio test:
+        // continue the loop so the updated bounds can produce a pivot candidate
+        // on the next pass. This is the small-flip-capacity path (HiGHS-style
+        // [0,1] bounds give ~1 capacity per flip vs dynamic radius ~720).
+        if (entering.column == null) {
+            if (entering.flip_count == 0) return .not_implemented;
+            if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
+            continue;
+        }
+        const entering_col = entering.column orelse unreachable;
         const entering_index: usize = @intCast(entering_col);
         if (self.computeDirection(problem, entering_index) != .optimal) return .not_implemented;
         if (entering.direction < 0.0) {
