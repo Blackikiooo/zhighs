@@ -216,17 +216,30 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     }
     if (self.iterations >= control.max_iterations) return .iteration_limit;
 
-    // Remove perturbation and Phase-I bounds before making any claim
-    // about the original LP. A fresh factorization and fresh BTRAN price
-    // the restored problem independently of the update chain.
+    // HiGHS-style Phase-I → Phase-II: do NOT restore original bounds
+    // yet. The working subproblem is already primal-feasible; Phase II
+    // runs with working bounds + original LP costs. The deferred
+    // restoreOriginalBounds (line 130) recovers original bounds after
+    // Phase II, and finishOptimal validates with original bounds.
+    if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+
+    // Compute dual objective in working coordinates: Σ primal_j · d_j
+    var dual_obj: f64 = 0.0;
+    for (0..original_count) |j| {
+        if (basis.col_status[j] == .basic) continue;
+        dual_obj += basis.primal[j] * basis.reduced_cost[j];
+    }
+
+    if (dual_obj == 0.0) {
+        return self.solveDual(problem, control);
+    }
+
+    // Nonzero dual objective → restore and fall back
     self.dual_phase_one.restoreOriginalBounds(basis, original_count);
     if (self.refactorizeBasis(problem, .cleanup) != .optimal) return .not_implemented;
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
 
-    // Count dual infeasibilities from the fresh reprice. Only a strict
-    // zero count permits Phase II; any residual infeasibility must be
-    // resolved by primal Phase I or reported as failure.
     var dual_infeasible: usize = 0;
     for (basis.reduced_cost[0..original_count], basis.col_status[0..original_count]) |reduced, status| {
         const infeasible = switch (status) {
@@ -239,21 +252,12 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     }
     if (dual_infeasible == 0) return self.solveDual(problem, control);
 
-    // Dual infeasibility remains: check primal feasibility as fallback.
     var primal_feasible = true;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
         if (value < lower - self.numerical.primal_tolerance or value > upper + self.numerical.primal_tolerance) {
             primal_feasible = false;
             break;
         }
-    }
-    // Dual Phase I converged in the working subproblem but the restored
-    // basis isn't dual-feasible. Try a short dual Phase II polish before
-    // giving up and falling back to primal.
-    if (dual_infeasible > 0 and primal_feasible) {
-        const polish_status = self.solveDual(problem, control);
-        if (polish_status == .optimal) return .optimal;
-        // solveDual couldn't converge: fall through to primal
     }
     if (primal_feasible) {
         self.pricing.rule = saved_pricing_rule;
