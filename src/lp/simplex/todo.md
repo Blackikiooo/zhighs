@@ -895,6 +895,33 @@ A1 transactional checkpoint 收尾（2026-07-21）：
   Farkas ray 存储、residual/sign 验证与 runner gate；证书设施未完成前仍不得直接从
   shifted objective 发布 infeasible。
 
+A1 fresh no-entering Farkas certificate（2026-07-21）：
+
+- [x] 对照 pinned HiGHS `HEkk::proofOfPrimalInfeasibility` 实现原坐标证明：fresh
+  no-entering 行生成 `y = move_out * row_scale * B^{-T}e_p`；按 `y` 符号选择有限
+  row lower/upper 形成 `proof_lower`，显式计算原始 CSC 的 `A^T y`，按系数符号选择有限
+  column upper/lower 形成 `implied_upper`。只有全部值有限且
+  `proof_lower - implied_upper > primal_tolerance` 才发布 infeasible；shifted costs
+  完全不参与证明。
+- [x] `BasisState` 增加 engine-owned row-space `infeasibility_ray`，`SolutionView` 暴露只读
+  ray；solve 起点清除 valid/gap，避免 stale certificate。runner 单列输出
+  `infeasibility_ray_valid` 与 certificate gap。新增矛盾双行单元测试验证 ray 的
+  `A^T y=0` 和正 gap。
+- [x] forced-dual **40/40 correctness gate PASS**；fallback **11 -> 9**，no-fallback
+  **29/40 -> 31/40**。有效证书共 5 个：`bgetam` gap `422.231`、`box1` gap `1`、
+  `ex72a`、`galenet` gap `28`、`woodinfe` gap `10`。性能显著变化：`bgetam`
+  1009 -> 11 iterations、约 30 -> 3 ms；`box1` 246 -> 17；`woodinfe` 82 -> 40。
+  `brandy` 415 与 `bore3d` 262 保持不变。原始统计：
+  `/tmp/zhighs-dual-a1-farkas-40-paths.tsv`。
+- [x] 证书严格拒绝仍需无限 bound 或 gap 不足的 `forest6,klein1,refinery`，三者继续
+  fallback，未使用容差放宽或模型特判。当前 9 个 fallback：上述 3 个 no-entering，
+  4 个 free infeasibility（`capri,gams10am,gas11,vtp-base`），2 个
+  cleanup-neither-feasible（`etamacro,scfxm1`）。
+- [ ] presolve 当前未默认接入，`SolutionView` 已携带 Farkas ray，但 presolve postsolve
+  尚未实现 ray 坐标恢复；presolve 启用前必须补齐。Dual 下一步优先分析 3 个被拒证明中
+  是否存在 HiGHS 式“相对小贡献归零”且仍能在严格 original-coordinate gate 下形成正
+  gap；若不能，保持 fallback 并转向 4 个 free-infeasibility Phase-I cleanup。
+
 #### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
 
 deepseek 提出"重构 `buildDualPhaseOneCosts` 为单位 cost ±1/0 -> 删除

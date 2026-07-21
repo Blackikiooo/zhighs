@@ -167,6 +167,7 @@ pub fn solutionView(self: *const SimplexEngine, problem: problem_module.ProblemV
         .dual = basis.published_dual,
         .reduced_cost = basis.published_reduced_cost,
         .unbounded_ray = if (self.unbounded_ray_valid) basis.unbounded_ray else &.{},
+        .infeasibility_ray = if (self.infeasibility_ray_valid) basis.infeasibility_ray else &.{},
         .objective_value = self.objective_value,
         .iterations = self.iterations,
     };

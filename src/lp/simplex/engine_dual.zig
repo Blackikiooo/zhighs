@@ -112,6 +112,7 @@ fn solveDualLoop(
     const shifted_iteration_started = self.iterations;
     var shifted_iterations_recorded = false;
     var no_entering_recovery_used = false;
+    var fresh_no_entering_basis = false;
     defer if (use_work_costs and !shifted_iterations_recorded) {
         self.stats.shifted_dual_iterations += self.iterations -| shifted_iteration_started;
     };
@@ -210,8 +211,13 @@ fn solveDualLoop(
                         self.recomputeReducedCostsFromWork(problem) == .optimal and
                         self.classifyFeasibility(problem).dual)
                     {
+                        fresh_no_entering_basis = true;
                         continue;
                     }
+                }
+                if (fresh_no_entering_basis and self.buildAndValidateInfeasibilityRay(problem, leaving)) {
+                    self.shifted_dual_exit = .phase_two_fresh_infeasible;
+                    return .infeasible;
                 }
                 self.shifted_dual_exit = .phase_two_no_entering;
                 // Reuse the allocation-free candidate diagnostic for the
@@ -223,6 +229,7 @@ fn solveDualLoop(
             return .infeasible;
         };
         const entering_index: usize = @intCast(entering_col);
+        fresh_no_entering_basis = false;
         if (self.computeDirection(problem, entering_index) != .optimal) return .numerical_failure;
         if (entering.direction < 0.0) {
             for (basis.pivot_direction) |*value| value.* = -value.*;
@@ -281,6 +288,64 @@ fn solveDualLoop(
         }
     }
     return .iteration_limit;
+}
+
+/// Construct the HiGHS-style row-space proof for a fresh Phase-II
+/// no-entering decision and validate it entirely in original coordinates.
+/// Costs do not participate: this certifies primal infeasibility of the
+/// original bounds, not of the shifted objective.
+pub fn buildAndValidateInfeasibilityRay(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    leaving: pricing_module.DualLeavingChoice,
+) bool {
+    const basis = if (self.basis) |*value| value else return false;
+    if (basis.infeasibility_ray.len != problem.num_rows) return false;
+    const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
+    var proof_lower: f64 = 0.0;
+    var ray_max: f64 = 0.0;
+    for (basis.infeasibility_ray, basis.dual_row, basis.row_scale, problem.row_lower, problem.row_upper) |
+        *ray_value, scaled_ep, row_scale, lower, upper,
+    | {
+        const value = move_out * scaled_ep * row_scale;
+        if (!std.math.isFinite(value)) return false;
+        ray_value.* = value;
+        ray_max = @max(ray_max, @abs(value));
+        if (value > 0.0) {
+            if (!std.math.isFinite(lower)) return false;
+            proof_lower += value * lower;
+        } else if (value < 0.0) {
+            if (!std.math.isFinite(upper)) return false;
+            proof_lower += value * upper;
+        }
+    }
+    if (!std.math.isFinite(proof_lower) or ray_max <= self.numerical.zero_tolerance) return false;
+
+    var implied_upper: f64 = 0.0;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        var coefficient: f64 = 0.0;
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
+            coefficient += basis.infeasibility_ray[row.toUsize()] * value;
+        }
+        if (!std.math.isFinite(coefficient)) return false;
+        if (coefficient > 0.0) {
+            const upper = problem.col_upper[column];
+            if (!std.math.isFinite(upper)) return false;
+            implied_upper += coefficient * upper;
+        } else if (coefficient < 0.0) {
+            const lower = problem.col_lower[column];
+            if (!std.math.isFinite(lower)) return false;
+            implied_upper += coefficient * lower;
+        }
+    }
+    if (!std.math.isFinite(implied_upper)) return false;
+    const gap = proof_lower - implied_upper;
+    if (!std.math.isFinite(gap) or gap <= self.numerical.primal_tolerance) return false;
+    self.infeasibility_certificate_gap = gap;
+    self.infeasibility_ray_valid = true;
+    return true;
 }
 
 /// Dedicated dual Phase I. Special bounds encode the negated dual
@@ -1036,4 +1101,33 @@ test "dual rank one reduced cost update uses the old tableau row" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), engine.basis.?.reduced_cost[3], 1e-12);
     try std.testing.expectEqual(@as(usize, 1), engine.reduced_cost_update_count);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_reduced_cost_updates);
+}
+
+test "fresh dual no-entering publishes a validated original-coordinate Farkas ray" {
+    const rows = [_]foundation.RowId{
+        foundation.RowId.fromUsizeAssumeValid(0),
+        foundation.RowId.fromUsizeAssumeValid(1),
+    };
+    const problem = problem_module.ProblemView{
+        .num_rows = 2,
+        .num_cols = 1,
+        .col_cost = &[_]f64{0},
+        .col_lower = &[_]f64{0},
+        .col_upper = &[_]f64{std.math.inf(f64)},
+        .row_lower = &[_]f64{ 2, -std.math.inf(f64) },
+        .row_upper = &[_]f64{ std.math.inf(f64), 1 },
+        .matrix = matrix.CscView.initAssumeValid(2, 1, &[_]usize{ 0, 2 }, &rows, &[_]f64{ 1, 1 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    const status = engine.solveProblem(problem, .{ .phase_one_strategy = .dual });
+    try std.testing.expectEqual(SolveStatus.infeasible, status);
+    try std.testing.expect(engine.infeasibility_ray_valid);
+    try std.testing.expect(engine.infeasibility_certificate_gap > engine.numerical.primal_tolerance);
+    const solution = engine.solutionView(problem, status).?;
+    try std.testing.expectEqual(@as(usize, 2), solution.infeasibility_ray.len);
+    const coefficient = solution.infeasibility_ray[0] + solution.infeasibility_ray[1];
+    try std.testing.expectApproxEqAbs(@as(f64, 0), coefficient, 1e-12);
 }

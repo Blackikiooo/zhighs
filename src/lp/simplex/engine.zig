@@ -66,6 +66,7 @@ pub const ShiftedDualExit = enum {
     setup_free_infeasibility,
     setup_not_dual_feasible,
     phase_two_no_entering,
+    phase_two_fresh_infeasible,
     phase_two_numerical_failure,
     phase_two_stopped,
     original_dual_feasible,
@@ -343,6 +344,8 @@ pub const SimplexEngine = struct {
     objective_value: f64 = 0.0,
     objective_scale: f64 = 1.0,
     unbounded_ray_valid: bool = false,
+    infeasibility_ray_valid: bool = false,
+    infeasibility_certificate_gap: f64 = 0.0,
     phase1_needed: bool = false,
     solve_start_ns: ?i96 = null,
     solve_clock_io: ?std.Io = null,
@@ -436,6 +439,8 @@ pub const SimplexEngine = struct {
         self.shifted_dual_exit = .none;
         self.shifted_dual_failure_site = .none;
         self.unbounded_ray_valid = false;
+        self.infeasibility_ray_valid = false;
+        self.infeasibility_certificate_gap = 0.0;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
@@ -566,7 +571,8 @@ pub const SimplexEngine = struct {
             // failures continue through Phase I / the frozen primal fallback.
             switch (shifted_dual_status) {
                 .optimal, .work_limit, .time_limit, .iteration_limit, .interrupted => return shifted_dual_status,
-                .infeasible, .unbounded, .not_implemented, .numerical_failure => {},
+                .infeasible => if (self.infeasibility_ray_valid) return .infeasible,
+                .unbounded, .not_implemented, .numerical_failure => {},
             }
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
             if (dual_phase_one_status != .not_implemented and dual_phase_one_status != .numerical_failure)
@@ -789,6 +795,7 @@ pub const SimplexEngine = struct {
 
     pub const solveDual = @import("engine_dual.zig").solveDual;
     pub const solveDualWithCostShifts = @import("engine_dual.zig").solveDualWithCostShifts;
+    pub const buildAndValidateInfeasibilityRay = @import("engine_dual.zig").buildAndValidateInfeasibilityRay;
     pub const solveDualPhaseOne = @import("engine_dual.zig").solveDualPhaseOne;
     pub const recordDualPhaseOneNoEntering = @import("engine_dual.zig").recordDualPhaseOneNoEntering;
     pub const buildDualPhaseOneCosts = @import("engine_dual.zig").buildDualPhaseOneCosts;

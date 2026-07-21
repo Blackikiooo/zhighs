@@ -361,6 +361,14 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(dual_snapshot_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_snapshot_stats_line);
 
+    const infeasibility_certificate_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tinfeasibility_ray_valid={}\tinfeasibility_certificate_gap={e:.17}\n",
+        .{ path, engine.infeasibility_ray_valid, engine.infeasibility_certificate_gap },
+    );
+    defer allocator.free(infeasibility_certificate_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, infeasibility_certificate_line);
+
     const bound_flip_stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tbound_flip_batches={d}\tbound_flip_ftran_savings={d}\n",

@@ -25,6 +25,7 @@ pub const SolutionView = struct {
     dual: []const f64, // Row dual values (length = num_rows)
     reduced_cost: []const f64, // Column reduced costs (length = num_cols)
     unbounded_ray: []const f64, // Primal ray when `status == .unbounded`; empty otherwise
+    infeasibility_ray: []const f64, // Row-space Farkas ray when `status == .infeasible`
     objective_value: f64, // Final objective value (including offset)
     iterations: usize, // Number of simplex pivots performed
 };

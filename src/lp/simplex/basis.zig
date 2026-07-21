@@ -73,6 +73,7 @@ pub const BasisState = struct {
     published_dual: []f64 = &.{}, // Final dual values for rows
     published_reduced_cost: []f64 = &.{}, // Final reduced costs for structural columns
     unbounded_ray: []f64 = &.{}, // Primal ray (empty unless the solve is unbounded)
+    infeasibility_ray: []f64 = &.{}, // Original-row Farkas ray for an infeasible solve
 
     /// Allocate all SoA vectors for a model with `rows` rows and `cols`
     /// structural columns. Internal column count is `cols + 2*rows` to make
@@ -116,6 +117,7 @@ pub const BasisState = struct {
         self.published_dual = try allocator.alloc(f64, rows);
         self.published_reduced_cost = try allocator.alloc(f64, cols);
         self.unbounded_ray = try allocator.alloc(f64, cols);
+        self.infeasibility_ray = try allocator.alloc(f64, rows);
         @memset(self.row_status, .basic);
         @memset(self.col_status, .at_lower);
         @memset(self.basic_index, 0);
@@ -151,6 +153,7 @@ pub const BasisState = struct {
         @memset(self.published_dual, 0.0);
         @memset(self.published_reduced_cost, 0.0);
         @memset(self.unbounded_ray, 0.0);
+        @memset(self.infeasibility_ray, 0.0);
         return self;
     }
 
@@ -224,6 +227,7 @@ pub const BasisState = struct {
         self.allocator.free(self.published_dual);
         self.allocator.free(self.published_reduced_cost);
         self.allocator.free(self.unbounded_ray);
+        self.allocator.free(self.infeasibility_ray);
     }
 
     /// Bytes explicitly requested for retained basis SoA storage. Allocator
@@ -265,6 +269,7 @@ pub const BasisState = struct {
         total += std.mem.sliceAsBytes(self.published_dual).len;
         total += std.mem.sliceAsBytes(self.published_reduced_cost).len;
         total += std.mem.sliceAsBytes(self.unbounded_ray).len;
+        total += std.mem.sliceAsBytes(self.infeasibility_ray).len;
         return total;
     }
 };

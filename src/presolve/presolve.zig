@@ -366,6 +366,7 @@ test "single fixed column elimination" {
     const sol = SolutionView{
         .status = .optimal, .objective_value = 6.0, .iterations = 1,
         .primal = &.{0.0}, .dual = &.{0.0}, .reduced_cost = &.{1.0}, .unbounded_ray = &.{},
+        .infeasibility_ray = &.{},
     };
     const res = try postsolve(&pp, sol, a);
     defer {
