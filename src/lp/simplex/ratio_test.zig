@@ -170,11 +170,15 @@ pub const RatioTest = struct {
             const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
             if (status[column] == .basic) continue;
             if (status[column] == .fixed and explicit_move == 0) continue;
+            // nonbasic_move provides an explicit direction override for
+            // dual Phase I. When explicit_move == 0 the column uses its
+            // standard status-derived direction even when a nonbasic_move
+            // array is present (the zero means "no override", not "skip").
             const direction: f64 = if (explicit_move != 0)
                 @floatFromInt(explicit_move)
             else switch (status[column]) {
-                .at_lower => if (nonbasic_move.len == 0) 1.0 else continue,
-                .at_upper => if (nonbasic_move.len == 0) -1.0 else continue,
+                .at_lower => 1.0,
+                .at_upper => -1.0,
                 .free, .superbasic => if (leaving_bound == .at_lower)
                     (if (alpha < 0.0) 1.0 else -1.0)
                 else
@@ -219,9 +223,11 @@ pub const RatioTest = struct {
         for (candidate_work[0..candidate_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
             const width = upper[column] - lower[column];
-            const boxed = std.math.isFinite(width) and width > self.tolerance and
-                (status[column] == .at_lower or status[column] == .at_upper);
-            const capacity = if (boxed) @abs(tableau[column]) * width else 0.0;
+            const explicit_move = if (nonbasic_move.len == 0) @as(i8, 0) else nonbasic_move[column];
+            const boxed = (std.math.isFinite(width) and width > self.tolerance and
+                (status[column] == .at_lower or status[column] == .at_upper)) or
+                (status[column] == .fixed and explicit_move != 0);
+            const capacity = if (boxed) @abs(tableau[column]) * @max(width, self.tolerance) else 0.0;
             if (self.rule == .bound_flipping and boxed and corrected + capacity < primal_infeasibility - self.tolerance) {
                 candidate_work[flip_count] = column_u32;
                 flip_count += 1;
