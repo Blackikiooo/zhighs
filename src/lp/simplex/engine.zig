@@ -194,8 +194,9 @@ pub const SolveControl = struct {
     /// Explicit segmented primal pricing A/B policy. `inherit` preserves the
     /// engine pricing rule selected by the embedding application.
     primal_pricing_strategy: PrimalPricingStrategy = .inherit,
-    /// Explicit dual DSE -> Devex A/B policy. It is not enabled by default.
-    dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
+    /// Explicit dual DSE -> Devex A/B policy. Default is steepest-devex
+    /// (HiGHS-equivalent: SteepestEdge with Devex fallback).
+    dual_edge_weight_strategy: DualEdgeWeightStrategy = .steepest_devex,
     /// Maximum successful DSE recurrence updates per dual phase before
     /// switching to dual Devex. Zero disables the budget-triggered switch.
     dual_dse_update_budget: usize = 64,

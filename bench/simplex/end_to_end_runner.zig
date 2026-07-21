@@ -68,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
     const dual_edge_weight_strategy: zhighs.lp.simplex.engine.DualEdgeWeightStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "steepest-devex")) .steepest_devex else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
     else
-        .inherit;
+        .steepest_devex;
     const dual_dse_update_budget = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
     const primal_pricing_strategy: zhighs.lp.simplex.engine.PrimalPricingStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "partial")) .partial else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
