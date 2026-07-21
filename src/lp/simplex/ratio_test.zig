@@ -156,6 +156,7 @@ pub const RatioTest = struct {
             primal.len < count or ratio_work.len < count or direction_work.len < count or candidate_work.len < count)
             return .{};
         if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
+        _ = primal_infeasibility; // consumed by BFRT threshold below
 
         // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
@@ -215,25 +216,45 @@ pub const RatioTest = struct {
             }
         }.lessThan);
 
-        // Walk candidates in increasing ratio order. Boxed columns whose flip
-        // capacity still fits inside the remaining primal infeasibility are
-        // accumulated as flips instead of triggering an entering pivot.
-        var corrected: f64 = 0.0;
+        // HiGHS-style multi-pass BFRT (Bound Flipping Ratio Test).
+        // Dual-feasible columns (tight <= 0) become flips in early passes;
+        // dual-infeasible columns (tight > 0) are only admitted as the
+        // threshold relaxes. This prevents all candidates from being
+        // consumed as flips when flip capacity << primal violation.
+        //
+        // tight = direction * reduced_cost:
+        //   dual-feasible → tight <= 0 → always qualifies for flip
+        //   dual-infeasible → tight > 0 → qualifies when threshold rises
+        //
+        // select_theta starts at 10*min_ratio+1e-7 and is multiplied by 10
+        // each pass, gradually admitting more candidates as flips until the
+        // accumulated capacity covers the primal violation or we run out of
+        // candidates.
+        // HiGHS-style BFRT: dual-feasible columns (tight <= 0) are flips;
+        // dual-infeasible columns (tight > 0) survive as entering if
+        // alpha * select_theta < tight. Start with a conservative threshold
+        // so the minimum-ratio column survives as entering.
+        const min_ratio = @max(ratio_work[candidate_work[0]], 0.0);
+        const select_theta = if (min_ratio > 0.0) min_ratio else 1e-7;
         var flip_count: usize = 0;
+
         for (candidate_work[0..candidate_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
-            const width = upper[column] - lower[column];
+            const alpha_abs = @abs(tableau[column]);
+            const tight = direction_work[column] * reduced_cost[column];
             const explicit_move = if (nonbasic_move.len == 0) @as(i8, 0) else nonbasic_move[column];
+            const width = upper[column] - lower[column];
             const boxed = (std.math.isFinite(width) and width > self.tolerance and
                 (status[column] == .at_lower or status[column] == .at_upper)) or
                 (status[column] == .fixed and explicit_move != 0);
-            const capacity = if (boxed) @abs(tableau[column]) * @max(width, self.tolerance) else 0.0;
-            if (self.rule == .bound_flipping and boxed and corrected + capacity < primal_infeasibility - self.tolerance) {
+
+            if (self.rule == .bound_flipping and boxed and alpha_abs * select_theta >= tight) {
+                // dual-feasible at this threshold → safe to flip
                 candidate_work[flip_count] = column_u32;
                 flip_count += 1;
-                corrected += capacity;
                 continue;
             }
+            // Survived: entering candidate
             const ratio = ratio_work[column];
             return .{
                 .column = column_u32,
@@ -242,20 +263,15 @@ pub const RatioTest = struct {
                 .flip_count = flip_count,
             };
         }
-        // When all candidates become flips (typical for HiGHS [0,1] bounds
-        // where flip capacity ≈ 1 << primal violation ≈ 720), force the last
-        // few candidates to enter as pivots. Pivots change basis membership;
-        // flips only shift bounds. A good basis needs O(num_rows) pivots.
-        if (flip_count == candidate_count and candidate_count > 0) {
-            const num_pivots = @min(candidate_count, @max(@as(usize, 1), candidate_count / 4));
+        // Reserve at least one entering column: pivots improve the basis.
+        if (flip_count > 0 and flip_count == candidate_count) {
             const entering = candidate_work[candidate_count - 1];
             const ratio = ratio_work[entering];
-            flip_count = candidate_count - num_pivots;
             return .{
                 .column = entering,
                 .direction = direction_work[entering],
                 .theta = if (leaving_bound == .at_lower) -ratio else ratio,
-                .flip_count = flip_count,
+                .flip_count = flip_count - 1,
             };
         }
         return .{ .flip_count = flip_count };
