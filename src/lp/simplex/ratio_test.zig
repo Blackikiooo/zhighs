@@ -242,21 +242,20 @@ pub const RatioTest = struct {
                 .flip_count = flip_count,
             };
         }
-        // Enforce at least one pivot per iteration when the flip capacity
-        // is dwarfed by the primal violation. Flips alone change bounds
-        // without improving the basis; a pivot changes membership and moves
-        // the basis toward dual-optimality even if the immediate ratio is large.
-        if (flip_count > 0 and candidate_count > 0 and flip_count == candidate_count) {
-            const entering = candidate_work[flip_count - 1];
+        // When all candidates become flips (typical for HiGHS [0,1] bounds
+        // where flip capacity ≈ 1 << primal violation ≈ 720), force the last
+        // few candidates to enter as pivots. Pivots change basis membership;
+        // flips only shift bounds. A good basis needs O(num_rows) pivots.
+        if (flip_count == candidate_count and candidate_count > 0) {
+            const num_pivots = @min(candidate_count, @max(@as(usize, 1), candidate_count / 4));
+            const entering = candidate_work[candidate_count - 1];
             const ratio = ratio_work[entering];
-            // Keep up to half the flips — the rest become "live" entering.
-            const keep_flips = flip_count / 2;
-            flip_count = keep_flips;
+            flip_count = candidate_count - num_pivots;
             return .{
                 .column = entering,
                 .direction = direction_work[entering],
                 .theta = if (leaving_bound == .at_lower) -ratio else ratio,
-                .flip_count = keep_flips,
+                .flip_count = flip_count,
             };
         }
         return .{ .flip_count = flip_count };
