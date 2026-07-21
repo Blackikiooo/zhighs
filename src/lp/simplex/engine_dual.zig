@@ -95,6 +95,9 @@ fn solveDualLoop(
     control: SolveControl,
     use_work_costs: bool,
 ) SolveStatus {
+    const saved_shifted_accounting = self.shifted_dual_accounting_active;
+    if (use_work_costs) self.shifted_dual_accounting_active = true;
+    defer self.shifted_dual_accounting_active = saved_shifted_accounting;
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.beginDualEdgeWeightPhase();
@@ -153,6 +156,9 @@ fn solveDualLoop(
                 // validation and cold-restart the entire solve.
                 self.pricing.rule = saved_pricing_rule;
                 const cleanup_started = self.iterations;
+                const saved_cleanup_active = self.cleanup_active;
+                self.cleanup_active = true;
+                defer self.cleanup_active = saved_cleanup_active;
                 const cleanup_status = self.solveDual(problem, control);
                 self.stats.shifted_cleanup_iterations += self.iterations -| cleanup_started;
                 self.shifted_dual_exit = if (cleanup_status == .optimal)
@@ -164,6 +170,9 @@ fn solveDualLoop(
             if (original_feasibility.primal) {
                 self.pricing.rule = saved_pricing_rule;
                 const cleanup_started = self.iterations;
+                const saved_cleanup_active = self.cleanup_active;
+                self.cleanup_active = true;
+                defer self.cleanup_active = saved_cleanup_active;
                 const cleanup_status = self.solvePrimal(problem, control);
                 self.stats.shifted_cleanup_iterations += self.iterations -| cleanup_started;
                 self.shifted_dual_exit = if (cleanup_status == .optimal)
@@ -299,29 +308,86 @@ pub fn buildAndValidateInfeasibilityRay(
     problem: problem_module.ProblemView,
     leaving: pricing_module.DualLeavingChoice,
 ) bool {
-    const basis = if (self.basis) |*value| value else return false;
-    if (basis.infeasibility_ray.len != problem.num_rows) return false;
+    self.infeasibility_certificate_failure = .none;
+    self.infeasibility_certificate_infinite_row_mass = 0.0;
+    self.infeasibility_certificate_infinite_column_mass = 0.0;
+    const basis = if (self.basis) |*value| value else {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    };
+    if (basis.infeasibility_ray.len != problem.num_rows or basis.residual_work.len != problem.num_rows) {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    }
+    // `residual_work` is dead after the fresh BTRAN at this decision point.
+    // Reuse it allocation-free to measure each ray component in the same
+    // relative form as HiGHS: |y_i| * max_j |A_ij|.
+    @memset(basis.residual_work, 0.0);
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
+            const row_index = row.toUsize();
+            basis.residual_work[row_index] = @max(basis.residual_work[row_index], @abs(value));
+        }
+    }
     const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
     var proof_lower: f64 = 0.0;
     var ray_max: f64 = 0.0;
-    for (basis.infeasibility_ray, basis.dual_row, basis.row_scale, problem.row_lower, problem.row_upper) |
-        *ray_value, scaled_ep, row_scale, lower, upper,
+    for (basis.infeasibility_ray, basis.dual_row, basis.row_scale, basis.residual_work, problem.row_lower, problem.row_upper) |
+        *ray_value,
+        scaled_ep,
+        row_scale,
+        row_max,
+        lower,
+        upper,
     | {
-        const value = move_out * scaled_ep * row_scale;
-        if (!std.math.isFinite(value)) return false;
+        var value = move_out * scaled_ep * row_scale;
+        if (!std.math.isFinite(value)) {
+            self.infeasibility_certificate_failure = .nonfinite_ray;
+            return false;
+        }
+        const relative_contribution = @abs(value) * row_max;
+        // Match the model's canonical coefficient floor before validating the
+        // proof. Any remaining ray is still re-evaluated against the original
+        // CSC and original bounds below; this is not a feasibility-tolerance
+        // relaxation.
+        if (relative_contribution <= matrix.MatrixTargetPolicy.model_coefficient_tolerance) value = 0.0;
+        if (value > 0.0) {
+            if (!std.math.isFinite(lower)) {
+                self.infeasibility_certificate_infinite_row_mass = @max(
+                    self.infeasibility_certificate_infinite_row_mass,
+                    relative_contribution,
+                );
+                value = 0.0;
+            } else {
+                proof_lower += value * lower;
+            }
+        } else if (value < 0.0) {
+            if (!std.math.isFinite(upper)) {
+                self.infeasibility_certificate_infinite_row_mass = @max(
+                    self.infeasibility_certificate_infinite_row_mass,
+                    relative_contribution,
+                );
+                value = 0.0;
+            } else {
+                proof_lower += value * upper;
+            }
+        }
         ray_value.* = value;
         ray_max = @max(ray_max, @abs(value));
-        if (value > 0.0) {
-            if (!std.math.isFinite(lower)) return false;
-            proof_lower += value * lower;
-        } else if (value < 0.0) {
-            if (!std.math.isFinite(upper)) return false;
-            proof_lower += value * upper;
-        }
     }
-    if (!std.math.isFinite(proof_lower) or ray_max <= self.numerical.zero_tolerance) return false;
+    if (ray_max <= self.numerical.zero_tolerance) {
+        self.infeasibility_certificate_failure = .zero_ray;
+        return false;
+    }
+    if (!std.math.isFinite(proof_lower)) {
+        self.infeasibility_certificate_failure = .nonfinite_proof;
+        return false;
+    }
 
     var implied_upper: f64 = 0.0;
+    var has_infinite_column_bound = false;
     for (0..problem.num_cols) |column| {
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
@@ -329,21 +395,48 @@ pub fn buildAndValidateInfeasibilityRay(
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
             coefficient += basis.infeasibility_ray[row.toUsize()] * value;
         }
-        if (!std.math.isFinite(coefficient)) return false;
+        if (!std.math.isFinite(coefficient)) {
+            self.infeasibility_certificate_failure = .nonfinite_proof;
+            return false;
+        }
         if (coefficient > 0.0) {
             const upper = problem.col_upper[column];
-            if (!std.math.isFinite(upper)) return false;
+            if (!std.math.isFinite(upper)) {
+                has_infinite_column_bound = true;
+                self.infeasibility_certificate_infinite_column_mass += @abs(coefficient);
+                continue;
+            }
             implied_upper += coefficient * upper;
         } else if (coefficient < 0.0) {
             const lower = problem.col_lower[column];
-            if (!std.math.isFinite(lower)) return false;
+            if (!std.math.isFinite(lower)) {
+                has_infinite_column_bound = true;
+                self.infeasibility_certificate_infinite_column_mass += @abs(coefficient);
+                continue;
+            }
             implied_upper += coefficient * lower;
         }
     }
-    if (!std.math.isFinite(implied_upper)) return false;
+    if (has_infinite_column_bound and
+        self.infeasibility_certificate_infinite_column_mass > matrix.MatrixTargetPolicy.model_coefficient_tolerance)
+    {
+        self.infeasibility_certificate_failure = .infinite_column_bound;
+        return false;
+    }
+    if (!std.math.isFinite(implied_upper)) {
+        self.infeasibility_certificate_failure = .nonfinite_proof;
+        return false;
+    }
     const gap = proof_lower - implied_upper;
-    if (!std.math.isFinite(gap) or gap <= self.numerical.primal_tolerance) return false;
     self.infeasibility_certificate_gap = gap;
+    if (!std.math.isFinite(gap)) {
+        self.infeasibility_certificate_failure = .nonfinite_proof;
+        return false;
+    }
+    if (gap <= self.numerical.primal_tolerance) {
+        self.infeasibility_certificate_failure = .nonpositive_gap;
+        return false;
+    }
     self.infeasibility_ray_valid = true;
     return true;
 }
@@ -538,8 +631,14 @@ pub fn recordDualPhaseOneNoEntering(
     var diagnostic = DualPhaseOneFailureDiagnostic{
         .iteration = self.iterations,
         .leaving_row = leaving.row,
+        .leaving_column = basis.basic_index[leaving.row],
         .leaving_bound = leaving.bound,
         .violation = leaving.violation,
+        .leaving_value = basis.basic_value[leaving.row],
+        .working_lower = basis.basic_lower[leaving.row],
+        .working_upper = basis.basic_upper[leaving.row],
+        .original_lower = self.dual_phase_one.saved_lower[basis.basic_index[leaving.row]],
+        .original_upper = self.dual_phase_one.saved_upper[basis.basic_index[leaving.row]],
         .ep_nonzeros = 0,
         .ep_max_abs = 0.0,
         .small_tableau = 0,
@@ -612,6 +711,7 @@ pub fn recordDualPhaseOneNoEntering(
             self.active_dual_phase_one_candidate_trace[self.dual_phase_one_candidate_trace_count] = .{
                 .column = @intCast(column),
                 .status = status,
+                .explicit_move = self.dual_phase_one.nonbasic_move[column],
                 .tableau = alpha,
                 .direction = direction,
                 .signed_pivot = signed_pivot,
@@ -1130,4 +1230,54 @@ test "fresh dual no-entering publishes a validated original-coordinate Farkas ra
     try std.testing.expectEqual(@as(usize, 2), solution.infeasibility_ray.len);
     const coefficient = solution.infeasibility_ray[0] + solution.infeasibility_ray[1];
     try std.testing.expectApproxEqAbs(@as(f64, 0), coefficient, 1e-12);
+}
+
+test "Farkas validation ignores only sub-floor infinite-bound column mass" {
+    const row = foundation.RowId.fromUsizeAssumeValid(0);
+    const column_rows = [_]foundation.RowId{ row, row };
+    const leaving = pricing_module.DualLeavingChoice{
+        .row = 0,
+        .bound = .at_upper,
+        .violation = 1,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 2);
+    engine.basis.?.row_scale[0] = 1;
+    engine.basis.?.dual_row[0] = 1;
+
+    const accepted_problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &[_]f64{ 0, 0 },
+        .col_lower = &[_]f64{ 0, 0 },
+        .col_upper = &[_]f64{ 0, std.math.inf(f64) },
+        .row_lower = &[_]f64{1},
+        .row_upper = &[_]f64{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &column_rows, &[_]f64{ 1, 5e-10 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    try std.testing.expect(engine.buildAndValidateInfeasibilityRay(accepted_problem, leaving));
+    try std.testing.expectApproxEqAbs(@as(f64, 5e-10), engine.infeasibility_certificate_infinite_column_mass, 1e-20);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), engine.infeasibility_certificate_gap, 1e-12);
+
+    engine.infeasibility_ray_valid = false;
+    const rejected_problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &[_]f64{ 0, 0 },
+        .col_lower = &[_]f64{ 0, 0 },
+        .col_upper = &[_]f64{ 0, std.math.inf(f64) },
+        .row_lower = &[_]f64{1},
+        .row_upper = &[_]f64{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &column_rows, &[_]f64{ 1, 2e-9 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    try std.testing.expect(!engine.buildAndValidateInfeasibilityRay(rejected_problem, leaving));
+    try std.testing.expectEqual(
+        @import("engine.zig").InfeasibilityCertificateFailure.infinite_column_bound,
+        engine.infeasibility_certificate_failure,
+    );
 }

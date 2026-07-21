@@ -76,6 +76,16 @@ pub const ShiftedDualExit = enum {
     cleanup_primal_failed,
     cleanup_neither_feasible,
 };
+pub const InfeasibilityCertificateFailure = enum {
+    none,
+    invalid_workspace,
+    nonfinite_ray,
+    zero_ray,
+    infinite_row_bound,
+    infinite_column_bound,
+    nonfinite_proof,
+    nonpositive_gap,
+};
 pub const PivotTraceEvent = struct {
     phase: SolvePhase,
     iteration: usize,
@@ -119,6 +129,7 @@ pub const DualPhaseOneCandidateReason = enum {
 pub const DualPhaseOneCandidateTraceEvent = struct {
     column: u32,
     status: basis_module.BasisStatus,
+    explicit_move: i8,
     tableau: f64,
     direction: f64,
     signed_pivot: f64,
@@ -133,8 +144,14 @@ pub const DualPhaseOneEpTraceEvent = struct { row: u32, value: f64 };
 pub const DualPhaseOneFailureDiagnostic = struct {
     iteration: usize,
     leaving_row: u32,
+    leaving_column: u32,
     leaving_bound: basis_module.BasisStatus,
     violation: f64,
+    leaving_value: f64,
+    working_lower: f64,
+    working_upper: f64,
+    original_lower: f64,
+    original_upper: f64,
     ep_nonzeros: usize,
     ep_max_abs: f64,
     small_tableau: usize,
@@ -314,6 +331,30 @@ pub const SimplexStats = struct {
     }
 };
 
+/// Monotonic accounting for one public solve. Unlike `iterations`, these
+/// counters survive every internal fallback, cleanup solve, and cold restart.
+/// HiGHS' simplex iteration count corresponds to committed basis changes;
+/// bound-only moves are therefore reported separately.
+pub const IterationCounters = struct {
+    attempted_iterations: usize = 0,
+    committed_pivots: usize = 0,
+    bound_moves: usize = 0,
+    shifted_dual_pivots: usize = 0,
+    dual_phase_one_pivots: usize = 0,
+    dual_phase_two_pivots: usize = 0,
+    primal_phase_one_pivots: usize = 0,
+    primal_phase_two_pivots: usize = 0,
+    dual_repair_pivots: usize = 0,
+    cleanup_pivots: usize = 0,
+
+    pub fn classifiedPivots(self: IterationCounters) usize {
+        return self.shifted_dual_pivots + self.dual_phase_one_pivots +
+            self.dual_phase_two_pivots + self.primal_phase_one_pivots +
+            self.primal_phase_two_pivots + self.dual_repair_pivots +
+            self.cleanup_pivots;
+    }
+};
+
 pub const RebuildReason = enum {
     phase_one_setup,
     solve_residual,
@@ -341,11 +382,16 @@ pub const SimplexEngine = struct {
     ratio_test: ratio_module.RatioTest = .{},
     numerical: numerical_module.NumericalState = .{},
     iterations: usize = 0,
+    iteration_counters: IterationCounters = .{},
+    solve_depth: usize = 0,
     objective_value: f64 = 0.0,
     objective_scale: f64 = 1.0,
     unbounded_ray_valid: bool = false,
     infeasibility_ray_valid: bool = false,
     infeasibility_certificate_gap: f64 = 0.0,
+    infeasibility_certificate_failure: InfeasibilityCertificateFailure = .none,
+    infeasibility_certificate_infinite_row_mass: f64 = 0.0,
+    infeasibility_certificate_infinite_column_mass: f64 = 0.0,
     phase1_needed: bool = false,
     solve_start_ns: ?i96 = null,
     solve_clock_io: ?std.Io = null,
@@ -381,6 +427,7 @@ pub const SimplexEngine = struct {
     stats: SimplexStats = .{},
     statistics_io: ?std.Io = null,
     cleanup_active: bool = false,
+    shifted_dual_accounting_active: bool = false,
     active_degeneracy_strategy: DegeneracyStrategy = .baseline,
     active_adaptive_reprice: bool = false,
     maximum_reduced_cost_drift: f64 = 0.0,
@@ -428,6 +475,10 @@ pub const SimplexEngine = struct {
     /// The view must outlive this call; the engine never takes ownership of
     /// model arrays. Basis storage is owned by the engine instance.
     pub fn solveProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const root_solve = self.solve_depth == 0;
+        self.solve_depth += 1;
+        defer self.solve_depth -= 1;
+        if (root_solve) self.iteration_counters = .{};
         self.pricing.resetPartial();
         self.startSolveClock(control);
         self.resetStatistics(control);
@@ -441,6 +492,9 @@ pub const SimplexEngine = struct {
         self.unbounded_ray_valid = false;
         self.infeasibility_ray_valid = false;
         self.infeasibility_certificate_gap = 0.0;
+        self.infeasibility_certificate_failure = .none;
+        self.infeasibility_certificate_infinite_row_mass = 0.0;
+        self.infeasibility_certificate_infinite_column_mass = 0.0;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
@@ -698,6 +752,10 @@ pub const SimplexEngine = struct {
     /// guarantee unchanged matrix structure and values. No model view is
     /// retained after this call.
     pub fn reoptimizeProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+        const root_solve = self.solve_depth == 0;
+        self.solve_depth += 1;
+        defer self.solve_depth -= 1;
+        if (root_solve) self.iteration_counters = .{};
         self.pricing.resetPartial();
         self.startSolveClock(control);
         self.resetStatistics(control);
@@ -837,8 +895,14 @@ test "engine solves with a nonzero structural lower bound" {
     };
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
+    engine.iteration_counters.attempted_iterations = 999;
     const status = engine.solveProblem(problem, .{});
     try std.testing.expectEqual(SolveStatus.optimal, status);
+    try std.testing.expect(engine.iteration_counters.attempted_iterations < 999);
+    try std.testing.expectEqual(
+        engine.iteration_counters.committed_pivots,
+        engine.iteration_counters.classifiedPivots(),
+    );
     try std.testing.expectApproxEqAbs(@as(f64, 5), engine.basis.?.primal[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 5), engine.objective_value, 1e-12);
 }

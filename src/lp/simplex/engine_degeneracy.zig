@@ -92,6 +92,26 @@ pub fn observeIterationStep(
     small_pivot_retry: bool,
     bound_flip_count: usize,
 ) void {
+    if (leaving_column != null) {
+        self.iteration_counters.committed_pivots += 1;
+        if (self.cleanup_active) {
+            self.iteration_counters.cleanup_pivots += 1;
+        } else switch (self.current_phase) {
+            .phase_one => self.iteration_counters.primal_phase_one_pivots += 1,
+            .dual_phase_one => self.iteration_counters.dual_phase_one_pivots += 1,
+            .dual_feasibility_repair => self.iteration_counters.dual_repair_pivots += 1,
+            .phase_two => {
+                if (self.shifted_dual_accounting_active)
+                    self.iteration_counters.shifted_dual_pivots += 1
+                else if (self.algorithm == .dual_revised)
+                    self.iteration_counters.dual_phase_two_pivots += 1
+                else
+                    self.iteration_counters.primal_phase_two_pivots += 1;
+            },
+        }
+    } else {
+        self.iteration_counters.bound_moves += 1;
+    }
     self.numerical.observeStep(step);
     if (std.math.isFinite(step) and step > self.numerical.primal_tolerance) {
         self.degeneracy.clearAfterProgress();

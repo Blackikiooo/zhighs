@@ -62,6 +62,11 @@ pub fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView,
         }
         if (log_due) control.log_callback.?(event, control.log_user_data);
     }
+    self.iteration_counters.attempted_iterations = std.math.add(
+        usize,
+        self.iteration_counters.attempted_iterations,
+        1,
+    ) catch std.math.maxInt(usize);
     self.work_used = std.math.add(u64, self.work_used, 1) catch std.math.maxInt(u64);
     return null;
 }

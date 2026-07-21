@@ -922,6 +922,134 @@ A1 fresh no-entering Farkas certificate（2026-07-21）：
   是否存在 HiGHS 式“相对小贡献归零”且仍能在严格 original-coordinate gate 下形成正
   gap；若不能，保持 fallback 并转向 4 个 free-infeasibility Phase-I cleanup。
 
+A1 Farkas 相对小贡献归零（2026-07-21）：
+
+- [x] 增加 allocation-free 证书失败诊断：复用 fresh BTRAN 后已失效的
+  `BasisState.residual_work` 统计每行 `|y_i| * max_j|A_ij|`，并输出失败类型、无限 row
+  最大相对贡献、无限 column 的 `sum |A^T y|`。严格版定点结果确认 `forest6` 和
+  `klein1` 都只因无限 column bound 被拒，质量分别为 `8.88e-16`、`9.40e-11`；均小于
+  全项目统一的原模型系数阈值 `MatrixTargetPolicy.model_coefficient_tolerance=1e-9`。
+- [x] 按 pinned HiGHS 语义实现清零，但不放宽 primal/dual feasibility tolerance：先将
+  `|y_i| * row_max <= 1e-9` 的 row multiplier 归零，选择到无限 row bound 的 multiplier
+  也归零；随后重新以原始 CSC 计算 `A^T y`。无限 column bound 只允许累计质量
+  `<= 1e-9`，超过即以 `infinite_column_bound` 严格拒绝；最终仍要求所有有限-bound
+  proof 项有限且 original-coordinate gap `> primal_tolerance`。新增单元测试分别锁定
+  `5e-10` 可接受、`2e-9` 必须拒绝，防止该规则演变成无界容差放宽。
+- [x] 与上一轮相同的 forced dual + `DUAL_EDGE_WEIGHT_STRATEGY=steepest-devex` 口径下，
+  40-model correctness gate **40/40 PASS**；fallback **9 -> 6**，no-fallback
+  **31/40 -> 34/40**，有效证书 **5 -> 8**。新增三张证书：`forest6` 83 iterations、
+  gap `2.551949e5`、无限列质量 `3.38e-14`；`klein1` 120 iterations、gap
+  `1.858932e4`、质量 `1.83e-11`；`refinery` 471 iterations、gap `8.736088e5`、质量
+  `7.91e-12`。`brandy=415`、`bore3d=262`，未破坏此前领先路径。剩余 6 个 fallback：
+  `capri,etamacro,gams10am,gas11,scfxm1,vtp-base`。原始 correctness 与 path 统计分别为
+  `/tmp/zhighs-dual-a1-farkas-zeroing-dse-40.tsv`、
+  `/tmp/zhighs-dual-a1-farkas-zeroing-dse-40-paths.tsv`。
+- [x] **配置奇异值已隔离**：gate 脚本默认 `DUAL_EDGE_WEIGHT_STRATEGY=inherit`，该口径下
+  干净 `ff9f94a` 与本轮代码都为 `brandy=619`、`bore3d=330`，不是本轮回归；切回上一轮
+  明确使用的 `steepest-devex` 后稳定恢复 415/262。inherit 口径同样 40/40 PASS，且本轮
+  为 `forest6=67`、`klein1=164`，但 `refinery` 在 ratio-test numerical failure 后继续
+  fallback，因此不得混用两组数据。另：未禁用 trace 检查时旧 trace lock 仍要求
+  `brandy=2937 events`，与当前 415/619 两条合法路径均不符；本轮 correctness gate 使用
+  脚本已有的 `VERIFY_TRACES=0`，旧 trace lock 必须单独重建后才能恢复 trace gate，不能
+  将此次结果表述为 pivot-trace gate PASS。
+- [ ] 下一 dual 优化转向剩余 6 个 fallback：先处理 4 个
+  `setup_free_infeasibility`（`capri,gams10am,gas11,vtp-base`）的 Phase-I cleanup；
+  `etamacro,scfxm1` 继续作为 cleanup-neither-feasible 组。`refinery` 已由严格证书闭环，
+  不再属于 ratio-test 修复目标。presolve Farkas postsolve 映射仍是启用 presolve 前硬门槛。
+
+A2 setup-free / dual Phase-I 首轮诊断（2026-07-21）：
+
+- [x] 扩展 allocation-free failure trace：记录 leaving structural/logical column、working 与
+  original bounds、basic value，并在每个 CHUZC candidate 中记录真实
+  `nonbasic_move`。四个模型都在 Phase-I 第 0--2 步出现 fresh sparse no-entering；不是
+  cleanup 出口误判。`capri` leaving col8 value `1047.0178` vs working `[0,1]`，
+  `gams10am` col172 value `225.745` vs `[0,1]`，`gas11` col981 value `2801.006`
+  vs fixed `[0,0]`，`vtp-base` col45 value `1953.799` vs `[0,1]`。
+- [x] pinned HiGHS 同口径开发日志确认四者真实路径：`capri` dual Phase-I 34 + Phase-II
+  264 iterations；`gams10am` Phase-I 1 后在 Phase-II 以 Farkas proof 判 infeasible；
+  `vtp-base` Phase-I 1 + Phase-II 153；`gas11` Phase-I 485，经 remove-perturbation/
+  cleanup level 判 dual infeasible，再由 primal cleanup 确认 unbounded。故四者不能统一用
+  “Phase-I no-entering = primal infeasible”，尤其 `capri/vtp-base` 必须继续找到 pivot。
+- [x] **拒绝且已完全撤销**三类无收益实验：(1) free 变量按 reduced-cost 反号或完全照搬
+  HiGHS 默认 lower `-1000` 端点，四模型逐项无变化；(2) no-entering 后立即恢复原 bounds
+  并 fresh classify，四者仍 neither-feasible；(3) 对 Zig shifted-logical slack 保留原 bounds，
+  四者逐项无变化。它们说明首次阻塞 leaving 列主要是 structural，不能靠 free/bound
+  初始化局部修补。
+- [x] **拒绝且已撤销**两个 CHUZC 启发式：(1) free move 改为 row-dependent 让 `gas11`
+  Phase-I 从 0 前进到 4 iterations，但 fallback 不变且增加额外工作，其余模型不变；
+  (2) 当全候选 capacity 不足时直接选择最大 alpha，使 `capri` Phase-I 2 -> 4、
+  `vtp-base` 4 -> 6，仍 fallback，证明单条规则只改变短循环形态，不能替代完整
+  breakpoint grouping。
+- [x] 首步 trace 已锁定实际循环：`capri` iteration 0 先 flip col6，再以 col8 pivot、
+  logical357 离开，step `1047.0178`；下一步 col8 自身越过 `[0,1]` 且无 entering。
+  `vtp-base` 在同一 row89 上形成 col43/45/46 的短循环。`capri` 首步候选总 range-capacity
+  仅 2，远小于 leaving violation 1047；当前“按最小 ratio 顺序翻转再取首个 pivot”与
+  HiGHS CHUZC3 large-step + CHUZC4 breakpoint group 的差异已成为主根因。
+- [ ] 下一执行项：只对 `capri/vtp-base` 首个 Phase-I pivot 增加 HiGHS 侧
+  `workTheta/selectTheta/workGroup/breakGroup/workPivot/flip set` instrumentation，并与 Zig
+  同字段逐步 differential；先复现首步选择，再移植 CHUZC3/4，禁止再次用全局
+  max-alpha、模型特判或容差放宽。`gams10am/gas11` 的 Phase-I optimality cleanup levels
+  排在 pivot differential 之后。
+
+A2--A4 HiGHS 语义全量补齐主线（2026-07-21，进行中）：
+
+- [x] 建立永不因 fallback/restart 清零的 `attempted_iterations` 与 `committed_pivots`；runner
+  同时按 shifted dual、dual Phase-I、dual Phase-II、primal Phase-I/II、cleanup 分列。
+  `solve_depth` 只在 public root solve 清零新计数，内部 dual fallback、snapshot retry、
+  artificial Phase-I、cleanup 与 cold restart 均持续累计；仅移动非基变量到自身另一界单列为
+  `bound_moves`，不冒充 HiGHS simplex iteration。runner 主结果的 iterations 已切到
+  `committed_pivots`，详细 stats 同时输出 attempted、7 类 path 与 classified sum。
+  四模型首轮同环境验证：`brandy=415`（shifted 402 + cleanup 13，HiGHS 304）、
+  `bore3d=260`（259+1，HiGHS 202）、`capri=428`（旧重置口径 556，另有 128 bound moves，
+  HiGHS 298）、`vtp-base=263`（旧值 331，另有 70 bound moves，HiGHS 154）；四者
+  status/objective/residual 双实现 gate PASS，且 committed pivots 与实际 factor updates 一致。
+  ReleaseFast 全部测试通过；forced dual + steepest-devex 完整 40-model 与 pinned HiGHS
+  status/objective/residual/ray gate **40/40 PASS**。canonical iteration 已暴露真实尾部：
+  `blend 1413/109`、`etamacro 1433/532`、`scfxm1 1006/484`；同时 `afiro 19/22`、
+  `agg 126/206` 已少于 HiGHS，进一步确认差异来自算法路径而非统一的内核慢倍率。
+- [ ] 对 pinned HiGHS `de09bbad9f` 增加仅用于 differential 的 CHUZC trace，字段固定为
+  `move_out,workTheta,selectTheta,totalDelta,totalChange,workGroup,breakGroup,workPivot,
+  workAlpha,workTheta,flip set`；Zig 输出完全同构字段，先锁定 `capri/vtp-base` 首步再扩到
+  前 50 pivots。
+  - [x] 在 `/tmp/zhighs-highs-chuzc-trace` 建立不污染用户 checkout 的同 commit 副本，
+    instrumentation 已输出上述 CHUZC0/3/4 字段。`capri` HiGHS iteration 0 为
+    `row_out=225, variable_out=578, delta=7306.24, workTheta=1.3687e-8,
+    workGroup=0,1, workPivot=128, workAlpha=7.30624, flip_set=[]`。
+  - [x] 首步 differential 发现 **CHUZC 前已分叉**：Zig iteration 0 为
+    `row4/logical357, violation=1047.0178`，HiGHS 为上述 row225/logical578。两边不是同一
+    leaving state，不能把后续 theta/group 差异归因给 CHUZC。根因前置于 ratio test：
+    HiGHS 默认 forced-equilibration（6 轮 column/row `1/sqrt(min*max)`、power-of-two rounding）
+    且不启用当前 Zig 的 objective cost scale；Zig 目前是单轮 row max scaling、仅在全局
+    range>1e6 时 column max scaling。初始 DSE merit 因而不同。
+  - [ ] 依赖顺序调整：先对齐 scaling、logical Phase-I work bounds 与 exact initial DSE，
+    要求 `capri/vtp-base` 的 CHUZR leaving row 与 HiGHS 一致；随后再验收同状态 CHUZC 前
+    50 pivots。该调整是移植 HiGHS 前置语义，不是引入新策略。
+- [ ] 逐段移植 CHUZC0 free move、CHUZC2 dynamic Ta/Td、CHUZC3 large-step、CHUZC4
+  breakpoint grouping/large-alpha/final flip selection及数值重试；每段必须通过 40-model
+  correctness、`brandy/bore3d` 不回退和与 HiGHS 的 pivot differential。
+  - [x] 已逐句核对 pinned `HEkkDualRow::{choosePossible,chooseFinal,
+    chooseFinalWorkGroupQuad,chooseFinalLargeAlpha}`，确认常量 `Ta=1e-9/3e-8/1e-6`、
+    `Td=dual_feasibility_tolerance`、CHUZC3 `10*theta+1e-7`、group 初值 `1e-12`、
+    large-alpha 阈值 `min(0.1*max_alpha,1)` 及只 flip breakGroup 之前各组。
+  - [x] **拒绝并完全撤销**首版无 allocation 整段移植：`brandy 415->405`、
+    `vtp-base 263->261`，但 `bore3d` 从 optimal 错判 infeasible（shifted dual 40 pivots 后
+    dual-feasibility failure，随后 Phase-I 发布错误证书；HiGHS 为 optimal/202）。说明 HiGHS
+    `workRange/nonbasicMove/updateFlip/updateDual` 与 Zig 的 bound/status/reduced-cost 提交顺序
+    尚未完成字段同构，不能仅复制 breakpoint 排序。代码已恢复到 40/40 基线；下一步先做
+    双侧 CHUZC event trace，再按 CHUZC2、3、4 独立提交，禁止整段盲移植。
+- [ ] 移植 dual Phase-I fresh rebuild、remove perturbation、unperturbed optimality assessment、
+  re-entry cleanup levels、Phase-I objective 与 dual-infeasibility出口；`gams10am/gas11`
+  分别对照 HiGHS 1/485 Phase-I iterations，禁止用 primal fallback 隐藏失败。
+- [ ] 对齐 DSE exact initialization/recurrence/rejection、DSE->Devex budget/lifecycle；随后统一
+  scaling、cost perturbation、random sequence、tie-breaking 与 reinvert/reprice 时机。
+  当前 differential 已证明 scaling/DSE initialization 必须前移到 CHUZC 验收之前；执行顺序
+  改为 scaling -> initial exact DSE/CHUZR -> CHUZC -> DSE recurrence/lifecycle -> perturbation/
+  random/tie/reinvert，五项验收范围不变。
+- [ ] 最终门禁：presolve off、threads=1、serial、同 corpus/初始 basis；先 40 再 93 模型，
+  status/objective/residual/certificate 全通过，fallback/numerical failure 为 0。累计 committed
+  pivots 为主指标；不能逐模型相同时必须用首个 divergence trace 解释，不能以更快内核
+  wall time 掩盖算法迭代差距。完成这些以后才进入创新优化。
+
 #### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
 
 deepseek 提出"重构 `buildDualPhaseOneCosts` 为单位 cost ±1/0 -> 删除

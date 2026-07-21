@@ -180,11 +180,17 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
     };
     if (trace_enabled) if (engine.dual_phase_one_failure) |failure| {
-        const failure_line = try std.fmt.allocPrint(allocator, "dual_phase1_failure\t{d}\t{d}\t{s}\t{e:.6}\t{d}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        const failure_line = try std.fmt.allocPrint(allocator, "dual_phase1_failure\titeration={d}\tleaving_row={d}\tleaving_column={d}\tleaving_bound={s}\tviolation={e:.6}\tvalue={e:.17}\tworking_lower={e:.17}\tworking_upper={e:.17}\toriginal_lower={e:.17}\toriginal_upper={e:.17}\tep_nonzeros={d}\tep_max_abs={e:.6}\tsmall_tableau={d}\tbasic_or_fixed={d}\twrong_pivot_sign={d}\taccepted_bound_flips={d}\teligible_unselected={d}\n", .{
             failure.iteration,
             failure.leaving_row,
+            failure.leaving_column,
             @tagName(failure.leaving_bound),
             failure.violation,
+            failure.leaving_value,
+            failure.working_lower,
+            failure.working_upper,
+            failure.original_lower,
+            failure.original_upper,
             failure.ep_nonzeros,
             failure.ep_max_abs,
             failure.small_tableau,
@@ -201,9 +207,10 @@ pub fn main(init: std.process.Init) !void {
             try std.Io.File.stderr().writeStreamingAll(io_context, line);
         }
         for (dual_phase_one_candidates[0..engine.dual_phase_one_candidate_trace_count]) |event| {
-            const line = try std.fmt.allocPrint(allocator, "dual_phase1_candidate\t{d}\t{s}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{s}\n", .{
+            const line = try std.fmt.allocPrint(allocator, "dual_phase1_candidate\t{d}\t{s}\t{d}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{s}\n", .{
                 event.column,
                 @tagName(event.status),
+                event.explicit_move,
                 event.tableau,
                 event.direction,
                 event.signed_pivot,
@@ -277,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
     const line = try std.fmt.allocPrint(
         allocator,
         "zhighs\t{s}\t{s}\t{s}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{e:.6}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n",
-        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iterations, primal_residual, dual_residual, ray_residual, ray_objective, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.factorization.update_count, parsed_ns, solve_ns, total_ns },
+        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iteration_counters.committed_pivots, primal_residual, dual_residual, ray_residual, ray_objective, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.factorization.update_count, parsed_ns, solve_ns, total_ns },
     );
     defer allocator.free(line);
     try std.Io.File.stdout().writeStreamingAll(io_context, line);
@@ -353,6 +360,28 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, stats_line);
 
+    const iteration_counters = engine.iteration_counters;
+    const canonical_iterations_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tattempted_iterations={d}\tcommitted_pivots={d}\tbound_moves={d}\tshifted_dual_pivots={d}\tdual_phase1_pivots={d}\tdual_phase2_pivots={d}\tprimal_phase1_pivots={d}\tprimal_phase2_pivots={d}\tdual_repair_pivots={d}\tcleanup_pivots={d}\tclassified_pivots={d}\n",
+        .{
+            path,
+            iteration_counters.attempted_iterations,
+            iteration_counters.committed_pivots,
+            iteration_counters.bound_moves,
+            iteration_counters.shifted_dual_pivots,
+            iteration_counters.dual_phase_one_pivots,
+            iteration_counters.dual_phase_two_pivots,
+            iteration_counters.primal_phase_one_pivots,
+            iteration_counters.primal_phase_two_pivots,
+            iteration_counters.dual_repair_pivots,
+            iteration_counters.cleanup_pivots,
+            iteration_counters.classifiedPivots(),
+        },
+    );
+    defer allocator.free(canonical_iterations_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, canonical_iterations_line);
+
     const dual_snapshot_stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tdual_phase1_snapshot_retries={d}\n",
@@ -363,8 +392,15 @@ pub fn main(init: std.process.Init) !void {
 
     const infeasibility_certificate_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tinfeasibility_ray_valid={}\tinfeasibility_certificate_gap={e:.17}\n",
-        .{ path, engine.infeasibility_ray_valid, engine.infeasibility_certificate_gap },
+        "stats\t{s}\tinfeasibility_ray_valid={}\tinfeasibility_certificate_gap={e:.17}\tfailure={s}\tinfinite_row_mass={e:.17}\tinfinite_column_mass={e:.17}\n",
+        .{
+            path,
+            engine.infeasibility_ray_valid,
+            engine.infeasibility_certificate_gap,
+            @tagName(engine.infeasibility_certificate_failure),
+            engine.infeasibility_certificate_infinite_row_mass,
+            engine.infeasibility_certificate_infinite_column_mass,
+        },
     );
     defer allocator.free(infeasibility_certificate_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, infeasibility_certificate_line);
