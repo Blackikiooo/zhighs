@@ -168,6 +168,8 @@ pub const RatioTest = struct {
             // Direction is normally implied by the bound status; `nonbasic_move`
             // (dual Phase-I) can override it with an explicit sign.
             const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
+            if (status[column] == .basic) continue;
+            if (status[column] == .fixed and explicit_move == 0) continue;
             const direction: f64 = if (explicit_move != 0)
                 @floatFromInt(explicit_move)
             else switch (status[column]) {
@@ -177,7 +179,8 @@ pub const RatioTest = struct {
                     (if (alpha < 0.0) 1.0 else -1.0)
                 else
                     (if (alpha > 0.0) 1.0 else -1.0),
-                .basic, .fixed => continue,
+                .fixed => unreachable, // handled above
+                .basic => unreachable, // handled above
             };
             const signed_alpha = alpha * direction;
             const eligible = if (leaving_bound == .at_lower)
@@ -191,6 +194,7 @@ pub const RatioTest = struct {
                 .at_lower => @max(rc, 0.0) / @abs(alpha),
                 .at_upper => @max(-rc, 0.0) / @abs(alpha),
                 .free, .superbasic => @abs(rc) / @abs(alpha),
+                .fixed => if (explicit_move > 0) @max(rc, 0.0) / @abs(alpha) else @max(-rc, 0.0) / @abs(alpha),
                 else => unreachable,
             };
             ratio_work[column] = ratio;
