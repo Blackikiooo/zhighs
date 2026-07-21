@@ -214,11 +214,31 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     if (self.refactorizeBasis(problem, .cleanup) != .optimal) return .not_implemented;
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
-    const feasibility = self.classifyFeasibility(problem);
-    if (feasibility.dual) return self.solveDual(problem, control);
-    if (feasibility.primal) {
-        // The dual-phase edge-weight forcing policy must not leak into a
-        // primal Phase-II selected after restoring the original model.
+
+    // Count dual infeasibilities from the fresh reprice. Only a strict
+    // zero count permits Phase II; any residual infeasibility must be
+    // resolved by primal Phase I or reported as failure.
+    var dual_infeasible: usize = 0;
+    for (basis.reduced_cost[0..original_count], basis.col_status[0..original_count]) |reduced, status| {
+        const infeasible = switch (status) {
+            .at_lower => reduced < -self.numerical.dual_tolerance,
+            .at_upper => reduced > self.numerical.dual_tolerance,
+            .free, .superbasic => @abs(reduced) > self.numerical.dual_tolerance,
+            .basic, .fixed => false,
+        };
+        if (infeasible) dual_infeasible += 1;
+    }
+    if (dual_infeasible == 0) return self.solveDual(problem, control);
+
+    // Dual infeasibility remains: check primal feasibility as fallback.
+    var primal_feasible = true;
+    for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+        if (value < lower - self.numerical.primal_tolerance or value > upper + self.numerical.primal_tolerance) {
+            primal_feasible = false;
+            break;
+        }
+    }
+    if (primal_feasible) {
         self.pricing.rule = saved_pricing_rule;
         return self.solvePrimal(problem, control);
     }
