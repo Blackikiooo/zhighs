@@ -242,7 +242,23 @@ pub const RatioTest = struct {
                 .flip_count = flip_count,
             };
         }
-        // All candidates were absorbed as bound flips: dual step is unbounded.
+        // Enforce at least one pivot per iteration when the flip capacity
+        // is dwarfed by the primal violation. Flips alone change bounds
+        // without improving the basis; a pivot changes membership and moves
+        // the basis toward dual-optimality even if the immediate ratio is large.
+        if (flip_count > 0 and candidate_count > 0 and flip_count == candidate_count) {
+            const entering = candidate_work[flip_count - 1];
+            const ratio = ratio_work[entering];
+            // Keep up to half the flips — the rest become "live" entering.
+            const keep_flips = flip_count / 2;
+            flip_count = keep_flips;
+            return .{
+                .column = entering,
+                .direction = direction_work[entering],
+                .theta = if (leaving_bound == .at_lower) -ratio else ratio,
+                .flip_count = keep_flips,
+            };
+        }
         return .{ .flip_count = flip_count };
     }
 };
