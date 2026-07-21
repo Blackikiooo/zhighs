@@ -53,6 +53,9 @@ pub const FailureSite = enum {
     pivot_update,
     pivot_factorization,
     pivot_edge_weights,
+    ratio_test,
+    primal_step,
+    dual_feasibility,
     reduced_cost,
     optimality_check,
 };
@@ -370,6 +373,7 @@ pub const SimplexEngine = struct {
     reduced_cost_refresh_period: usize = 8,
     failure_site: FailureSite = .none,
     shifted_dual_exit: ShiftedDualExit = .none,
+    shifted_dual_failure_site: FailureSite = .none,
     stats: SimplexStats = .{},
     statistics_io: ?std.Io = null,
     cleanup_active: bool = false,
@@ -429,6 +433,7 @@ pub const SimplexEngine = struct {
         self.reduced_cost_update_count = 0;
         self.failure_site = .none;
         self.shifted_dual_exit = .none;
+        self.shifted_dual_failure_site = .none;
         self.unbounded_ray_valid = false;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();

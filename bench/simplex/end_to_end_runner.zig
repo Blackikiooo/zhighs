@@ -371,8 +371,8 @@ pub fn main(init: std.process.Init) !void {
 
     const shifted_dual_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tshifted_dual_exit={s}\tshifted_dual_iterations={d}\tshifted_cleanup_iterations={d}\n",
-        .{ path, @tagName(engine.shifted_dual_exit), simplex_stats.shifted_dual_iterations, simplex_stats.shifted_cleanup_iterations },
+        "stats\t{s}\tshifted_dual_exit={s}\tshifted_dual_failure_site={s}\tshifted_dual_iterations={d}\tshifted_cleanup_iterations={d}\n",
+        .{ path, @tagName(engine.shifted_dual_exit), @tagName(engine.shifted_dual_failure_site), simplex_stats.shifted_dual_iterations, simplex_stats.shifted_cleanup_iterations },
     );
     defer allocator.free(shifted_dual_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, shifted_dual_stats_line);

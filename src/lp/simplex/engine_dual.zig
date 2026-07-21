@@ -80,6 +80,7 @@ pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.Pro
     // CHUZC/cleanup exits set a more specific reason inside solveDualLoop;
     // this wrapper closes the remaining numerical/external-stop paths.
     if (self.shifted_dual_exit == .running) {
+        self.shifted_dual_failure_site = self.failure_site;
         self.shifted_dual_exit = switch (status) {
             .work_limit, .time_limit, .iteration_limit, .interrupted => .phase_two_stopped,
             else => .phase_two_numerical_failure,
@@ -110,14 +111,17 @@ fn solveDualLoop(
     }
     const shifted_iteration_started = self.iterations;
     var shifted_iterations_recorded = false;
+    var no_entering_recovery_used = false;
     defer if (use_work_costs and !shifted_iterations_recorded) {
         self.stats.shifted_dual_iterations += self.iterations -| shifted_iteration_started;
     };
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .phase_two)) |status| return status;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
-        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
+            self.failure_site = .pivot_edge_weights;
             return .numerical_failure;
+        }
         const leaving = self.pricing.chooseDualLeaving(self) orelse {
             if (!use_work_costs) return self.finishOptimal(problem);
             // Shifted costs are only a path to primal feasibility. Never
@@ -193,9 +197,29 @@ fn solveDualLoop(
             basis.flip_columns[0..original_cols],
         );
 
-        if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
+        if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) {
+            self.failure_site = .pivot_update;
+            return .numerical_failure;
+        }
         const entering_col = entering.column orelse {
-            if (use_work_costs) self.shifted_dual_exit = .phase_two_no_entering;
+            if (use_work_costs) {
+                if (!no_entering_recovery_used) {
+                    no_entering_recovery_used = true;
+                    if (self.refactorizeBasis(problem, .solve_residual) == .optimal and
+                        self.recomputeBasicValuesUnchecked(problem) == .optimal and
+                        self.recomputeReducedCostsFromWork(problem) == .optimal and
+                        self.classifyFeasibility(problem).dual)
+                    {
+                        continue;
+                    }
+                }
+                self.shifted_dual_exit = .phase_two_no_entering;
+                // Reuse the allocation-free candidate diagnostic for the
+                // shifted Phase-II row. Capturing it before Phase I starts is
+                // essential: otherwise the later fallback overwrites the
+                // actual cold-start CHUZC failure site.
+                self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_cols);
+            }
             return .infeasible;
         };
         const entering_index: usize = @intCast(entering_col);
@@ -206,12 +230,20 @@ fn solveDualLoop(
         const leaving_row: usize = @intCast(leaving.row);
         const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
         const pivot = basis.pivot_direction[leaving_row];
-        if (@abs(pivot) <= self.numerical.pivot_tolerance) return .numerical_failure;
-        const step = (basis.basic_value[leaving_row] - target) / pivot;
-        if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
-        const leaving_column = basis.basic_index[leaving_row];
-        if (self.updateReducedCostsAfterDualPivot(problem, entering_index, leaving.row) != .optimal)
+        if (@abs(pivot) <= self.numerical.pivot_tolerance) {
+            self.failure_site = .ratio_test;
             return .numerical_failure;
+        }
+        const step = (basis.basic_value[leaving_row] - target) / pivot;
+        if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) {
+            self.failure_site = .primal_step;
+            return .numerical_failure;
+        }
+        const leaving_column = basis.basic_index[leaving_row];
+        if (self.updateReducedCostsAfterDualPivot(problem, entering_index, leaving.row) != .optimal) {
+            self.failure_site = .reduced_cost;
+            return .numerical_failure;
+        }
         if (self.performPivot(
             problem,
             entering_index,
@@ -238,8 +270,14 @@ fn solveDualLoop(
                 self.recomputeReducedCostsFromWork(problem)
             else
                 self.recomputeReducedCostsWithDrift(problem);
-            if (refresh != .optimal) return .numerical_failure;
-            if (!self.classifyFeasibility(problem).dual) return .numerical_failure;
+            if (refresh != .optimal) {
+                self.failure_site = .reduced_cost;
+                return .numerical_failure;
+            }
+            if (!self.classifyFeasibility(problem).dual) {
+                self.failure_site = .dual_feasibility;
+                return .numerical_failure;
+            }
         }
     }
     return .iteration_limit;

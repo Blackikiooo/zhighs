@@ -156,8 +156,6 @@ pub const RatioTest = struct {
             primal.len < count or ratio_work.len < count or direction_work.len < count or candidate_work.len < count)
             return .{};
         if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
-        _ = primal_infeasibility; // consumed by BFRT threshold below
-
         // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
         for (0..count) |column| {
@@ -216,27 +214,10 @@ pub const RatioTest = struct {
             }
         }.lessThan);
 
-        // HiGHS-style multi-pass BFRT (Bound Flipping Ratio Test).
-        // Dual-feasible columns (tight <= 0) become flips in early passes;
-        // dual-infeasible columns (tight > 0) are only admitted as the
-        // threshold relaxes. This prevents all candidates from being
-        // consumed as flips when flip capacity << primal violation.
-        //
-        // tight = direction * reduced_cost:
-        //   dual-feasible → tight <= 0 → always qualifies for flip
-        //   dual-infeasible → tight > 0 → qualifies when threshold rises
-        //
-        // select_theta starts at 10*min_ratio+1e-7 and is multiplied by 10
-        // each pass, gradually admitting more candidates as flips until the
-        // accumulated capacity covers the primal violation or we run out of
-        // candidates.
-        // HiGHS-style BFRT: dual-feasible columns (tight <= 0) are flips;
-        // dual-infeasible columns (tight > 0) survive as entering if
-        // alpha * select_theta < tight. Start with a conservative threshold
-        // so the minimum-ratio column survives as entering.
         const min_ratio = @max(ratio_work[candidate_work[0]], 0.0);
         const select_theta = if (min_ratio > 0.0) min_ratio else 1e-7;
         var flip_count: usize = 0;
+        var accumulated_flip_capacity: f64 = 0.0;
 
         for (candidate_work[0..candidate_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
@@ -247,12 +228,18 @@ pub const RatioTest = struct {
                 (status[column] == .at_lower or status[column] == .at_upper);
 
             if (self.rule == .bound_flipping and boxed and alpha_abs * select_theta >= tight) {
-                // dual-feasible at this threshold → safe to flip
-                candidate_work[flip_count] = column_u32;
-                flip_count += 1;
-                continue;
+                const capacity = width * alpha_abs;
+                // BFRT may flip only breakpoints strictly before the group
+                // that covers the leaving violation. Flipping the covering
+                // column overshoots the target bound and makes the subsequent
+                // primal step negative.
+                if (accumulated_flip_capacity + capacity < primal_infeasibility) {
+                    candidate_work[flip_count] = column_u32;
+                    flip_count += 1;
+                    accumulated_flip_capacity += capacity;
+                    continue;
+                }
             }
-            // Survived: entering candidate
             const ratio = ratio_work[column];
             return .{
                 .column = column_u32,
@@ -261,7 +248,6 @@ pub const RatioTest = struct {
                 .flip_count = flip_count,
             };
         }
-        // Reserve at least one entering column: pivots improve the basis.
         if (flip_count > 0 and flip_count == candidate_count) {
             const entering = candidate_work[candidate_count - 1];
             const ratio = ratio_work[entering];
@@ -315,6 +301,29 @@ test "dual bound-flipping ratio test records boxed breakpoints" {
     );
     try std.testing.expectEqual(@as(usize, 1), choice.flip_count);
     try std.testing.expectEqual(@as(?u32, 1), choice.column);
+}
+
+test "dual BFRT keeps the violation-covering column as the pivot" {
+    const test_rule = RatioTest{ .rule = .bound_flipping, .tolerance = 1e-9 };
+    var ratios: [2]f64 = undefined;
+    var directions: [2]f64 = undefined;
+    var candidates: [2]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &[_]f64{ -1, -1 },
+        &[_]f64{ 0, 0 },
+        &[_]basis.BasisStatus{ .at_lower, .at_lower },
+        &.{},
+        &[_]f64{ 0, 0 },
+        &[_]f64{ 3, 3 },
+        &[_]f64{ 0, 0 },
+        .at_lower,
+        2,
+        &ratios,
+        &directions,
+        &candidates,
+    );
+    try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
+    try std.testing.expectEqual(@as(?u32, 0), choice.column);
 }
 
 test "dual ratio ties use the lowest column index" {

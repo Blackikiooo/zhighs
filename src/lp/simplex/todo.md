@@ -833,6 +833,39 @@ A0b 修复后 gate 与公平 A/B（2026-07-21）：
   corpus 或宣称 dual simplex 全面超过 HiGHS。原始样本为
   `/tmp/brandy-a0b-fair-threads1-11.tsv`。
 
+A1 CHUZC/BFRT 增量实验（2026-07-21，进行中）：
+
+- [x] 为 shifted Phase-II no-entering 增加 allocation-free 首个失败行快照，并把
+  `shifted_dual_failure_site` 细分到 ratio test、primal step、reduced cost、dual
+  feasibility 等阶段。6 个旧 no-entering 模型的共同事实是最终 CHUZC candidate=0；
+  `bore3d` 失败行的 498 个 small tableau 项最大仅 `2.44e-14`，因此降低固定
+  `1e-9` alpha tolerance 不是修复方向。其余 5 个模型本身为 infeasible，不能要求
+  shifted Phase II 强行找到 pivot。
+- [x] **拒绝并回退**首版整段 CHUZC3/4 重写：该版在第 7 个 shifted pivot 后普遍
+  丢失 dual feasibility，并使 `brandy` 从 0 fallback 回退到 1。根因是没有逐步锁定
+  HiGHS 的 workRange/move/dual update 语义便直接替换 breakpoint 分组。代码已完全
+  撤销，`brandy` 恢复 415 iterations / 0 fallback；原始 rejected A/B 保存在
+  `/tmp/a1-chuzc34-targeted.tsv`，禁止重引该实现。
+- [x] 保留更小且可证明的 BFRT 容量不变量：累计 boxed `width*abs(alpha)` 严格小于
+  leaving violation 时才允许 flip；第一个达到或越过 violation 的列必须保留为 pivot。
+  同时 no-entering 只允许一次 fresh factor/basic-value/work-cost reprice 后重试。新增单元
+  测试锁定“covering column 不得被翻转”。定点结果：`bore3d 337 -> 262` iterations、
+  fallback `1 -> 0`；`ex72a` full fallback `1 -> 0`；`box1` dual Phase-I
+  `254 -> 213` iterations；`brandy` 保持 415 iterations / 0 fallback。
+- [x] 上述容量 guard + 单次 fresh no-entering recovery 已通过 forced-dual
+  **40/40 correctness gate**；fallback 从 A0b 的 18 降至 **13**，no-fallback
+  从 22/40 提升到 **27/40**。新增成功路径包括 `bore3d`、`ex72a`、`finnis`、
+  `recipe`、`seba`、`shell`；`seba` 由 704 降至 439 iterations，`shell` 由
+  1273 降至 689。当前 13 个 fallback 为 `bgetam,box1,capri,etamacro,forest6,
+  galenet,gams10am,gas11,klein1,refinery,scfxm1,vtp-base,woodinfe`。原始路径统计在
+  `/tmp/zhighs-dual-a1-capacity-40-paths.tsv`。
+- [ ] **明确保留异常，不粉饰净收益**：`woodinfe` 是唯一新增 fallback，旧路径约
+  38 iterations / 0 fallback，新路径约 44--47 iterations / 1 fallback。原因已隔离为
+  capacity-guard 后 shifted basis 改变，使随后的 3-step dual Phase I 无 entering；
+  单纯取消 fresh retry仍无法恢复。下一 A1 子项必须建立 fresh no-entering Farkas
+  certificate 或事务性 basis snapshot/restore，消除该回退；在此之前不得表述为
+  “无模型回退”。
+
 #### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
 
 deepseek 提出"重构 `buildDualPhaseOneCosts` 为单位 cost ±1/0 -> 删除
