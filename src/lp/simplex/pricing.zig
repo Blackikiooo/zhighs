@@ -276,9 +276,78 @@ pub const Pricing = struct {
         return best;
     }
 
+    /// Bland dual pricing fallback: selects the eligible basic variable with
+    /// the smallest basic index. Guarantees deterministic termination during
+    /// anti-cycling.
+    fn chooseDualLeavingBland(
+        self: *Pricing,
+        basic_value: []const f64,
+        basic_lower: []const f64,
+        basic_upper: []const f64,
+        basic_index: []const u32,
+        primal_tolerance: f64,
+    ) ?DualLeavingChoice {
+        _ = self;
+        var best: ?DualLeavingChoice = null;
+        var best_basic_column: u32 = std.math.maxInt(u32);
+        for (basic_value, basic_lower, basic_upper, basic_index, 0..) |value, lower, upper, basic_col, row| {
+            const choice: ?DualLeavingChoice = if (value < lower - primal_tolerance)
+                .{ .row = @intCast(row), .bound = .at_lower, .violation = lower - value }
+            else if (value > upper + primal_tolerance)
+                .{ .row = @intCast(row), .bound = .at_upper, .violation = value - upper }
+            else
+                null;
+            if (choice) |candidate| {
+                if (basic_col < best_basic_column) {
+                    best_basic_column = basic_col;
+                    best = candidate;
+                }
+            }
+        }
+        return best;
+    }
+
+    /// Unified dual leaving-row dispatch. Routes to Bland, weighted, or
+    /// hyper-sparse candidate selection based on engine state and the
+    /// active pricing rule.
+    pub fn chooseDualLeaving(self: *Pricing, engine: anytype) ?DualLeavingChoice {
+        const pricing_started = engine.statisticsTimestamp();
+        defer engine.recordRowPricingElapsed(pricing_started);
+        const bs = if (engine.basis) |*value| value else return null;
+        if (self.rule == .hyper_sparse and engine.dual_hyper_sparse_active) {
+            engine.stats.hyper_pricing_dispatches += 1;
+        } else {
+            engine.stats.dense_pricing_dispatches += 1;
+        }
+        if (engine.numerical.anti_cycling_active) {
+            return self.chooseDualLeavingBland(
+                bs.basic_value,
+                bs.basic_lower,
+                bs.basic_upper,
+                bs.basic_index,
+                engine.numerical.primal_tolerance,
+            );
+        }
+        if (self.rule != .hyper_sparse or !engine.dual_hyper_sparse_active) {
+            return self.chooseDualLeavingWeighted(
+                bs.basic_value,
+                bs.basic_lower,
+                bs.basic_upper,
+                bs.row_edge_weight,
+                engine.numerical.primal_tolerance,
+            );
+        }
+        var best = engine.bestDualCandidate();
+        if (best == null or engine.dualCandidateScore(best.?.row) + engine.numerical.primal_tolerance < engine.dual_candidate_cutoff) {
+            engine.rebuildDualCandidateList();
+            best = engine.bestDualCandidate();
+        }
+        return best;
+    }
+
     /// Dantzig-style dual pricing over the dense basic-value SoA. The most
     /// primal-infeasible row leaves; no temporary candidate objects are built.
-    pub fn chooseDualLeaving(self: *Pricing, value: []const f64, lower: []const f64, upper: []const f64, tolerance: f64) ?DualLeavingChoice {
+    pub fn chooseDualLeavingDantzig(self: *Pricing, value: []const f64, lower: []const f64, upper: []const f64, tolerance: f64) ?DualLeavingChoice {
         return self.chooseDualLeavingWeighted(value, lower, upper, &.{}, tolerance);
     }
 
