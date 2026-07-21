@@ -353,6 +353,14 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, stats_line);
 
+    const dual_snapshot_stats_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tdual_phase1_snapshot_retries={d}\n",
+        .{ path, simplex_stats.dual_phase_one_snapshot_retries },
+    );
+    defer allocator.free(dual_snapshot_stats_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, dual_snapshot_stats_line);
+
     const bound_flip_stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tbound_flip_batches={d}\tbound_flip_ftran_savings={d}\n",

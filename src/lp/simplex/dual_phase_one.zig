@@ -19,6 +19,13 @@ pub const DualPhaseOneWorkspace = struct {
     nonbasic_move: []i8 = &.{},
     /// Residual basic-bound violation after the current ratio-test flip set.
     remaining_violation: []f64 = &.{},
+    /// Reusable transactional checkpoint for the basis entering the shifted
+    /// cold-dual path. Status is one contiguous SoA block; the basis head is
+    /// dense. These buffers grow with the existing workspace and never
+    /// allocate on a steady-state solve.
+    checkpoint_status: []basis_module.BasisStatus = &.{},
+    checkpoint_basic_index: []u32 = &.{},
+    checkpoint_valid: bool = false,
     basis_epoch: u64 = 0,
     /// Basic-coordinate envelope in the engine's scaled coordinates when the
     /// current Phase-I epoch was installed.
@@ -37,6 +44,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.perturbation);
         self.allocator.free(self.nonbasic_move);
         self.allocator.free(self.remaining_violation);
+        self.allocator.free(self.checkpoint_status);
+        self.allocator.free(self.checkpoint_basic_index);
         self.* = .{ .allocator = self.allocator };
     }
 
@@ -58,6 +67,10 @@ pub const DualPhaseOneWorkspace = struct {
         errdefer self.allocator.free(move);
         const remaining = try self.allocator.alloc(f64, count);
         errdefer self.allocator.free(remaining);
+        const checkpoint_status = try self.allocator.alloc(basis_module.BasisStatus, count);
+        errdefer self.allocator.free(checkpoint_status);
+        const checkpoint_basic_index = try self.allocator.alloc(u32, count);
+        errdefer self.allocator.free(checkpoint_basic_index);
 
         self.allocator.free(self.saved_lower);
         self.allocator.free(self.saved_upper);
@@ -66,6 +79,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.perturbation);
         self.allocator.free(self.nonbasic_move);
         self.allocator.free(self.remaining_violation);
+        self.allocator.free(self.checkpoint_status);
+        self.allocator.free(self.checkpoint_basic_index);
         self.saved_lower = lower;
         self.saved_upper = upper;
         self.work_cost = cost;
@@ -73,6 +88,22 @@ pub const DualPhaseOneWorkspace = struct {
         self.perturbation = perturbation;
         self.nonbasic_move = move;
         self.remaining_violation = remaining;
+        self.checkpoint_status = checkpoint_status;
+        self.checkpoint_basic_index = checkpoint_basic_index;
+        self.checkpoint_valid = false;
+    }
+
+    pub fn captureBasisCheckpoint(
+        self: *DualPhaseOneWorkspace,
+        basis: *const basis_module.BasisState,
+        original_count: usize,
+        num_rows: usize,
+    ) !void {
+        try self.ensureCapacity(original_count);
+        if (num_rows > self.checkpoint_basic_index.len) return error.OutOfMemory;
+        @memcpy(self.checkpoint_status[0..original_count], basis.col_status[0..original_count]);
+        @memcpy(self.checkpoint_basic_index[0..num_rows], basis.basic_index[0..num_rows]);
+        self.checkpoint_valid = true;
     }
 
     pub fn begin(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, original_count: usize) !void {
@@ -311,7 +342,9 @@ pub const DualPhaseOneWorkspace = struct {
             std.mem.sliceAsBytes(self.dual_infeasibility).len +
             std.mem.sliceAsBytes(self.perturbation).len +
             std.mem.sliceAsBytes(self.nonbasic_move).len +
-            std.mem.sliceAsBytes(self.remaining_violation).len;
+            std.mem.sliceAsBytes(self.remaining_violation).len +
+            std.mem.sliceAsBytes(self.checkpoint_status).len +
+            std.mem.sliceAsBytes(self.checkpoint_basic_index).len;
     }
 };
 

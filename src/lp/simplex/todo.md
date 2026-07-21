@@ -859,12 +859,41 @@ A1 CHUZC/BFRT 增量实验（2026-07-21，进行中）：
   1273 降至 689。当前 13 个 fallback 为 `bgetam,box1,capri,etamacro,forest6,
   galenet,gams10am,gas11,klein1,refinery,scfxm1,vtp-base,woodinfe`。原始路径统计在
   `/tmp/zhighs-dual-a1-capacity-40-paths.tsv`。
-- [ ] **明确保留异常，不粉饰净收益**：`woodinfe` 是唯一新增 fallback，旧路径约
+- [x] **明确保留异常，不粉饰净收益**：`woodinfe` 是唯一新增 fallback，旧路径约
   38 iterations / 0 fallback，新路径约 44--47 iterations / 1 fallback。原因已隔离为
   capacity-guard 后 shifted basis 改变，使随后的 3-step dual Phase I 无 entering；
   单纯取消 fresh retry仍无法恢复。下一 A1 子项必须建立 fresh no-entering Farkas
-  certificate 或事务性 basis snapshot/restore，消除该回退；在此之前不得表述为
-  “无模型回退”。
+  certificate 或事务性 basis snapshot/restore，消除该回退。下方 transactional
+  checkpoint 已使 fallback 重新归零，但 iterations 增至 82，性能代价继续保留。
+
+A1 transactional checkpoint 收尾（2026-07-21）：
+
+- [x] 实现进入 shifted cold-dual 前的事务性 basis checkpoint。checkpoint 使用
+  `DualPhaseOneWorkspace` 内持久 SoA：一块连续 `BasisStatus` 和一块 dense
+  `basic_index`，随 workspace 只扩容不缩容；稳定 solve 不做临时 snapshot allocation。
+  第一次 shifted + dual Phase I 均失败后，恢复 checkpoint、fresh factor/basic-value/
+  original-cost reprice，再允许一次 dual Phase-I retry；失败仍进入既有 primal fallback。
+- [x] 增加 `dual_phase_one_snapshot_retries` 独立 stats 行。`woodinfe` retry 后
+  fallback `1 -> 0`，但总 iterations 从旧 38、A1 异常路径 44--47 增至 **82**；
+  这是以更多纯 dual 工作换掉 primal fallback，并非无成本修复。`box1` 同时从
+  fallback 1 降至 0，最终 246 iterations。`brandy` 415、`bore3d` 262 均不触发 retry，
+  已领先路径保持不变。
+- [x] forced-dual 40-model correctness gate 再次 **40/40 PASS**；fallback **13 -> 11**，
+  no-fallback **27/40 -> 29/40**。13 个模型触发 snapshot retry，只有 `box1`、
+  `woodinfe` 成功（2/13）；其余 11 个仍 fallback：`bgetam,capri,etamacro,forest6,
+  galenet,gams10am,gas11,klein1,refinery,scfxm1,vtp-base`。失败模型的额外 retry
+  通常只造成小幅 solve-time 开销，但成功率低，禁止增加第二轮或无界 retry。
+  原始路径统计：`/tmp/zhighs-dual-a1-snapshot-40-paths.tsv`。
+- [ ] 下一执行项：对 11 个 retry 失败模型按 `setup_free_infeasibility`、
+  `phase_two_no_entering`、`cleanup_neither_feasible`、numerical failure 分组；优先为 fresh
+  no-entering 构造并验证原坐标 Farkas certificate，使真实 infeasible 模型无需重复
+  Phase I。之后才继续 HiGHS CHUZC3/4 单步 differential。
+  **分组已完成**：`phase_two_no_entering=5`（`bgetam,forest6,galenet,klein1,
+  refinery`，均为真实 infeasible）；`setup_free_infeasibility=4`（`capri,gams10am,
+  gas11,vtp-base`）；`cleanup_neither_feasible=2`（`etamacro,scfxm1`）；当前无
+  numerical-failure fallback。下一实现边界明确为前 5 个 fresh no-entering 的原坐标
+  Farkas ray 存储、residual/sign 验证与 runner gate；证书设施未完成前仍不得直接从
+  shifted objective 发布 infeasible。
 
 #### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
 

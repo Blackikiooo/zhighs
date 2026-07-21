@@ -225,6 +225,7 @@ pub const SimplexStats = struct {
     phase_one_iterations: usize = 0,
     dual_phase_one_iterations: usize = 0,
     dual_phase_one_fallbacks: usize = 0,
+    dual_phase_one_snapshot_retries: usize = 0,
     shifted_dual_iterations: usize = 0,
     shifted_cleanup_iterations: usize = 0,
     crash_attempts: usize = 0,
@@ -552,6 +553,12 @@ pub const SimplexEngine = struct {
         if (phase_one_strategy == .dual) {
             const numerical_before_dual_phase_one = if (crash_installed) logical_numerical_state else self.numerical;
             const pricing_before_dual_phase_one = if (crash_installed) logical_pricing_state else self.pricing;
+            const checkpoint_basis = if (self.basis) |*basis| basis else return .numerical_failure;
+            self.dual_phase_one.captureBasisCheckpoint(
+                checkpoint_basis,
+                problem.num_cols + problem.num_rows,
+                problem.num_rows,
+            ) catch return .numerical_failure;
             const shifted_dual_status = self.solveDualWithCostShifts(problem, control);
             // A shifted-cost CHUZC failure is not an original-model primal
             // infeasibility certificate. Only proven optimality and external
@@ -564,6 +571,29 @@ pub const SimplexEngine = struct {
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
             if (dual_phase_one_status != .not_implemented and dual_phase_one_status != .numerical_failure)
                 return dual_phase_one_status;
+            // The capacity-guarded shifted path may reach a different basis
+            // from the pre-A1 path. If its Phase I fails, restore the exact
+            // pre-shift basis transactionally and give the original dual
+            // Phase I one bounded retry before the primal cold fallback.
+            if (self.dual_phase_one.checkpoint_valid) retry: {
+                self.numerical = numerical_before_dual_phase_one;
+                self.pricing = pricing_before_dual_phase_one;
+                self.failure_site = .none;
+                self.direction_requires_reinversion = false;
+                self.reduced_cost_update_count = 0;
+                self.dual_edge_weights_valid = true;
+                const checkpoint_view = basis_snapshot_module.BasisView{
+                    .structural_status = self.dual_phase_one.checkpoint_status[0..problem.num_cols],
+                    .logical_status = self.dual_phase_one.checkpoint_status[problem.num_cols..][0..problem.num_rows],
+                    .basic_index = self.dual_phase_one.checkpoint_basic_index[0..problem.num_rows],
+                };
+                self.importBasis(problem, checkpoint_view) catch break :retry;
+                if (self.recomputeReducedCosts(problem) != .optimal) break :retry;
+                self.stats.dual_phase_one_snapshot_retries += 1;
+                const retry_status = self.solveDualPhaseOne(problem, control);
+                if (retry_status != .not_implemented and retry_status != .numerical_failure)
+                    return retry_status;
+            }
             if (crash_installed) self.stats.crash_fallbacks += 1;
             self.stats.dual_phase_one_fallbacks += 1;
             // A failed explicit experiment falls back to the frozen logical
