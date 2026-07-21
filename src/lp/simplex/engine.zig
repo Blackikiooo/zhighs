@@ -56,6 +56,22 @@ pub const FailureSite = enum {
     reduced_cost,
     optimality_check,
 };
+
+pub const ShiftedDualExit = enum {
+    none,
+    running,
+    setup_free_infeasibility,
+    setup_not_dual_feasible,
+    phase_two_no_entering,
+    phase_two_numerical_failure,
+    phase_two_stopped,
+    original_dual_feasible,
+    original_dual_phase_two_optimal,
+    original_dual_phase_two_failed,
+    cleanup_primal_optimal,
+    cleanup_primal_failed,
+    cleanup_neither_feasible,
+};
 pub const PivotTraceEvent = struct {
     phase: SolvePhase,
     iteration: usize,
@@ -206,6 +222,8 @@ pub const SimplexStats = struct {
     phase_one_iterations: usize = 0,
     dual_phase_one_iterations: usize = 0,
     dual_phase_one_fallbacks: usize = 0,
+    shifted_dual_iterations: usize = 0,
+    shifted_cleanup_iterations: usize = 0,
     crash_attempts: usize = 0,
     crash_fallbacks: usize = 0,
     crash_planned_columns: usize = 0,
@@ -351,6 +369,7 @@ pub const SimplexEngine = struct {
     reduced_cost_update_count: usize = 0,
     reduced_cost_refresh_period: usize = 8,
     failure_site: FailureSite = .none,
+    shifted_dual_exit: ShiftedDualExit = .none,
     stats: SimplexStats = .{},
     statistics_io: ?std.Io = null,
     cleanup_active: bool = false,
@@ -409,6 +428,7 @@ pub const SimplexEngine = struct {
         self.fresh_factorization_pivots_remaining = 0;
         self.reduced_cost_update_count = 0;
         self.failure_site = .none;
+        self.shifted_dual_exit = .none;
         self.unbounded_ray_valid = false;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
@@ -527,6 +547,15 @@ pub const SimplexEngine = struct {
         if (phase_one_strategy == .dual) {
             const numerical_before_dual_phase_one = if (crash_installed) logical_numerical_state else self.numerical;
             const pricing_before_dual_phase_one = if (crash_installed) logical_pricing_state else self.pricing;
+            const shifted_dual_status = self.solveDualWithCostShifts(problem, control);
+            // A shifted-cost CHUZC failure is not an original-model primal
+            // infeasibility certificate. Only proven optimality and external
+            // stop limits may escape this experimental path; all algorithmic
+            // failures continue through Phase I / the frozen primal fallback.
+            switch (shifted_dual_status) {
+                .optimal, .work_limit, .time_limit, .iteration_limit, .interrupted => return shifted_dual_status,
+                .infeasible, .unbounded, .not_implemented, .numerical_failure => {},
+            }
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
             if (dual_phase_one_status != .not_implemented and dual_phase_one_status != .numerical_failure)
                 return dual_phase_one_status;
@@ -724,6 +753,7 @@ pub const SimplexEngine = struct {
     pub const updateDualDevexWeights = @import("engine_dual_edge_weight.zig").updateDualDevexWeights;
 
     pub const solveDual = @import("engine_dual.zig").solveDual;
+    pub const solveDualWithCostShifts = @import("engine_dual.zig").solveDualWithCostShifts;
     pub const solveDualPhaseOne = @import("engine_dual.zig").solveDualPhaseOne;
     pub const recordDualPhaseOneNoEntering = @import("engine_dual.zig").recordDualPhaseOneNoEntering;
     pub const buildDualPhaseOneCosts = @import("engine_dual.zig").buildDualPhaseOneCosts;
@@ -743,7 +773,6 @@ pub const SimplexEngine = struct {
     pub const boundFlipResidualAcceptable = @import("engine_dual.zig").boundFlipResidualAcceptable;
     pub const accumulateBoundFlipRhs = @import("engine_dual.zig").accumulateBoundFlipRhs;
     pub const updateReducedCostsAfterDualPivot = @import("engine_dual.zig").updateReducedCostsAfterDualPivot;
-
 };
 
 test {

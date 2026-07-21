@@ -170,7 +170,7 @@ pub const RatioTest = struct {
             // (dual Phase-I) can override it with an explicit sign.
             const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
             if (status[column] == .basic) continue;
-            if (status[column] == .fixed and explicit_move == 0) continue;
+            if (status[column] == .fixed) continue;
             // nonbasic_move provides an explicit direction override for
             // dual Phase I. When explicit_move == 0 the column uses its
             // standard status-derived direction even when a nonbasic_move
@@ -199,7 +199,7 @@ pub const RatioTest = struct {
                 .at_lower => @max(rc, 0.0) / @abs(alpha),
                 .at_upper => @max(-rc, 0.0) / @abs(alpha),
                 .free, .superbasic => @abs(rc) / @abs(alpha),
-                .fixed => if (explicit_move > 0) @max(rc, 0.0) / @abs(alpha) else @max(-rc, 0.0) / @abs(alpha),
+                .fixed => unreachable,
                 else => unreachable,
             };
             ratio_work[column] = ratio;
@@ -242,11 +242,9 @@ pub const RatioTest = struct {
             const column: usize = @intCast(column_u32);
             const alpha_abs = @abs(tableau[column]);
             const tight = direction_work[column] * reduced_cost[column];
-            const explicit_move = if (nonbasic_move.len == 0) @as(i8, 0) else nonbasic_move[column];
             const width = upper[column] - lower[column];
-            const boxed = (std.math.isFinite(width) and width > self.tolerance and
-                (status[column] == .at_lower or status[column] == .at_upper)) or
-                (status[column] == .fixed and explicit_move != 0);
+            const boxed = std.math.isFinite(width) and width > self.tolerance and
+                (status[column] == .at_lower or status[column] == .at_upper);
 
             if (self.rule == .bound_flipping and boxed and alpha_abs * select_theta >= tight) {
                 // dual-feasible at this threshold → safe to flip

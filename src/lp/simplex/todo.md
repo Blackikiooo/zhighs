@@ -682,6 +682,157 @@ bound flip）已在第 6.3 节完成。
   以 93 模型 Stage 7 验收
 - [ ] **目标**：dual simplex 全面超越 HiGHS dual 在 presolve-off 配置下的表现
 
+#### Phase A 路线审计与纠偏（2026-07-21，Codex）
+
+结论：2026-07-21 的近期提交不能沿原方向继续堆补丁。forced-dual 在 `afiro`、
+`brandy`、`scsd1` 上均为 `dual_phase1_fallbacks=1`，最终结果主要由 primal fallback
+完成，不能作为 dual simplex 已可用的证据。对照 pinned HiGHS
+`de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d` 的 `HEkkDual.cpp`、`HEkk.cpp` 和
+`HEkkDualRow.cpp` 后确认：
+
+- `c0284bf` 所称“Phase II 保留 Phase-I working bounds”错误。HiGHS 在
+  `solvePhase1()` 转入 Phase II 前明确执行
+  `initialiseBound(kDual, kSolvePhase2)` 和 `initialiseNonbasicValueAndMove()`，即恢复
+  原 LP bounds/value/move。现已恢复该不变量，禁止在特殊 `[0,1]`/`[-1,0]`/
+  `[0,0]` bounds 上发布原问题 optimal。
+- boxed/fixed 在 Phase I 被折叠到 `[0,0]` 后 move 必须为 0，不参加 CHUZC/BFRT。
+  近期代码用保存的原方向让 fixed 零宽列成为 flip/pivot 候选，是在错误层补偿冷启动
+  缺陷；现已删除。boxed 的可消除 dual infeasibility 在安装 Phase-I bounds 之前翻边。
+- 当前 BFRT 不是 HiGHS BFRT：只用一次 `select_theta=min_ratio`，没有
+  `10*workTheta+1e-7` 的 large-step 多轮扩张、累计 `range*alpha` 覆盖 leaving
+  violation、small-step breakpoint 分组和最终组 large-alpha 选择。“强制留下最后一列
+  pivot”没有等价数学依据，必须由真实 CHUZC4 替换。
+- 更关键的缺口是 cold dual Phase-II 起点。HiGHS 先对 fixed/boxed 做 bound flip，
+  对其余非 free dual infeasibility 做 cost shift/perturbation，只把不可消除部分交给
+  dual Phase I；当前实现把普遍冷启动问题全部交给 Phase I。`brandy` 纠偏后的首个失败
+  为 iteration 4、leaving row 4、upper violation 124.5、无合法 entering，随后回退；
+  这不是继续调阈值能修好的问题。
+
+本次已完成且必须保留的安全修复：
+
+- [x] Phase I 退出后先恢复 original bounds，fresh refactor/reprice，再决定 dual Phase II、
+  primal cleanup 或 fallback；删除 `dual_obj == 0.0` 作为唯一阶段出口。
+- [x] collapsed boxed/fixed 的 Phase-I move 归零，禁止零宽 flip；增加进入 Phase I 前的
+  boxed dual-infeasibility 翻边位置。
+- [x] `zig build test -Doptimize=ReleaseFast` 全部通过；`afiro`/`brandy`/`scsd1`
+  objective 与 residual 仍通过，但三者仍 fallback，明确记为“未达到 dual gate”。
+
+后续唯一执行顺序（不得跳到 DSE/候选缓存微优化）：
+
+1. **A0：cold-start dual feasibility（P0）**
+   - 将 perturbed/shifted cost 生命周期从 `DualPhaseOneWorkspace` 中拆出为明确的
+     dual solve work-cost epoch；保存 original scaled costs 和每列 shift。
+   - fresh reprice 后：fixed/boxed 先 flip；one-sided 非 free 列按 reduced-cost 符号
+     shift 到 `1--2 * dual_tolerance` 的可行侧；free infeasibility 才进入 Phase I。
+   - 增加 work-cost 版本的 exact reprice/drift refresh。Phase II 全程必须使用同一 work
+     costs；疑似 optimal 时恢复 original costs，fresh refactor/reprice 后做 cleanup，禁止
+     `finishOptimal` 在 shifted objective 上直接返回。
+   - 第一门槛：`afiro`、`brandy`、`scsd1` 的 `dual_phase1_fallbacks=0`，状态/目标/
+     primal+dual residual 与 HiGHS 一致；再进入 40-model gate。
+2. **A1：逐段移植 CHUZC/BFRT（P0）**
+   - `choosePossible` 使用 signed move-out/move-in、动态 alpha tolerance 和 relaxed
+     workTheta；large-step 按累计 `range*alpha` 多轮扩张。
+   - small-step 对 breakpoints 分组，选择 first covering group，再在最终组选择最大稳定
+     alpha；只翻转最终组之前的 boxed columns。删除“最后一列强制 pivot”。
+   - 每个 pivot 校验 flip 后 leaving violation、pivot sign、theta 和 fresh reduced-cost
+     dual feasibility；建立与 HiGHS 单步 trace 的前 50 pivot differential。
+3. **A2：Phase I cleanup levels（P0）**
+   - 只处理 free/unavoidable infeasibility；实现 fresh rebuild 后 objective/tolerance 评估、
+     remove perturbation、受限 re-perturb 和 cleanup-level 上限，防止 Phase-I/II 循环。
+   - 禁止用 primal fallback 隐藏 dual failure；forcing gate 中 fallback 非零即失败。
+4. **A3：DSE/Devex 与性能（正确性 gate 后）**
+   - 先精确 DSE recurrence differential，再 A/B DSE→Devex budget；不得用固定 64 次作为
+     无数据默认值。随后才做 hyper-sparse candidate list、partial CHUZR/CHUZC 和 perf/
+     反汇编优化。
+5. **A4：公平验收**
+   - presolve off、serial、同一 scaling/tolerance、同一 pinned corpus/HiGHS commit；先
+     40 模型 status/objective/residual/certificate，后 93 模型。
+   - 性能使用交替进程顺序、2 warmup + 至少 7 measured、median/MAD/p95；分别报告
+     iterations 与 ns/iteration。任何 timeout、fallback、numerical failure 和 >10% 高侧
+     奇异值均保留，不删除样本。终止门槛是 93/93 正确、0 fallback/num-fail，并在
+   common-optimal 上 median solve time 与 p95 都不慢于 HiGHS；达到前不得启用 automatic。
+
+A0 首轮实验（2026-07-21）：已实现独立 work-cost epoch、boxed pre-flip、one-sided
+tolerance-bounded shift、work-cost exact refresh，以及恢复原目标前的 fresh cleanup。全量
+ReleaseFast 单元测试通过。单次诊断结果：
+
+- `afiro`：0 Phase-I/full-cold-fallback，20 iterations，约 0.19 ms solve；其中至少
+  9 次为 shifted-dual update，之后存在 original-cost cleanup，不能表述为纯 dual；目标与
+  residual 通过。
+- `scsd1`：0 Phase-I/fallback，138 iterations，约 4.4--4.6 ms solve；目标与 residual
+  通过。旧 forced-dual 实际 fallback 后为 1289 iterations / 25--27 ms；同机 HiGHS
+  参考为 86 iterations / 6.14 ms。该单模型 wall time 已领先，但迭代数仍落后，不外推。
+- `brandy`：shifted dual 完成 402 次 reduced-cost updates 后 cleanup 仍失败，继而进入
+  2 次 dual Phase-I 并 full fallback；最终旧 primal 为 3384 iterations，总时间
+  约 78--88 ms，明显差于 HiGHS 304 iterations / 21.7 ms。fresh cleanup reinvert 未改变
+  此异常，故拒绝该实验作为默认路径。
+
+以上为单次诊断，不是稳定性能结论；没有离群值筛除。下一步必须先给 shifted-dual cleanup
+增加明确 exit reason，并修复 `brandy` fallback；在此之前不得进行 DSE budget 调参。
+
+A0 cleanup 状态机修复（2026-07-21）：已增加 `ShiftedDualExit`，并分别统计
+`shifted_dual_iterations` 与 `shifted_cleanup_iterations`。诊断确认 `brandy` 并非
+shifted dual 求解失败：work-cost 问题在 402 iterations 后恢复原始 costs，fresh reprice
+得到 original dual feasible，但 primal 仍 infeasible。旧代码错误地尝试
+`finishOptimal`，失败后把一个合法的 dual Phase-II 起点丢弃并执行 full cold fallback。
+现已改为以下严格状态转换：
+
+- original primal+dual feasible 才直接 `finishOptimal`；
+- original dual feasible、primal infeasible 时，从当前 basis 继续 original-cost dual
+  Phase II；只有该阶段失败才允许进入后续安全 fallback；
+- shifted objective 上仍禁止发布 original-model optimal/infeasible。
+
+修复后 `brandy` 连续 5 次 ReleaseFast 结果完全一致：objective
+`1518.5098964881322`，415 iterations（402 shifted + 13 original-cost dual cleanup），
+primal residual `1.255e-12`，dual residual `8.234e-13`，0 dual Phase I、0 full fallback，
+exit reason 为 `original_dual_phase_two_optimal`。solve time 为约 12.92--13.27 ms，
+跨度约 2.7%，这 5 个 discovery 样本没有 >10% 高侧奇异值。旧错误路径为 3384
+iterations / 约 60--88 ms。该结果先证明 fallback 根因已闭环；与 HiGHS 的正式性能
+结论必须等待下方固定 CPU、交替顺序的多轮 A/B，不能用旧单次参考直接宣称领先。
+
+40-model A0 correctness sweep：首次运行有 39/40 匹配，`bore3d` 被 shifted-cost
+CHUZC 无 entering 误报为 original-model infeasible。由于没有 primal-infeasibility
+certificate，该终态已改为安全 fallback；重跑后 forced-dual **40/40 PASS**。未强制 dual 的
+原默认路径随后也重跑 **40/40 PASS**，因此本实验没有破坏既有 correctness gate。
+
+forced-dual 的统计基线为 21/40 未进入 full cold fallback、19/40 仍 fallback；“未 full
+fallback”可能包含 original-cost primal cleanup，不能称为 pure-dual success。单次 discovery
+sweep 的 solve-time zhighs/HiGHS ratio：全 40 中位约 0.67，21 个 no-full-fallback 中位约
+0.47，19 个 fallback 中位约 1.33。高侧尾部明确保留：`brandy` 约 3.63x、`bgetam`
+约 7.98x；`blend` 虽未 full fallback 仍约 2.23x，说明 cleanup/迭代差距必须单列。
+原始诊断保存在 `/tmp/zhighs-dual-a0-40.tsv`、`/tmp/highs-dual-a0-40.tsv` 和
+`/tmp/dual-a0-ratios.tsv`。这些只有一次运行，无 MAD/p95，不得用于“已经超过 HiGHS”结论。
+
+A0b 修复后 gate 与公平 A/B（2026-07-21）：
+
+- [x] forced-dual 40-model correctness gate 再次 **40/40 PASS**。路径统计由首轮
+  21/40 no-full-fallback 改善到 **22/40**，dual Phase-I fallback 从 19 降到 **18**；
+  新增 `brandy` 无 fallback，没有模型新增 correctness failure。18 个 fallback 为
+  `bgetam,bore3d,box1,capri,etamacro,ex72a,finnis,forest6,galenet,gams10am,gas11,
+  klein1,recipe,refinery,scfxm1,seba,shell,vtp-base`。
+- [x] shifted exit 分布已锁定：`cleanup_primal_optimal=10`、`none=7`、
+  `original_dual_feasible=3`、`original_dual_phase_two_optimal=1`、
+  `phase_two_no_entering=6`、`setup_free_infeasibility=4`、
+  `cleanup_neither_feasible=1`、未细分 numerical exit=8。后者已补 wrapper 终态；
+  `etamacro` 定点复测已明确为 `phase_two_numerical_failure`（43 shifted iterations），
+  外部限制则标成 `phase_two_stopped`，禁止继续留下 `running` 这种无动作价值的终态。
+  A1 首批目标固定为 6 个 no-entering：
+  `bgetam,bore3d,box1,ex72a,galenet,klein1`；这与真实 CHUZC3/4 缺口直接对应。
+- [x] HiGHS runner 公平性缺陷已修复：旧 runner 只设置 `parallel=off`，却把全局
+  `threads=0 (automatic)` 和 `simplex_strategy=0 (choose)` 留在自动值。单核 affinity
+  下这导致 HiGHS `brandy` 从约 19 ms 异常放大到稳定 55--60 ms，产生虚假的
+  4.53x Zig 优势。runner 现显式检查全部 option return status，并固定
+  `threads=1`、`simplex_strategy=1 (serial dual)`；异常随即消失。旧
+  `/tmp/brandy-a0b-fair-11.tsv` 只作为 rejected fairness evidence，不进入结论。
+- [x] 修正 runner 后在 CPU 2、低系统负载、双方各 3 warmup、11 measured、奇偶轮
+  交换启动顺序：Zig median **12.424 ms**、MAD 0.024 ms、max/p95 12.688 ms；
+  HiGHS median **18.523 ms**、MAD 0.091 ms、max/p95 18.936 ms。双方均无 >10%
+  高侧奇异值；Zig/HiGHS median ratio **0.671**（`brandy` wall time 快 1.49x）。
+  但 Zig 415 vs HiGHS 304 iterations（1.365x），ns/iter 29.9 us vs 60.9 us。
+  因此只能得出该模型当前 Zig 内核单迭代成本更低、总时间领先，不能外推到 40/93
+  corpus 或宣称 dual simplex 全面超过 HiGHS。原始样本为
+  `/tmp/brandy-a0b-fair-threads1-11.tsv`。
+
 #### Phase A 前置：dual Phase I 修复方案复核反馈（2026-07-20，Kimi）
 
 deepseek 提出"重构 `buildDualPhaseOneCosts` 为单位 cost ±1/0 -> 删除

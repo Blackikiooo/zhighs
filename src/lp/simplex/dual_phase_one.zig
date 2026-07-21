@@ -87,6 +87,21 @@ pub const DualPhaseOneWorkspace = struct {
         self.active = true;
     }
 
+    /// Start a work-cost-only epoch. Bounds are snapshotted for perturbation
+    /// policy, but no Phase-I bounds are installed and no deferred restore is
+    /// required.
+    pub fn beginCostEpoch(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, original_count: usize) !void {
+        try self.ensureCapacity(original_count);
+        @memcpy(self.saved_lower[0..original_count], basis.col_lower[0..original_count]);
+        @memcpy(self.saved_upper[0..original_count], basis.col_upper[0..original_count]);
+        @memset(self.dual_infeasibility[0..original_count], 0.0);
+        @memset(self.perturbation[0..original_count], 0.0);
+        @memset(self.nonbasic_move[0..original_count], 0);
+        @memset(self.remaining_violation[0..original_count], 0.0);
+        self.basis_epoch +%= 1;
+        self.active = false;
+    }
+
     /// Map original bounds to the dual Phase-I subproblem (HiGHS-style).
     ///
     /// Working bounds:
@@ -100,8 +115,9 @@ pub const DualPhaseOneWorkspace = struct {
     ///   dual-feasible   →  0
     /// The dual objective is then Σ value_j · d_j = −Σ infeasibilities.
     ///
-    /// Boxed columns collapse to [0, 0]; `nonbasic_move` preserves the
-    /// original at_lower/at_upper direction for Phase-II restoration.
+    /// Boxed columns collapse to [0, 0] and have zero Phase-I move, exactly
+    /// like HiGHS' initialiseNonbasicValueAndMove. Their original side is
+    /// selected again only after the Phase-II bounds have been restored.
     pub fn installWorkingBounds(
         self: *DualPhaseOneWorkspace,
         basis: *basis_module.BasisState,
@@ -151,12 +167,9 @@ pub const DualPhaseOneWorkspace = struct {
 
             // ── Nonbasic primal: ±1 for infeasible, 0 for feasible ──
             if (basis.col_lower[column] == basis.col_upper[column]) {
-                // Fixed or collapsed boxed: record original direction.
-                if (lower_finite and upper_finite and lower != upper) {
-                    self.nonbasic_move[column] = if (basis.col_status[column] == .at_upper) -1 else 1;
-                } else {
-                    self.nonbasic_move[column] = 0;
-                }
+                // Fixed or collapsed boxed variables do not participate in
+                // the Phase-I ratio test or bound flips.
+                self.nonbasic_move[column] = 0;
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = 0.0;
             } else if (!lower_finite and !upper_finite) {

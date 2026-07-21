@@ -8,10 +8,18 @@ int main(int argc, char** argv) {
   if (argc != 2) return 2;
   const auto total_started = std::chrono::steady_clock::now();
   Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("solver", "simplex");
-  highs.setOptionValue("presolve", "off");
-  highs.setOptionValue("parallel", "off");
+  // Keep the reference path unambiguously equivalent to zhighs' current
+  // single-threaded, presolve-free dual simplex path. In particular, do not
+  // leave the global thread count or simplex strategy at their automatic
+  // values even though parallel=off currently selects the serial solver.
+  if (highs.setOptionValue("output_flag", false) == HighsStatus::kError ||
+      highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
+      highs.setOptionValue("presolve", "off") == HighsStatus::kError ||
+      highs.setOptionValue("parallel", "off") == HighsStatus::kError ||
+      highs.setOptionValue("threads", 1) == HighsStatus::kError ||
+      highs.setOptionValue("simplex_strategy", 1) == HighsStatus::kError) {
+    return 5;
+  }
   const auto read_started = std::chrono::steady_clock::now();
   // HiGHS may return kWarning for a usable model, for example when tiny
   // coefficients are ignored. Only a real read error invalidates the run.
