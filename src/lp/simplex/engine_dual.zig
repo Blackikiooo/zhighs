@@ -247,6 +247,14 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             break;
         }
     }
+    // Dual Phase I converged in the working subproblem but the restored
+    // basis isn't dual-feasible. Try a short dual Phase II polish before
+    // giving up and falling back to primal.
+    if (dual_infeasible > 0 and primal_feasible) {
+        const polish_status = self.solveDual(problem, control);
+        if (polish_status == .optimal) return .optimal;
+        // solveDual couldn't converge: fall through to primal
+    }
     if (primal_feasible) {
         self.pricing.rule = saved_pricing_rule;
         return self.solvePrimal(problem, control);
