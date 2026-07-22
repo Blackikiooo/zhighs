@@ -74,6 +74,10 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, text, "partial")) .partial else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
     else
         .inherit;
+    const dual_initialization_strategy: zhighs.lp.simplex.engine.DualInitializationStrategy = if (args.next()) |text|
+        if (std.mem.eql(u8, text, "highs")) .highs else if (std.mem.eql(u8, text, "baseline")) .baseline else return error.InvalidArguments
+    else
+        .baseline;
     if (args.next() != null) return error.InvalidArguments;
 
     const started = nowNs();
@@ -155,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         .dual_edge_weight_strategy = dual_edge_weight_strategy,
         .dual_dse_update_budget = dual_dse_update_budget,
         .primal_pricing_strategy = primal_pricing_strategy,
+        .dual_initialization_strategy = dual_initialization_strategy,
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
@@ -403,6 +408,20 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(dual_snapshot_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_snapshot_stats_line);
 
+    const dual_phase_one_initial_line = try std.fmt.allocPrint(
+        allocator,
+        "stats\t{s}\tdual_phase1_initial_flips={d}\tdual_phase1_initial_objective={e:.17}\tdual_phase1_initial_max_basic_violation={e:.17}\tdual_phase1_initial_leaving_row={d}\n",
+        .{
+            path,
+            engine.dual_phase_one_initial_flips,
+            engine.dual_phase_one_initial_objective,
+            engine.dual_phase_one_initial_max_basic_violation,
+            engine.dual_phase_one_initial_leaving_row orelse std.math.maxInt(u32),
+        },
+    );
+    defer allocator.free(dual_phase_one_initial_line);
+    try std.Io.File.stdout().writeStreamingAll(io_context, dual_phase_one_initial_line);
+
     const infeasibility_certificate_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tinfeasibility_ray_valid={}\tinfeasibility_certificate_gap={e:.17}\tfailure={s}\tinfinite_row_mass={e:.17}\tinfinite_column_mass={e:.17}\n",
@@ -428,8 +447,8 @@ pub fn main(init: std.process.Init) !void {
 
     const dual_reprice_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\tdual_dse_updates={d}\tdual_devex_updates={d}\tdual_dse_invalid_fallbacks={d}\tdual_dse_budget_fallbacks={d}\n",
-        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices, simplex_stats.dual_dse_updates, simplex_stats.dual_devex_updates, simplex_stats.dual_dse_invalid_fallbacks, simplex_stats.dual_dse_budget_fallbacks },
+        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\tdual_dse_updates={d}\tdual_dse_weight_rejections={d}\tdual_devex_updates={d}\tdual_dse_invalid_fallbacks={d}\tdual_dse_budget_fallbacks={d}\n",
+        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices, simplex_stats.dual_dse_updates, simplex_stats.dual_dse_weight_rejections, simplex_stats.dual_devex_updates, simplex_stats.dual_dse_invalid_fallbacks, simplex_stats.dual_dse_budget_fallbacks },
     );
     defer allocator.free(dual_reprice_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_reprice_stats_line);

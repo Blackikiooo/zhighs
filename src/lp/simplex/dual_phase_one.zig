@@ -230,6 +230,54 @@ pub const DualPhaseOneWorkspace = struct {
         }
     }
 
+    /// Mirror the first `HEkkDual::rebuild -> correctDualInfeasibilities`
+    /// after Phase-I bounds have been installed. Every non-fixed Phase-I
+    /// variable is boxed, so a dual-infeasible variable is corrected by
+    /// flipping to the opposite endpoint, not by shifting its cost. The
+    /// resulting nonbasic value (±1, or ±1000 for an originally free
+    /// variable) is what encodes the Phase-I dual objective.
+    pub fn correctInitialDualInfeasibilities(
+        self: *DualPhaseOneWorkspace,
+        basis: *basis_module.BasisState,
+        original_count: usize,
+        dual_tolerance: f64,
+    ) usize {
+        var flip_count: usize = 0;
+        for (0..original_count) |column| {
+            if (basis.col_status[column] == .basic) continue;
+            const move = self.nonbasic_move[column];
+            if (move == 0 or basis.col_lower[column] == basis.col_upper[column]) continue;
+            const dual_infeasibility = -@as(f64, @floatFromInt(move)) * basis.reduced_cost[column];
+            self.dual_infeasibility[column] = @max(dual_infeasibility, 0.0);
+            if (dual_infeasibility < dual_tolerance) continue;
+            if (move > 0) {
+                basis.col_status[column] = .at_upper;
+                basis.primal[column] = basis.col_upper[column];
+                self.nonbasic_move[column] = -1;
+            } else {
+                basis.col_status[column] = .at_lower;
+                basis.primal[column] = basis.col_lower[column];
+                self.nonbasic_move[column] = 1;
+            }
+            flip_count += 1;
+        }
+        return flip_count;
+    }
+
+    pub fn dualObjective(
+        self: *const DualPhaseOneWorkspace,
+        basis: *const basis_module.BasisState,
+        original_count: usize,
+    ) f64 {
+        _ = self;
+        var objective: f64 = 0.0;
+        for (0..original_count) |column| {
+            if (basis.col_status[column] == .basic) continue;
+            objective += basis.primal[column] * basis.reduced_cost[column];
+        }
+        return objective;
+    }
+
     /// Restore the original model bounds. nonbasic_move (tracked through
     /// the Phase-I pivot path) determines the side for boxed columns that
     /// were collapsed to [0, 0]; for other columns the fresh reduced-cost
@@ -334,7 +382,7 @@ pub const DualPhaseOneWorkspace = struct {
     }
 };
 
-test "dual Phase-I HiGHS-style bounds: boxed collapsed, values encode infeasibility" {
+test "dual Phase-I initial correction flips infeasibilities to objective endpoints" {
     var basis = try basis_module.BasisState.init(std.testing.allocator, 1, 4);
     defer basis.deinit();
     var workspace = DualPhaseOneWorkspace.init(std.testing.allocator);
@@ -352,12 +400,18 @@ test "dual Phase-I HiGHS-style bounds: boxed collapsed, values encode infeasibil
     // Working bounds: LOWER [0,1]  UPPER [-1,0]  FREE [-1000,1000]  BOXED [0,0]
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -1.0, -1000.0, 0.0 }, basis.col_lower[0..4]);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 1000.0, 0.0 }, basis.col_upper[0..4]);
-    // Primal values encode infeasibility: ±1 infeasible, 0 feasible
-    try std.testing.expectEqualSlices(f64, &.{ 1.0, -1.0, -1.0, 0.0 }, basis.primal[0..4]);
-    // nonbasic_move: LOWER=+1, UPPER=-1, FREE=-1, BOXED=+1 (original at_lower)
-    try std.testing.expectEqualSlices(i8, &.{ 1, -1, -1, 1 }, workspace.nonbasic_move[0..4]);
+    // initialiseNonbasicValueAndMove first uses the original move and zero
+    // endpoint (free is corrected to the finite Phase-I lower endpoint).
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, -1000.0, 0.0 }, basis.primal[0..4]);
+    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 1, 0 }, workspace.nonbasic_move[0..4]);
+    // The first rebuild flips each Phase-I boxed dual infeasibility. This is
+    // where ±1/±1000 values and the negative Phase-I objective arise.
+    try std.testing.expectEqual(@as(usize, 3), workspace.correctInitialDualInfeasibilities(&basis, 4, 1e-7));
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, -1.0, 1000.0, 0.0 }, basis.primal[0..4]);
+    try std.testing.expectEqualSlices(i8, &.{ -1, 1, -1, 0 }, workspace.nonbasic_move[0..4]);
+    try std.testing.expectApproxEqAbs(@as(f64, -4005.0), workspace.dualObjective(&basis, 4), 1e-12);
     workspace.noteBoundFlip(0);
-    try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[0]);
+    try std.testing.expectEqual(@as(i8, 1), workspace.nonbasic_move[0]);
     workspace.notePivot(1, 3, .at_upper);
     try std.testing.expectEqual(@as(i8, 0), workspace.nonbasic_move[1]);
     try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[3]);

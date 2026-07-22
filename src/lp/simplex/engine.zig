@@ -27,6 +27,7 @@ pub const PrimalPricingStrategy = enum { inherit, partial };
 /// `steepest_devex` starts with exact DSE and deterministically falls back to
 /// full dual Devex when the recurrence is rejected or exceeds its work budget.
 pub const DualEdgeWeightStrategy = enum { inherit, steepest_devex };
+pub const DualInitializationStrategy = enum { baseline, highs };
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
@@ -239,6 +240,10 @@ pub const SolveControl = struct {
     /// Maximum successful DSE recurrence updates per dual phase before
     /// switching to dual Devex. Zero disables the budget-triggered switch.
     dual_dse_update_budget: usize = 64,
+    /// Source-alignment track for HiGHS Phase-I coordinates and initialization.
+    /// Baseline remains the production default until the complete dual corpus
+    /// clears the no-regression gate.
+    dual_initialization_strategy: DualInitializationStrategy = .baseline,
 };
 
 pub const SimplexStats = struct {
@@ -274,6 +279,9 @@ pub const SimplexStats = struct {
     dual_reduced_cost_updates: usize = 0,
     dual_exact_reprices: usize = 0,
     dual_dse_updates: usize = 0,
+    /// CHUZR candidates rejected after BTRAN exposed an updated DSE weight
+    /// below one quarter of its exact value.
+    dual_dse_weight_rejections: usize = 0,
     dual_devex_updates: usize = 0,
     dual_dse_invalid_fallbacks: usize = 0,
     dual_dse_budget_fallbacks: usize = 0,
@@ -418,6 +426,10 @@ pub const SimplexEngine = struct {
     active_dual_phase_one_candidate_trace: []DualPhaseOneCandidateTraceEvent = &.{},
     dual_phase_one_ep_trace_count: usize = 0,
     active_dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
+    dual_phase_one_initial_flips: usize = 0,
+    dual_phase_one_initial_objective: f64 = 0.0,
+    dual_phase_one_initial_max_basic_violation: f64 = 0.0,
+    dual_phase_one_initial_leaving_row: ?u32 = null,
     current_phase: SolvePhase = .phase_two,
     direction_requires_reinversion: bool = false,
     fresh_factorization_pivots_remaining: usize = 0,
@@ -439,6 +451,7 @@ pub const SimplexEngine = struct {
     active_primal_pricing_strategy: PrimalPricingStrategy = .inherit,
     active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
     active_dual_dse_update_budget: usize = 64,
+    active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
     dual_dse_updates_since_start: usize = 0,
     devex_framework_iterations: usize = 0,
     devex_bad_weight_count: usize = 0,
@@ -497,6 +510,10 @@ pub const SimplexEngine = struct {
         self.infeasibility_certificate_failure = .none;
         self.infeasibility_certificate_infinite_row_mass = 0.0;
         self.infeasibility_certificate_infinite_column_mass = 0.0;
+        self.dual_phase_one_initial_flips = 0;
+        self.dual_phase_one_initial_objective = 0.0;
+        self.dual_phase_one_initial_max_basic_violation = 0.0;
+        self.dual_phase_one_initial_leaving_row = null;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
@@ -511,6 +528,7 @@ pub const SimplexEngine = struct {
         self.active_primal_pricing_strategy = control.primal_pricing_strategy;
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
+        self.active_dual_initialization_strategy = control.dual_initialization_strategy;
         self.dual_dse_updates_since_start = 0;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
@@ -626,15 +644,13 @@ pub const SimplexEngine = struct {
                 problem.num_cols + problem.num_rows,
                 problem.num_rows,
             ) catch return .numerical_failure;
-            const shifted_dual_status = self.solveDualWithCostShifts(problem, control);
-            // A shifted-cost CHUZC failure is not an original-model primal
-            // infeasibility certificate. Only proven optimality and external
-            // stop limits may escape this experimental path; all algorithmic
-            // failures continue through Phase I / the frozen primal fallback.
-            switch (shifted_dual_status) {
-                .optimal, .work_limit, .time_limit, .iteration_limit, .interrupted => return shifted_dual_status,
-                .infeasible => if (self.infeasibility_ray_valid) return .infeasible,
-                .unbounded, .not_implemented, .numerical_failure => {},
+            if (self.active_dual_initialization_strategy == .baseline) {
+                const shifted_dual_status = self.solveDualWithCostShifts(problem, control);
+                switch (shifted_dual_status) {
+                    .optimal, .work_limit, .time_limit, .iteration_limit, .interrupted => return shifted_dual_status,
+                    .infeasible => if (self.infeasibility_ray_valid) return .infeasible,
+                    .unbounded, .not_implemented, .numerical_failure => {},
+                }
             }
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
             if (dual_phase_one_status != .not_implemented and dual_phase_one_status != .numerical_failure)

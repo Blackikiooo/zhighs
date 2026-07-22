@@ -126,7 +126,10 @@ fn solveDualLoop(
             self.failure_site = .pivot_edge_weights;
             return .numerical_failure;
         }
-        const leaving = self.pricing.chooseDualLeaving(self) orelse {
+        var leaving_choice: ?pricing_module.DualLeavingChoice = null;
+        if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal)
+            return .numerical_failure;
+        const leaving = leaving_choice orelse {
             if (!use_work_costs) return self.finishOptimal(problem);
             // Shifted costs are only a path to primal feasibility. Never
             // publish their objective: restore the original costs and perform
@@ -180,7 +183,6 @@ fn solveDualLoop(
             return .numerical_failure;
         };
 
-        if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
         if (self.active_dual_edge_weight_strategy == .steepest_devex and
             self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
             self.switchDualDseToDevex(.invalid);
@@ -465,7 +467,21 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // reduced cost magnitude intact so the Phase-I objective correctly
     // measures remaining infeasibility.
     self.dual_phase_one.installWorkingBounds(basis, original_count);
+    if (self.active_dual_initialization_strategy == .highs) {
+        self.dual_phase_one_initial_flips = self.dual_phase_one.correctInitialDualInfeasibilities(
+            basis,
+            original_count,
+            self.numerical.dual_tolerance,
+        );
+        self.dual_phase_one_initial_objective = self.dual_phase_one.dualObjective(basis, original_count);
+    }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
+    for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+        self.dual_phase_one_initial_max_basic_violation = @max(
+            self.dual_phase_one_initial_max_basic_violation,
+            @max(lower - value, value - upper),
+        );
+    }
     self.algorithm = .dual_revised;
     self.dual_edge_weights_valid = false;
 
@@ -473,8 +489,12 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
         if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
             return .not_implemented;
-        const leaving = self.pricing.chooseDualLeaving(self) orelse break;
-        if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .not_implemented;
+        var leaving_choice: ?pricing_module.DualLeavingChoice = null;
+        if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal)
+            return .not_implemented;
+        const leaving = leaving_choice orelse break;
+        if (self.dual_phase_one_initial_leaving_row == null)
+            self.dual_phase_one_initial_leaving_row = leaving.row;
         if (self.active_dual_edge_weight_strategy == .steepest_devex and
             self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
             self.switchDualDseToDevex(.invalid);
@@ -872,13 +892,24 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
         const updated_weight = basis.row_edge_weight[row];
-        const relative_error = @abs(updated_weight - exact_weight) / @max(exact_weight, self.numerical.zero_tolerance);
-        if (relative_error > self.numerical.dual_edge_weight_error_tolerance) {
+        if (self.active_dual_initialization_strategy == .highs) {
+            // HiGHS CHUZR always overwrites the selected row's recurrence
+            // weight with the exact BTRAN norm. Candidate rejection is kept
+            // in chooseDualLeavingWithExactDseValidation so the corrected
+            // row participates in a fresh pricing scan.
             basis.row_edge_weight[row] = exact_weight;
-            self.numerical.dual_edge_weight_corrections += 1;
-            // Huangfu's safeguard rejects a seriously underestimated
-            // pivotal weight; force a full exact reset after this pivot.
-            if (updated_weight < 0.5 * exact_weight) self.dual_edge_weights_valid = false;
+            if (updated_weight != exact_weight)
+                self.numerical.dual_edge_weight_corrections += 1;
+        } else {
+            const relative_error = @abs(updated_weight - exact_weight) / @max(exact_weight, self.numerical.zero_tolerance);
+            if (relative_error > self.numerical.dual_edge_weight_error_tolerance) {
+                basis.row_edge_weight[row] = exact_weight;
+                self.numerical.dual_edge_weight_corrections += 1;
+                // Legacy safeguard retained for the baseline comparison
+                // track. The HiGHS-aligned track rejects and reprices before
+                // accepting the leaving row instead of switching to Devex.
+                if (updated_weight < 0.5 * exact_weight) self.dual_edge_weights_valid = false;
+            }
         }
     }
     self.dual_row_index = leaving_row;
@@ -922,6 +953,81 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     self.dual_hyper_sparse_active = tableau_count > 0 and nonzero_count * 10 < tableau_count;
     if (!self.dual_hyper_sparse_active) self.dual_candidate_count = 0;
     return .optimal;
+}
+
+/// HiGHS CHUZR safeguard for dual steepest-edge pricing. A recurrence weight
+/// that is too small can make a row look artificially attractive, so BTRAN
+/// the selected row, install its exact weight and repeat pricing when the old
+/// value was below one quarter of the exact value. Overestimates are accepted.
+fn chooseDualLeavingWithExactDseValidation(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    leaving_choice: *?pricing_module.DualLeavingChoice,
+) SolveStatus {
+    leaving_choice.* = null;
+    while (true) {
+        const leaving = self.pricing.chooseDualLeaving(self) orelse return .optimal;
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const row: usize = @intCast(leaving.row);
+        if (row >= basis.row_edge_weight.len) return .numerical_failure;
+        const updated_weight = basis.row_edge_weight[row];
+        if (self.computeDualTableauRow(problem, leaving.row) != .optimal)
+            return .numerical_failure;
+
+        if (self.active_dual_initialization_strategy == .highs and
+            self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid)
+        {
+            const exact_weight = basis.row_edge_weight[row];
+            if (updated_weight < 0.25 * exact_weight) {
+                self.stats.dual_dse_weight_rejections += 1;
+                continue;
+            }
+        }
+        leaving_choice.* = leaving;
+        return .optimal;
+    }
+}
+
+test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
+    const problem = problem_module.ProblemView{
+        .num_rows = 2,
+        .num_cols = 0,
+        .col_cost = &.{},
+        .col_lower = &.{},
+        .col_upper = &.{},
+        .row_lower = &[_]f64{ 0, 0 },
+        .row_upper = &[_]f64{ std.math.inf(f64), std.math.inf(f64) },
+        .matrix = matrix.CscView.initAssumeValid(2, 0, &[_]usize{0}, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    engine.basis.?.initializeSlackBasis();
+    engine.basis.?.basic_value[0] = -10;
+    engine.basis.?.basic_value[1] = -2;
+    @memset(engine.basis.?.basic_lower, 0);
+    @memset(engine.basis.?.basic_upper, std.math.inf(f64));
+    @memset(engine.basis.?.row_edge_weight, 1);
+    engine.pricing.rule = .steepest_edge;
+    engine.dual_edge_weights_valid = true;
+    engine.active_dual_initialization_strategy = .highs;
+    // B^-T e_0 has squared norm 100, while B^-T e_1 has norm 1.
+    // The stale weights first select row 0 (violation 10), but its corrected
+    // score is 1, so the fresh CHUZR scan must select row 1 (score 2).
+    try engine.factorization.factorize(2, &[_]f64{ 0.1, 0, 0, 1 });
+
+    var leaving: ?pricing_module.DualLeavingChoice = null;
+    try std.testing.expectEqual(
+        SolveStatus.optimal,
+        chooseDualLeavingWithExactDseValidation(&engine, problem, &leaving),
+    );
+    try std.testing.expectEqual(@as(u32, 1), leaving.?.row);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), engine.basis.?.row_edge_weight[0], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), engine.stats.dual_dse_weight_rejections);
+    try std.testing.expect(engine.dual_edge_weights_valid);
+    try std.testing.expectEqual(pricing_module.PricingRule.steepest_edge, engine.pricing.rule);
 }
 
 pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {

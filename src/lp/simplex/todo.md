@@ -993,6 +993,83 @@ A2 setup-free / dual Phase-I 首轮诊断（2026-07-21）：
 
 A2--A4 HiGHS 语义全量补齐主线（2026-07-21，进行中）：
 
+2026-07-22 执行边界（与用户确认）：
+
+- [x] 冻结 `src/matrix/` 稀疏矩阵表示和 primal simplex；两者不参与本阶段改动。dual simplex
+  是后续算法栈的根基，本阶段只接受 dual 源码语义对齐、正确性修复及其专属诊断工具。
+- [x] 优化顺序固定为：先逐函数消除 pinned HiGHS dual simplex 的源码级差异；再用同初始
+  状态的 pivot trace/40+93 corpus 对齐迭代数；只有算法路径和迭代数闭环后，才允许用 perf、
+  反汇编和特殊内存优化降低单次迭代成本。不得提前用底层内核速度抵消算法差距。
+- [ ] 源码差异清零表（按依赖顺序执行，禁止跨项启发式修补）：
+  1. `HighsLpUtils::equilibrationScaleMatrix` + `HEkk::initialiseLpRowBound` 对齐内部坐标；
+  2. `HEkkDual::solve/solvePhase1/rebuild` 对齐 cost perturbation、bound/value/move 初始化与出口；
+  3. `HEkkDual::chooseRow` 对齐 CHUZR infeasibility list、exact DSE 校验及 1/4 低估拒绝重选；
+  4. `HEkkDual::chooseColumn` + `HEkkDualRow::choosePossible/chooseFinal` 对齐 CHUZC0--5/BFRT；
+  5. `updateFlip/updateDual/updatePrimal/updatePivots` 对齐提交顺序、DSE recurrence 和 basis move；
+  6. `cleanup/assessPhase1Optimality/rebuild` 对齐 perturbation cleanup、phase re-entry、reinvert/reprice。
+  当前已确认 zhighs 的 selected-row DSE 检查发生在接受 leaving row 之后，且严重低估会切 Devex；
+  HiGHS 是 BTRAN 后若 `updated_weight < 0.25 * exact_weight` 则纠正并重新 CHUZR。该项已登记，
+  但首轮 exact DSE 不受它影响，须在第 1--2 项对齐后再移植。
+  - [x] 隔离删除 zhighs `solveDualWithCostShifts` 前置路径：40/40 correctness PASS，且
+    `brandy 415->371`、`bore3d(strict) 510->251`、`etamacro 1434->717`、`scfxm1 1006->504`；
+    但 `bgetam 10->668`、`scorpion 403->739`、`shell 689->1127`、`seba 439->628` 严重回退，
+    故代码已撤销。HiGHS 日志证明 `bgetam` 是 DuPh1 0 + DuPh2 11；zhighs 删除前置路径后却
+    在 Phase-I 消耗约 657 pivots，直接证明缺口不是“是否删除 shifted path”，而是 Phase-I
+    初始 `value/move/bounds/dual objective` 尚未同构。下一版必须把 HiGHS solve 初始化序列与
+    shifted-path 删除作为原子提交，禁止再次单独删除。
+  - [x] **Phase-I 初始 bounds/value/move/objective 原子对齐已落地为可选 `highs` 策略**：
+    - native logical row：`row_variable=-A*x`、bounds=`[-row_upper,-row_lower]`、rhs=0；
+    - pinned forced-equilibration：6 轮 column/row `1/sqrt(min*max)`、小 cost 参与、2^±20
+      clamp、power-of-two rounding，objective scale=1；
+    - `initialiseNonbasicValueAndMove` 先按原 move 放到 Phase-I 零端点，随后首个
+      `correctDualInfeasibilities` 将 dual-infeasible boxed working variable flip 到另一端；
+      由此产生 ±1（原 free 为 ±1000）value，并以 `sum(value*reduced_cost)` 形成 Phase-I
+      dual objective；
+    - `highs` 策略直接进入 Phase-I 状态机，不运行 zhighs 自有 shifted-cost 前置求解。
+    默认 `baseline` 保持不变，禁止在后续 CHUZR/CHUZC 清零前默认化。
+  - [x] 增加 Phase-I 初态诊断：initial flips、dual objective、max basic violation、first
+    leaving row。`bgetam` 已从错误的 objective=0 但 max violation=2499/进入 Phase-I，修正为
+    objective=0、max violation=0、DuPh1=0；总 pivots 17 vs HiGHS 11。`blend` 修正后初态为
+    objective=-10.0143727、max violation=2.4125、first leaving row=49，与 HiGHS 的
+    -10.0142314/2.4125/row49 对齐；`highs=112`（DuPh1 82 + DuPh2 30）vs HiGHS 109
+    （73+36），旧 baseline 为 1415。这是首个长尾模型在纯 dual 路径上基本对齐；剩余 9-pivot
+    Phase-I 差距已后移到 perturbation/CHUZC，而不是 bounds/value/move 坐标。
+  - [x] 双门禁均通过：默认 baseline 40/40 correctness PASS 且核心数字保持
+    `brandy415/bore3d510/blend1415/bgetam10`；研发 `highs` 策略 40/40 correctness PASS。
+    `highs` 明显改善 `blend 1415->112`、`finnis 1033->388`、`grow7 2412->1225`、
+    `scagr25 1397->579`、`shell 689->670`，并使 `recipe=45` 与 HiGHS 相同；当前异常仍有
+    `brandy 927/304`、`bore3d 649/202`、`gas11 2373/699`、`scfxm1 1328/484`、
+    `scrs8 1728/604`，证明初态已经对齐但 CHUZR/CHUZC/update lifecycle 尚未对齐。
+  - [x] **CHUZR selected-row exact DSE 校验及 1/4 低估重选已按 pinned HiGHS
+    `HEkkDual::chooseRow/acceptDualSteepestEdgeWeight` 对齐（2026-07-22）**：研发
+    `highs` 轨道在每次 CHUZR 选行后 BTRAN，无条件以 `row_ep` 二范数覆盖该行 DSE
+    recurrence 权重；只拒绝 `updated_weight < 0.25 * exact_weight` 的低估候选并重新
+    pricing，过高权重仍接受，且不再因该候选直接切换 Devex。默认 `baseline` 保留旧的
+    相对误差修正/严重低估后 Devex fallback，避免在后续 DSE lifecycle 未闭环前破坏稳定路径。
+    - 定向 2-row 单测构造 `weight 1 -> exact 100`：首扫 row0、exact 校验拒绝、复扫改选
+      row1，`rejections=1`，DSE mode/validity 均保持；ReleaseFast 全部单元测试 PASS。
+    - forced-dual + steepest-devex、budget=64 的 baseline 与 `highs` 两套 40-model
+      status/objective/residual/certificate 门禁均 **40/40 PASS**。完整 `highs` corpus 的
+      `dual_dse_weight_rejections=0`（0/40 模型、总计 0），故真实 corpus 本轮 pivot 路径变化
+      全部来自“每个 selected row 无条件 exact 写回”，不能误报为 1/4 rejection 的收益。
+      冻结 trace 复核另暴露当前组合工作树的 baseline `gas11=655` events、lock=`630`；本轮
+      CHUZR 在 baseline 轨道仍是原先的 choose -> tableau 顺序且 HiGHS exact/reject 分支关闭，
+      因此不得更新 lock 掩盖此前 Phase-I 初始化改动造成的路径漂移。默认化/提交前须以首个
+      divergence trace 解释并恢复或有证据地重锁；当前只能表述 correctness gate 40/40 PASS，
+      不能表述冻结 trace gate 全通过。
+    - 同环境定向 A/B（Zig/HiGHS committed pivots）：`blend 112/109`、
+      `brandy 1254/304`、`bore3d 775/202`、`capri 390/298`、`vtp-base 226/154`、
+      `gas11 2511/699`、`etamacro 789/532`、`scfxm1 1328/484`。相对本项前已记录的
+      `highs` 轨道，`blend 112`、`scfxm1 1328` 不变，而 `brandy 927->1254`、
+      `bore3d 649->775`、`gas11 2373->2511` 是明确回退；这说明此前 recurrence 权重虽不
+      exact，却偶然选择了更短路径，不能据此保留与 HiGHS 不同的 CHUZR 语义。
+    - 奇异值/隔离实验：把 zhighs 独有的 64-update DSE->Devex budget 关闭后，
+      `blend 110/109`、`scfxm1 545/484`、`capri 368/298`、`vtp-base 201/154`、
+      `etamacro 708/532` 接近，但 `bore3d` 在 495 pivots 错判 infeasible（HiGHS optimal/202），
+      同时 `brandy 1198/304`、`gas11 2577/699` 仍远落后。因此 budget=0 不得默认化；下一步
+      必须集中逐式对齐 Forrest--Goldfarb DSE recurrence、factor update 前后使用的
+      `row_ep/column`、reinvert exact reset 和 DSE->Devex lifecycle，再重跑同一门禁。
+
 - [x] 建立永不因 fallback/restart 清零的 `attempted_iterations` 与 `committed_pivots`；runner
   同时按 shifted dual、dual Phase-I、dual Phase-II、primal Phase-I/II、cleanup 分列。
   `solve_depth` 只在 public root solve 清零新计数，内部 dual fallback、snapshot retry、

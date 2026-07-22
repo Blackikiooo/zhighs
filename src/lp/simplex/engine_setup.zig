@@ -195,13 +195,21 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
         }
     }
     for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
-        const sign: f64 = if (std.math.isFinite(upper)) 1.0 else if (std.math.isFinite(lower)) -1.0 else 0.0;
-        if (std.math.sign(basis.row_scale[row]) != sign) return false;
-        const magnitude = @abs(basis.row_scale[row]);
-        basis.row_rhs[row] = if (sign > 0.0) upper * magnitude else if (sign < 0.0) -lower * magnitude else 0.0;
         const logical = problem.num_cols + row;
-        basis.col_lower[logical] = 0.0;
-        basis.col_upper[logical] = if (sign > 0.0 and std.math.isFinite(lower)) (upper - lower) * magnitude else std.math.inf(f64);
+        if (self.active_dual_initialization_strategy == .highs) {
+            const magnitude = basis.row_scale[row];
+            if (!(magnitude > 0.0) or !std.math.isFinite(magnitude)) return false;
+            basis.row_rhs[row] = 0.0;
+            basis.col_lower[logical] = if (std.math.isFinite(upper)) -upper * magnitude else -std.math.inf(f64);
+            basis.col_upper[logical] = if (std.math.isFinite(lower)) -lower * magnitude else std.math.inf(f64);
+        } else {
+            const sign: f64 = if (std.math.isFinite(upper)) 1.0 else if (std.math.isFinite(lower)) -1.0 else 0.0;
+            if (std.math.sign(basis.row_scale[row]) != sign) return false;
+            const magnitude = @abs(basis.row_scale[row]);
+            basis.row_rhs[row] = if (sign > 0.0) upper * magnitude else if (sign < 0.0) -lower * magnitude else 0.0;
+            basis.col_lower[logical] = 0.0;
+            basis.col_upper[logical] = if (sign > 0.0 and std.math.isFinite(lower)) (upper - lower) * magnitude else std.math.inf(f64);
+        }
         switch (basis.col_status[logical]) {
             .basic => {},
             .at_lower, .fixed => basis.primal[logical] = basis.col_lower[logical],
@@ -209,18 +217,28 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
                 if (!std.math.isFinite(basis.col_upper[logical])) return false;
                 basis.primal[logical] = basis.col_upper[logical];
             },
-            .free, .superbasic => basis.primal[logical] = 0.0,
+            .free, .superbasic => basis.primal[logical] = if (self.active_dual_initialization_strategy == .highs)
+                @min(@max(0.0, basis.col_lower[logical]), basis.col_upper[logical])
+            else
+                0.0,
         }
     }
     for (basis.basic_index, 0..) |column, row| {
         basis.basic_lower[row] = basis.col_lower[column];
         basis.basic_upper[row] = basis.col_upper[column];
     }
-    self.objective_scale = objectiveScale(problem.col_cost);
+    self.objective_scale = if (self.active_dual_initialization_strategy == .highs) 1.0 else objectiveScale(problem.col_cost);
     return true;
 }
 
 pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+    return if (self.active_dual_initialization_strategy == .highs)
+        initializeProblemStorageHighs(self, problem)
+    else
+        initializeProblemStorageBaseline(self, problem);
+}
+
+fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     basis.initializeSlackBasis();
     @memset(basis.primal, 0.0);
@@ -299,6 +317,100 @@ pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.Pr
         basis.primal[column] /= scale;
     }
     self.objective_scale = objectiveScale(problem.col_cost);
+    return .optimal;
+}
+
+fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    basis.initializeSlackBasis();
+    @memset(basis.primal, 0.0);
+    @memset(basis.artificial_sign, 0.0);
+    for (problem.col_lower, problem.col_upper, 0..) |lower, upper, col| {
+        if (lower > upper) return .infeasible;
+        if (lower == upper) {
+            basis.primal[col] = lower;
+            basis.col_status[col] = .fixed;
+        } else if (std.math.isFinite(lower)) {
+            basis.primal[col] = lower;
+            basis.col_status[col] = .at_lower;
+        } else if (std.math.isFinite(upper)) {
+            basis.primal[col] = upper;
+            basis.col_status[col] = .at_upper;
+        } else {
+            basis.primal[col] = 0.0;
+            basis.col_status[col] = .free;
+        }
+        basis.col_lower[col] = lower;
+        basis.col_upper[col] = upper;
+    }
+    // Pinned HiGHS forced-equilibration scaling. Alternate column and row
+    // equilibration six times, include small nonzero costs in column scaling,
+    // clamp factors to 2^±20, then round to powers of two.
+    @memset(basis.row_scale, 1.0);
+    @memset(basis.column_scale[0..problem.num_cols], 1.0);
+    var minimum_nonzero_cost = std.math.inf(f64);
+    for (problem.col_cost) |cost| if (cost != 0.0) {
+        minimum_nonzero_cost = @min(minimum_nonzero_cost, @abs(cost));
+    };
+    const include_cost = minimum_nonzero_cost < 0.1;
+    const minimum_scale = @exp2(-20.0);
+    const maximum_scale = @exp2(20.0);
+    for (0..6) |_| {
+        @memset(basis.basic_lower, 1e200);
+        @memset(basis.basic_upper, 1e-200);
+        for (0..problem.num_cols) |column| {
+            var minimum: f64 = 1e200;
+            var maximum: f64 = 1e-200;
+            const cost = @abs(problem.col_cost[column]);
+            if (include_cost and cost != 0.0) {
+                minimum = @min(minimum, cost);
+                maximum = @max(maximum, cost);
+            }
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const value = @abs(coefficient) * basis.row_scale[row.toUsize()];
+                minimum = @min(minimum, value);
+                maximum = @max(maximum, value);
+            }
+            const equilibration = 1.0 / @sqrt(minimum * maximum);
+            basis.column_scale[column] = std.math.clamp(equilibration, minimum_scale, maximum_scale);
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                const value = @abs(coefficient) * basis.column_scale[column];
+                basis.basic_lower[row_index] = @min(basis.basic_lower[row_index], value);
+                basis.basic_upper[row_index] = @max(basis.basic_upper[row_index], value);
+            }
+        }
+        for (basis.row_scale, basis.basic_lower, basis.basic_upper) |*scale, minimum, maximum| {
+            scale.* = std.math.clamp(1.0 / @sqrt(minimum * maximum), minimum_scale, maximum_scale);
+        }
+    }
+    for (basis.column_scale[0..problem.num_cols]) |*scale|
+        scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
+    for (basis.row_scale) |*scale|
+        scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
+
+    for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
+        if (lower > upper) return .infeasible;
+        const magnitude = basis.row_scale[row];
+        basis.row_scale[row] = magnitude;
+        basis.row_rhs[row] = 0.0;
+        basis.col_lower[problem.num_cols + row] = if (std.math.isFinite(upper)) -upper * magnitude else -std.math.inf(f64);
+        basis.col_upper[problem.num_cols + row] = if (std.math.isFinite(lower)) -lower * magnitude else std.math.inf(f64);
+        basis.basic_lower[row] = basis.col_lower[problem.num_cols + row];
+        basis.basic_upper[row] = basis.col_upper[problem.num_cols + row];
+    }
+    for (0..problem.num_cols) |column| {
+        const scale = basis.column_scale[column];
+        basis.column_scale[column] = scale;
+        basis.col_lower[column] = problem.col_lower[column] / scale;
+        basis.col_upper[column] = problem.col_upper[column] / scale;
+        basis.primal[column] /= scale;
+    }
+    self.objective_scale = 1.0;
     return .optimal;
 }
 
