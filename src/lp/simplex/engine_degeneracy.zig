@@ -92,6 +92,8 @@ pub fn observeIterationStep(
     small_pivot_retry: bool,
     bound_flip_count: usize,
 ) void {
+    if (leaving_column != null and self.pivot_trace_count != 0)
+        self.active_pivot_trace[self.pivot_trace_count - 1].bound_flip_count = bound_flip_count;
     if (leaving_column != null) {
         self.iteration_counters.committed_pivots += 1;
         if (self.cleanup_active) {

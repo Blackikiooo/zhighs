@@ -1021,9 +1021,47 @@ A2--A4 HiGHS 语义全量补齐主线（2026-07-21，进行中）：
     HiGHS 默认 forced-equilibration（6 轮 column/row `1/sqrt(min*max)`、power-of-two rounding）
     且不启用当前 Zig 的 objective cost scale；Zig 目前是单轮 row max scaling、仅在全局
     range>1e6 时 column max scaling。初始 DSE merit 因而不同。
+  - [x] forced-equilibration 6 轮 + power-of-two rounding 已做隔离 A/B，未进入默认路径：
+    `vtp-base 263->213`、`bore3d 260->303/331`、`brandy 415->435`，收益与严重回退并存，
+    不满足“不破坏既有领先/稳定路径”的门禁，代码已完全撤销。该结果说明 scaling 是首步
+    CHUZR 分叉的必要前置语义，但不能脱离 HiGHS 的 cost scaling、DSE 初始化和 Phase-I
+    bounds 作为单独默认补丁。
+  - [x] 公平性审计发现 forced-dual runner 仍可在逻辑基 primal-feasible 时直接进入 primal
+    Phase II；例如 `blend` 的 1413 committed pivots 全部是 `primal_phase2_pivots`，而 pinned
+    HiGHS 明确报告 `DuPh1=73, DuPh2=36, total=109`。现已禁止显式 dual 请求在冷启动处静默
+    shortcut，并禁止 shifted-cost cleanup 因 original primal-feasible 而直接切 primal；失败的
+    dual Phase-I pivot 与最终 correctness fallback 均由单调计数器保留。`blend` 暴露真实状态为
+    dual Phase-I 2 pivots 后失败、再走 primal 1413，总计 1415；这不是性能改善，但修正了此前
+    “把 primal 路径当 dual 对比”的不公平口径。
+    ReleaseFast 单元测试及严格 forced-dual 40 模型 correctness gate **40/40 PASS**。新口径下
+    暴露的主要混合回退总数为 `blend 1415/109`、`bore3d 510/202`、`finnis 1033/354`、
+    `grow7 2412/339`、`scrs8 1620/604`、`scagr25 1397/535`；斜杠右侧为 pinned HiGHS。
+    旧口径下相应较小数字包含 silent primal cleanup，后续报告不得再称为 forced-dual 成绩。
+  - [x] 对照 `HEkk::initialiseLpRowBound` 发现 HiGHS logical row 使用 `-A*x` 与
+    `[-row_upper,-row_lower]`，zhighs 使用 affine slack `upper-A*x` 与 `[0,upper-lower]`。
+    native HiGHS row-variable 隔离 A/B：`vtp-base 263->201`，但 `bore3d 260->510`、
+    `capri 428->454`、`brandy 415->416`，故默认代码已撤销。该结果证明 logical 表示会改变
+    Phase-I CHUZR/CHUZC，但也必须与 forced-equilibration、cost perturbation、初始化 move/value
+    一起事务性对齐，不能单独替换。
+  - [x] 对照 `HEkk::initialiseBound(kDual,kSolvePhase1)` 后紧接的
+    `initialiseNonbasicValueAndMove`，修正 zhighs Phase-I 非基端点：boxed/fixed=`0/move0`，
+    original free 在有限 `[-1000,1000]` 上由非法 move0 校正到 lower，upper-only 保持
+    upper/move-1，lower-only 保持 lower/move+1；不再直接按 reduced-cost 符号预置 ±1。
+    核心四模型保持 `415/260/428/263`；`gams10am 23->25`、`gas11 568->593`，后者仍优于
+    HiGHS 699。ReleaseFast 单元测试与 forced-dual + steepest-devex 完整 40 模型门禁
+    **40/40 PASS**；已知轻微奇异值为 `etamacro 1433->1434`、`woodinfe=39`，均保持正确
+    status/objective/residual，但后续必须继续与 HiGHS 的 532/36 对齐，不能把 gate PASS
+    等同于迭代性能已对齐。
   - [ ] 依赖顺序调整：先对齐 scaling、logical Phase-I work bounds 与 exact initial DSE，
     要求 `capri/vtp-base` 的 CHUZR leaving row 与 HiGHS 一致；随后再验收同状态 CHUZC 前
     50 pivots。该调整是移植 HiGHS 前置语义，不是引入新策略。
+    - [ ] 下一实验必须作为一个可回滚原子 bundle 同时启用：(1) native logical row
+      `-A*x/[-upper,-lower]`；(2) forced-equilibration 与 cost scaling；(3) HiGHS Phase-I
+      nonbasic move/value 初始化；(4) exact initial DSE。先为 `blend` 输出所有 row 的
+      `(basicValue, lower, upper, violation, edgeWeight, merit)`，验收首选
+      `row_out=49, variable_out=132, delta=-2.4125`；未对齐前禁止再次启用 CHUZC3/4。
+    - [ ] 首轮状态对齐后，按 HiGHS `blend` iteration 0 验收 CHUZC：`workPivot=39`、
+      `workAlpha=-4.73`、空 flip set；随后锁定 73 个 DuPh1 + 36 个 DuPh2 的 phase boundary。
 - [ ] 逐段移植 CHUZC0 free move、CHUZC2 dynamic Ta/Td、CHUZC3 large-step、CHUZC4
   breakpoint grouping/large-alpha/final flip selection及数值重试；每段必须通过 40-model
   correctness、`brandy/bore3d` 不回退和与 HiGHS 的 pivot differential。
@@ -1037,6 +1075,13 @@ A2--A4 HiGHS 语义全量补齐主线（2026-07-21，进行中）：
     `workRange/nonbasicMove/updateFlip/updateDual` 与 Zig 的 bound/status/reduced-cost 提交顺序
     尚未完成字段同构，不能仅复制 breakpoint 排序。代码已恢复到 40/40 基线；下一步先做
     双侧 CHUZC event trace，再按 CHUZC2、3、4 独立提交，禁止整段盲移植。
+  - [x] **拒绝并撤销第二版 Phase-I-only CHUZC3/4 实验**：CHUZC2 dynamic Ta/Td、
+    CHUZC3 large-step、CHUZC4 breakpoint group/large-alpha 在 6 模型门禁中保持
+    `brandy/bore3d/capri=415/260/428`、`vtp-base 263->261`，但完整门禁运行到
+    `etamacro` 时数分钟无结果；关闭 CHUZC 开关后同模型立即以 1434 pivots 正常完成
+    （HiGHS 532）。因此回归明确来自 CHUZC 提交语义，不是 Phase-I 端点修复。实现已撤销，
+    不得再次仅凭排序公式移植；下一次必须先让 Zig/HiGHS 在同 scaling、同 leaving row、同
+    candidate `(move,dual,alpha,range)` 快照上逐字段一致，并补齐 HiGHS permutation tie-break。
 - [ ] 移植 dual Phase-I fresh rebuild、remove perturbation、unperturbed optimality assessment、
   re-entry cleanup levels、Phase-I objective 与 dual-infeasibility出口；`gams10am/gas11`
   分别对照 HiGHS 1/485 Phase-I iterations，禁止用 primal fallback 隐藏失败。

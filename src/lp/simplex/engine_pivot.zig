@@ -183,6 +183,7 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             .update_count = self.factorization.update_count,
             .ftran_relative_residual = self.numerical.last_ftran_relative_residual,
             .condition_estimate = self.numerical.pivot_condition_estimate,
+            .bound_flip_count = 0,
         };
         self.pivot_trace_count += 1;
     }

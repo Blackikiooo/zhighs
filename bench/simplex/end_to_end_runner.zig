@@ -158,12 +158,25 @@ pub fn main(init: std.process.Init) !void {
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
-        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\n", .{
-            @tagName(event.phase), event.iteration, event.entering_column, event.leaving_column,          event.leaving_row,
-            event.pivot,           event.step,      event.update_count,    event.ftran_relative_residual, event.condition_estimate,
+        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{d}\n", .{
+            @tagName(event.phase),  event.iteration, event.entering_column, event.leaving_column,          event.leaving_row,
+            event.pivot,            event.step,      event.update_count,    event.ftran_relative_residual, event.condition_estimate,
+            event.bound_flip_count,
         });
         defer allocator.free(trace_line);
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);
+    };
+    if (trace_enabled) if (engine.basis) |basis| {
+        for (basis.row_scale, 0..) |scale, row| {
+            const line = try std.fmt.allocPrint(allocator, "scale_row\t{d}\t{e:.17}\n", .{ row, scale });
+            defer allocator.free(line);
+            try std.Io.File.stderr().writeStreamingAll(io_context, line);
+        }
+        for (basis.column_scale[0..problem.num_cols], 0..) |scale, column| {
+            const line = try std.fmt.allocPrint(allocator, "scale_column\t{d}\t{e:.17}\n", .{ column, scale });
+            defer allocator.free(line);
+            try std.Io.File.stderr().writeStreamingAll(io_context, line);
+        }
     };
     if (trace_enabled) for (degeneracy_trace[0..engine.degeneracy_trace_count]) |event| {
         const trace_line = try std.fmt.allocPrint(allocator, "degenerate\t{s}\t{d}\t{s}\t{d}\t{d}\t{e:.6}\t{e:.6}\t{x}\n", .{

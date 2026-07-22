@@ -141,10 +141,10 @@ pub const DualPhaseOneWorkspace = struct {
     ///   upper-unbounded → [0, 1]
     ///   boxed / fixed  → [0, 0]    (collapsed)
     ///
-    /// Nonbasic primal values encode infeasibility (NOT the cost):
-    ///   dual-infeasible → ±1  (sign from required direction)
-    ///   dual-feasible   →  0
-    /// The dual objective is then Σ value_j · d_j = −Σ infeasibilities.
+    /// `initialiseNonbasicValueAndMove` is then applied to these Phase-I
+    /// bounds using the original nonbasic move. Thus ordinary lower/upper
+    /// variables start at the zero endpoint; they are not pre-shifted to
+    /// ±1 from their reduced-cost sign.
     ///
     /// Boxed columns collapse to [0, 0] and have zero Phase-I move, exactly
     /// like HiGHS' initialiseNonbasicValueAndMove. Their original side is
@@ -196,7 +196,7 @@ pub const DualPhaseOneWorkspace = struct {
             };
             self.dual_infeasibility[column] = infeasibility;
 
-            // ── Nonbasic primal: ±1 for infeasible, 0 for feasible ──
+            // ── Pinned HiGHS initialiseNonbasicValueAndMove ──
             if (basis.col_lower[column] == basis.col_upper[column]) {
                 // Fixed or collapsed boxed variables do not participate in
                 // the Phase-I ratio test or bound flips.
@@ -204,38 +204,24 @@ pub const DualPhaseOneWorkspace = struct {
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = 0.0;
             } else if (!lower_finite and !upper_finite) {
-                // Free: value = sign of reduced cost (or 0 if none)
-                basis.col_status[column] = .free;
-                if (reduced < -0.0) {
-                    basis.primal[column] = -1.0;
-                    self.nonbasic_move[column] = -1;
-                } else if (reduced > 0.0) {
-                    basis.primal[column] = 1.0;
-                    self.nonbasic_move[column] = 1;
-                } else {
-                    basis.primal[column] = 0.0;
-                    self.nonbasic_move[column] = 0;
-                }
-            } else if (!lower_finite) {
-                // Lower-unbounded: working [-1, 0], value = sign(reduced)
-                basis.col_status[column] = .at_upper;
-                if (reduced > 0.0) {
-                    basis.primal[column] = -1.0;
-                    self.nonbasic_move[column] = -1;
-                } else {
-                    basis.primal[column] = 0.0;
-                    self.nonbasic_move[column] = 0;
-                }
-            } else {
-                // Upper-unbounded: working [0, 1]
+                // Original free move is zero. Once represented by finite
+                // Phase-I bounds HiGHS corrects that invalid boxed move to
+                // the lower endpoint.
                 basis.col_status[column] = .at_lower;
-                if (reduced < -0.0) {
-                    basis.primal[column] = 1.0;
-                    self.nonbasic_move[column] = 1;
-                } else {
-                    basis.primal[column] = 0.0;
-                    self.nonbasic_move[column] = 0;
-                }
+                basis.primal[column] = -1000.0;
+                self.nonbasic_move[column] = 1;
+            } else if (!lower_finite) {
+                // Original upper variable keeps its downward move and is
+                // placed at the Phase-I upper endpoint, zero.
+                basis.col_status[column] = .at_upper;
+                basis.primal[column] = 0.0;
+                self.nonbasic_move[column] = -1;
+            } else {
+                // Original lower variable keeps its upward move and is
+                // placed at the Phase-I lower endpoint, zero.
+                basis.col_status[column] = .at_lower;
+                basis.primal[column] = 0.0;
+                self.nonbasic_move[column] = 1;
             }
         }
         for (basis.basic_index, 0..) |column, row| {

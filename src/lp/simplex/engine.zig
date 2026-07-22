@@ -70,6 +70,7 @@ pub const ShiftedDualExit = enum {
     phase_two_numerical_failure,
     phase_two_stopped,
     original_dual_feasible,
+    original_dual_infeasible,
     original_dual_phase_two_optimal,
     original_dual_phase_two_failed,
     cleanup_primal_optimal,
@@ -97,6 +98,7 @@ pub const PivotTraceEvent = struct {
     update_count: usize,
     ftran_relative_residual: f64,
     condition_estimate: f64,
+    bound_flip_count: usize,
 };
 pub const DegeneracyReason = enum {
     bound_tie,
@@ -598,7 +600,13 @@ pub const SimplexEngine = struct {
         }
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
         const crash_feasibility = self.classifyFeasibility(problem);
-        if (crash_feasibility.primal) return self.solvePrimal(problem, control);
+        // An explicitly requested dual path must not silently become primal
+        // simplex merely because the logical basis is primal feasible. HiGHS
+        // forced-dual still establishes dual feasibility and enters dual
+        // Phase II; preserving the shortcut made the iteration comparison an
+        // algorithm-vs-algorithm mismatch (notably blend).
+        if (crash_feasibility.primal and control.phase_one_strategy != .dual)
+            return self.solvePrimal(problem, control);
         // The artificial primal Phase I columns are tied to the logical
         // identity. A structural crash must use the general dual Phase I;
         // failure restores the logical basis before the primal fallback.

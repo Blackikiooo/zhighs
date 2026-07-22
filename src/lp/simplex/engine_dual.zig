@@ -168,18 +168,13 @@ fn solveDualLoop(
                 return cleanup_status;
             }
             if (original_feasibility.primal) {
-                self.pricing.rule = saved_pricing_rule;
-                const cleanup_started = self.iterations;
-                const saved_cleanup_active = self.cleanup_active;
-                self.cleanup_active = true;
-                defer self.cleanup_active = saved_cleanup_active;
-                const cleanup_status = self.solvePrimal(problem, control);
-                self.stats.shifted_cleanup_iterations += self.iterations -| cleanup_started;
-                self.shifted_dual_exit = if (cleanup_status == .optimal)
-                    .cleanup_primal_optimal
-                else
-                    .cleanup_primal_failed;
-                return cleanup_status;
+                // Primal feasibility does not authorize an algorithm switch
+                // on an explicitly forced-dual run. The original costs are
+                // dual infeasible, so hand the restored basis to dual Phase I
+                // just as HiGHS does instead of solving it with primal Phase
+                // II and reporting that iteration count as a dual comparison.
+                self.shifted_dual_exit = .original_dual_infeasible;
+                return .not_implemented;
             }
             self.shifted_dual_exit = .cleanup_neither_feasible;
             return .numerical_failure;
