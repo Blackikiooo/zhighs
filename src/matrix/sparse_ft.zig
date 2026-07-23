@@ -11,56 +11,96 @@ const none = std.math.maxInt(u32);
 pub const FtError = error{ DimensionMismatch, Singular, NumericalFailure, OutOfMemory, CapacityOverflow };
 
 pub const MutableUpperView = struct {
+    /// Stable basis-column ID at each logical U position.
     pivot_ids: []const u32,
+    /// Mutable U diagonal parallel to `pivot_ids`.
     pivot_values: []f64,
+    /// Map from stable pivot ID to current logical position.
     pivot_lookup: []const u32,
+    /// Intrusive entry-list head for each logical U column.
     column_heads: []const u32,
+    /// Intrusive entry-list head for each stable pivot row.
     row_heads: []const u32,
+    /// Stable row ID for every allocated entry slot.
     entry_rows: []const u32,
+    /// Logical column ID for every allocated entry slot.
     entry_columns: []const u32,
+    /// Mutable coefficient for every allocated entry slot.
     entry_values: []f64,
 };
 
 pub const SparseForrestTomlin = struct {
+    /// Owner of mutable U, correction, and solve-work storage.
     allocator: std.mem.Allocator,
+    /// Fixed number of stable basis pivot IDs.
     dimension: usize = 0,
+    /// Current logical U column count, including update spikes.
     logical_count: usize = 0,
+    /// Allocated capacity for logical U columns.
     logical_capacity: usize = 0,
+    /// First never-used intrusive entry slot.
     entry_high_water: usize = 0,
+    /// Allocated intrusive-entry capacity.
     entry_capacity: usize = 0,
+    /// Head of the recycled-entry free list.
     free_head: u32 = none,
+    /// Number of installed Forrest--Tomlin updates.
     update_count: usize = 0,
 
+    /// Stable pivot ID at each logical column position.
     pivot_ids: []u32 = &.{},
+    /// Mutable diagonal value at each logical column position.
     pivot_values: []f64 = &.{},
+    /// Stable pivot ID to logical-position lookup.
     pivot_lookup: []u32 = &.{},
+    /// Intrusive list heads by logical column.
     column_head: []u32 = &.{},
+    /// Intrusive list heads by stable row.
     row_head: []u32 = &.{},
 
+    /// Stable row ID per entry slot.
     entry_row: []u32 = &.{},
+    /// Logical column ID per entry slot.
     entry_column: []u32 = &.{},
+    /// Numerical coefficient per entry slot.
     entry_value: []f64 = &.{},
+    /// Next entry in the same column.
     column_next: []u32 = &.{},
+    /// Previous entry in the same column.
     column_previous: []u32 = &.{},
+    /// Next entry in the same row.
     row_next: []u32 = &.{},
+    /// Previous entry in the same row.
     row_previous: []u32 = &.{},
+    /// Next recycled entry slot.
     free_next: []u32 = &.{},
 
+    /// Prefix offsets for stored row-correction entries.
     correction_starts: []usize = &.{},
+    /// Stable pivotal row for each correction.
     correction_pivots: []u32 = &.{},
+    /// Source row IDs for correction coefficients.
     correction_indices: []u32 = &.{},
+    /// Correction coefficients parallel to `correction_indices`.
     correction_values: []f64 = &.{},
+    /// Number of installed row corrections.
     correction_count: usize = 0,
+    /// Allocated correction-entry capacity.
     correction_capacity: usize = 0,
 
+    /// Reusable dense solve workspace.
     work: []f64 = &.{},
+    /// Captured pre-upper-solve spike used to construct an update.
     captured_aq: []f64 = &.{},
+    /// Whether `captured_aq` contains a valid pending spike.
     aq_ready: bool = false,
 
+    /// Construct an empty lazily allocated FT update store.
     pub fn init(allocator: std.mem.Allocator) SparseForrestTomlin {
         return .{ .allocator = allocator };
     }
 
+    /// Release all mutable-U, correction, and solve buffers.
     pub fn deinit(self: *SparseForrestTomlin) void {
         self.allocator.free(self.pivot_ids);
         self.allocator.free(self.pivot_values);
@@ -81,7 +121,7 @@ pub const SparseForrestTomlin = struct {
         self.allocator.free(self.correction_values);
         self.allocator.free(self.work);
         self.allocator.free(self.captured_aq);
-        self.* = .{ .allocator = self.allocator };
+        self.* = init(self.allocator);
     }
 
     /// Initialize mutable U/UR from packed U columns. `column_rows` contains
@@ -128,6 +168,7 @@ pub const SparseForrestTomlin = struct {
         self.correction_starts[0] = 0;
     }
 
+    /// Borrow mutable U/UR arrays for sparse LU solve integration.
     pub fn mutableUpperView(self: *SparseForrestTomlin) MutableUpperView {
         return .{
             .pivot_ids = self.pivot_ids[0..self.logical_count],
@@ -141,10 +182,12 @@ pub const SparseForrestTomlin = struct {
         };
     }
 
+    /// Return whether the base factorization has a nonempty FT update chain.
     pub fn hasUpdates(self: *const SparseForrestTomlin) bool {
         return self.update_count != 0;
     }
 
+    /// Sum bytes represented by all retained slices.
     pub fn retainedBytes(self: *const SparseForrestTomlin) usize {
         var total: usize = 0;
         total += std.mem.sliceAsBytes(self.pivot_ids).len;
@@ -186,6 +229,7 @@ pub const SparseForrestTomlin = struct {
         }
     }
 
+    /// Solve the current mutable upper triangular system in place.
     pub fn solveUpper(self: *SparseForrestTomlin, values: []f64) FtError!void {
         if (values.len != self.dimension) return error.DimensionMismatch;
         var logical = self.logical_count;
@@ -230,6 +274,7 @@ pub const SparseForrestTomlin = struct {
         }
     }
 
+    /// Apply stored row corrections in reverse transpose-solve order.
     fn applyCorrectionsTranspose(self: *const SparseForrestTomlin, values: []f64) void {
         var correction = self.correction_count;
         while (correction > 0) {
@@ -241,6 +286,7 @@ pub const SparseForrestTomlin = struct {
         }
     }
 
+    /// Capture the pivotal BTRAN row needed to form the next FT correction.
     pub fn captureEp(self: *SparseForrestTomlin, leaving_id: u32) FtError!void {
         if (leaving_id >= self.dimension) return error.DimensionMismatch;
         const first_logical = self.pivot_lookup[leaving_id];
@@ -266,7 +312,6 @@ pub const SparseForrestTomlin = struct {
         try self.ensureEntries(self.entry_high_water + self.dimension);
         try self.ensureCorrectionStarts(self.correction_count + 2);
         try self.ensureCorrections(self.correction_starts[self.correction_count] + self.dimension);
-
         var entry = self.row_head[leaving_id];
         while (entry != none) {
             const next = self.row_next[entry];
@@ -306,6 +351,7 @@ pub const SparseForrestTomlin = struct {
         self.aq_ready = false;
     }
 
+    /// Allocate and link one coefficient into both U column and row lists.
     fn insert(self: *SparseForrestTomlin, row: u32, column: u32, value: f64) FtError!void {
         if (!std.math.isFinite(value)) return error.NumericalFailure;
         if (self.free_head == none and self.entry_high_water == self.entry_capacity) try self.ensureEntries(self.entry_capacity + self.entry_capacity / 2 + 8);
@@ -331,6 +377,7 @@ pub const SparseForrestTomlin = struct {
         self.row_head[row] = entry;
     }
 
+    /// Unlink one coefficient from both orientations and recycle its slot.
     fn remove(self: *SparseForrestTomlin, entry: u32) void {
         const row = self.entry_row[entry];
         const column = self.entry_column[entry];
@@ -346,6 +393,7 @@ pub const SparseForrestTomlin = struct {
         self.free_head = entry;
     }
 
+    /// Grow arrays addressed by stable basis pivot ID.
     fn ensureDimension(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.work.len) return;
         const capacity = grow(self.work.len, required) catch return error.CapacityOverflow;
@@ -354,6 +402,7 @@ pub const SparseForrestTomlin = struct {
         try self.resizeRetained(&self.work, capacity);
         try self.resizeRetained(&self.captured_aq, capacity);
     }
+    /// Grow arrays addressed by mutable logical U column.
     fn ensureLogical(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.logical_capacity) return;
         const capacity = grow(self.logical_capacity, required) catch return error.CapacityOverflow;
@@ -362,6 +411,7 @@ pub const SparseForrestTomlin = struct {
         try self.resizeRetained(&self.column_head, capacity);
         self.logical_capacity = capacity;
     }
+    /// Grow every parallel intrusive-entry stream.
     fn ensureEntries(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.entry_capacity) return;
         const capacity = grow(self.entry_capacity, required) catch return error.CapacityOverflow;
@@ -376,9 +426,11 @@ pub const SparseForrestTomlin = struct {
         self.entry_capacity = capacity;
     }
 
+    /// Reallocate one retained slice through the workspace allocator.
     fn resizeRetained(self: *SparseForrestTomlin, slice: anytype, capacity: usize) FtError!void {
         slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
+    /// Grow parallel correction-index and coefficient streams.
     fn ensureCorrections(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.correction_capacity) return;
         const capacity = grow(self.correction_capacity, required) catch return error.CapacityOverflow;
@@ -386,6 +438,7 @@ pub const SparseForrestTomlin = struct {
         self.correction_values = self.allocator.realloc(self.correction_values, capacity) catch return error.OutOfMemory;
         self.correction_capacity = capacity;
     }
+    /// Grow correction prefix offsets and pivotal-row metadata.
     fn ensureCorrectionStarts(self: *SparseForrestTomlin, required: usize) FtError!void {
         if (required <= self.correction_starts.len) return;
         const capacity = grow(self.correction_starts.len, required) catch return error.CapacityOverflow;
@@ -394,6 +447,7 @@ pub const SparseForrestTomlin = struct {
     }
 };
 
+/// Compute a geometric retained-capacity target.
 fn grow(current: usize, required: usize) error{Overflow}!usize {
     var capacity = @max(current, 8);
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;

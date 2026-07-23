@@ -8,11 +8,21 @@ const foundation = @import("foundation");
 const memory = @import("memory.zig");
 const csc = @import("csc.zig");
 
-pub const AbsoluteRange = struct { min: f64, max: f64 };
+/// Minimum and maximum magnitudes among stored coefficients.
+pub const AbsoluteRange = struct {
+    /// Smallest absolute stored value.
+    min: f64,
+    /// Largest absolute stored value.
+    max: f64,
+};
 
+/// Combined range and threshold-count diagnostic.
 pub const ValueAssessment = struct {
+    /// Null for an empty matrix, otherwise its absolute range.
     range: ?AbsoluteRange,
+    /// Coefficients at or below the requested small threshold.
     small_count: usize,
+    /// Coefficients at or above the requested large threshold.
     large_count: usize,
 };
 
@@ -63,6 +73,7 @@ pub fn assessValues(matrix: csc.CscMatrix, small_limit: f64, large_limit: f64) c
     return .{ .range = absoluteRange(matrix), .small_count = small_count, .large_count = large_count };
 }
 
+/// Return whether any coefficient magnitude exceeds a validated finite limit.
 pub fn hasLargeValue(matrix: csc.CscMatrix, large_limit: f64) csc.MatrixError!bool {
     if (!std.math.isFinite(large_limit) or large_limit < 0.0) return error.InvalidTolerance;
     for (matrix.values) |value| if (@abs(value) >= large_limit) return true;
@@ -80,6 +91,7 @@ pub fn columnOneNorms(matrix: csc.CscMatrix, output: []f64) csc.MatrixError!void
     columnOneNormsAssumeValid(matrix, output);
 }
 
+/// Trusted computation of each column's sum of absolute coefficients.
 pub fn columnOneNormsAssumeValid(matrix: csc.CscMatrix, output: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum: f64 = 0.0;
@@ -107,6 +119,7 @@ pub fn rowOneNorms(matrix: csc.CscMatrix, output: []f64) csc.MatrixError!void {
     rowOneNormsAssumeValid(matrix, output);
 }
 
+/// Trusted computation of each row's sum of absolute coefficients.
 pub fn rowOneNormsAssumeValid(matrix: csc.CscMatrix, output: []f64) void {
     @memset(output, 0.0);
     for (matrix.row_indices, matrix.values) |row, value|
@@ -150,6 +163,7 @@ pub fn addProduct(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) c
     addProductAssumeValid(matrix, alpha, x, y);
 }
 
+/// Trusted leaf kernel for `y += alpha*A*x` with dense `x`.
 pub noinline fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
     if (matrix.compact_col_starts) |starts|
@@ -172,12 +186,14 @@ noinline fn addProductKernel(comptime Offset: type, num_cols: usize, starts: []c
     }
 }
 
+/// Checked `y += alpha*A*x` that skips exactly zero input multipliers.
 pub fn addProductSkippingZeros(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_cols or y.len != matrix.num_rows) return error.DimensionMismatch;
     if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
     addProductSkippingZerosAssumeValid(matrix, alpha, x, y);
 }
 
+/// Trusted zero-skipping accumulation kernel.
 pub fn addProductSkippingZerosAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
     for (0..matrix.num_cols) |col| {
@@ -197,6 +213,7 @@ pub fn addTransposeProduct(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y:
     addTransposeProductAssumeValid(matrix, alpha, x, y);
 }
 
+/// Trusted accumulation `y += alpha*A^T*x`.
 pub fn addTransposeProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
     for (0..matrix.num_cols) |col| {
@@ -214,6 +231,7 @@ pub fn multiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64, sc
     multiplyHighPrecisionAssumeValid(matrix, x, y, scratch);
 }
 
+/// Trusted `A*x` using higher-precision accumulators supplied by the caller.
 pub fn multiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
     for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
     for (0..matrix.num_cols) |col| {
@@ -282,6 +300,7 @@ pub fn transposeMultiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: 
     transposeMultiplyHighPrecisionAssumeValid(matrix, x, y);
 }
 
+/// Trusted `A^T*x` with high-precision per-column accumulation.
 pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
@@ -293,6 +312,7 @@ pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []con
     }
 }
 
+/// Fast trusted high-precision transpose multiply using the target accumulator.
 pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
@@ -304,6 +324,7 @@ pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: [
     }
 }
 
+/// Trusted `A^T*x` using compensated f64 summation per column.
 pub fn transposeMultiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);

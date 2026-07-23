@@ -10,13 +10,20 @@ const csc = @import("csc.zig");
 const memory = @import("memory.zig");
 
 pub const TransposeBuffers = struct {
+    /// Single aligned allocation backing outputs and cursor scratch.
     storage: []align(64) u8,
+    /// Native-width output column offsets.
     starts: []usize,
+    /// Compact output offsets used by narrow-offset kernels.
     compact_starts: []foundation.HUInt,
+    /// Output row IDs.
     rows: []foundation.RowId,
+    /// Output coefficients parallel to `rows`.
     values: []f64,
+    /// Compact insertion cursor used only during construction.
     cursor: []foundation.HUInt,
 
+    /// Allocate page-colored transpose output and scratch streams.
     pub fn init(allocator: std.mem.Allocator, num_cols: usize, nnz: usize) (std.mem.Allocator.Error || csc.MatrixError)!TransposeBuffers {
         if (num_cols == std.math.maxInt(usize)) return error.DimensionTooLarge;
         const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
@@ -41,6 +48,7 @@ pub const TransposeBuffers = struct {
         };
     }
 
+    /// Release the single packed allocation.
     pub fn deinit(self: *TransposeBuffers, allocator: std.mem.Allocator) void {
         allocator.free(self.storage);
         self.* = undefined;
@@ -229,6 +237,7 @@ pub fn transposeLeanAssumeValidCompact(
     return csc.CscMatrix.initPackedPartsAssumeValid(matrix.num_cols, matrix.num_rows, starts, rows, out_values, storage, compact_starts);
 }
 
+/// Validate the source and transpose it into exact-size caller buffers.
 pub fn transposeInto(matrix: csc.CscMatrix, starts: []usize, rows: []foundation.RowId, values: []f64, cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     try matrix.validate();
     if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
@@ -281,6 +290,7 @@ pub fn transposeIntoAssumeValidCompact(matrix: csc.CscMatrix, starts_compact: []
     return fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, rows, values);
 }
 
+/// Offset-width-specialized leaf that scatters source CSC entries into transpose.
 fn fillTransposeEntries(
     comptime Offset: type,
     num_cols: usize,

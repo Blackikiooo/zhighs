@@ -14,17 +14,28 @@ const output = @import("../output.zig");
 const Section = enum { none, obj_sense, rows, columns, rhs, ranges, bounds, end };
 
 const Parser = struct {
+    /// Owner shared by temporary indexes and semantic builder.
     allocator: std.mem.Allocator,
+    /// Shared semantic model builder.
     builder: Builder,
+    /// Row-name to temporary row-index lookup.
     row_by_name: std.StringHashMap(usize),
+    /// Column-name to temporary column-index lookup.
     col_by_name: std.StringHashMap(usize),
+    /// MPS free row that supplies objective coefficients.
     objective_row: ?[]const u8 = null,
+    /// Whether INTORG/INTEND markers currently create integer columns.
     integer_mode: bool = false,
+    /// First RHS set accepted; later sets are ignored consistently.
     rhs_set: ?[]const u8 = null,
+    /// First RANGES set accepted.
     ranges_set: ?[]const u8 = null,
+    /// First BOUNDS set accepted.
     bounds_set: ?[]const u8 = null,
+    /// Cooperative cancellation poller.
     control: types.ParseControl,
 
+    /// Construct parser indexes and configure resource limits.
     fn init(allocator: std.mem.Allocator, fallback_name: []const u8, options: types.ReadOptions) Parser {
         var builder = Builder.init(allocator);
         builder.configureLimits(options);
@@ -38,6 +49,7 @@ const Parser = struct {
         };
     }
 
+    /// Release name indexes and unfinished semantic storage.
     fn deinit(self: *Parser) void {
         self.row_by_name.deinit();
         self.col_by_name.deinit();
@@ -53,6 +65,7 @@ const Parser = struct {
         self.col_by_name = std.StringHashMap(usize).init(self.allocator);
     }
 
+    /// Resolve or create one structural column under current integer mode.
     fn column(self: *Parser, name: []const u8) types.IoError!usize {
         if (self.col_by_name.get(name)) |index| return index;
         const index = try self.builder.addColumn(.{ .name = name, .kind = if (self.integer_mode) .integer else .continuous });
@@ -61,6 +74,7 @@ const Parser = struct {
     }
 };
 
+/// Parse a complete borrowed free/fixed-field MPS source into owned model data.
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []const u8, options: types.ReadOptions) types.IoError!ModelData {
     if (input.len > options.max_file_bytes) return error.FileTooLarge;
     try options.checkCancelled();
@@ -112,6 +126,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, fallback_name: []c
     return parser.builder.finishColumnOrdered(options);
 }
 
+/// Serialize a borrowed linear model as deterministic free-format MPS.
 pub fn write(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.ModelView, names: output.Names, options: types.WriteOptions) types.IoError!void {
     _ = options;
     const model_name: []const u8 = if (model.name.len == 0) "MODEL" else model.name;
@@ -183,12 +198,14 @@ pub fn write(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.Mo
     try output.write(file, "ENDATA\n");
 }
 
+/// Return whether a name is representable as one whitespace-delimited MPS field.
 fn tokenName(name: []const u8) bool {
     if (name.len == 0 or name.len > 255) return false;
     for (name) |char| if (std.ascii.isWhitespace(char)) return false;
     return true;
 }
 
+/// Emit the MPS BOUNDS records required for one variable domain and interval.
 fn writeMpsBound(file: *std.Io.Writer, allocator: std.mem.Allocator, name: []const u8, kind: types.VariableType, lower: f64, upper: f64) types.IoError!void {
     if (lower > upper or std.math.isNan(lower) or std.math.isNan(upper)) return error.InvalidBounds;
     if (kind == .binary) {
@@ -209,6 +226,7 @@ fn writeMpsBound(file: *std.Io.Writer, allocator: std.mem.Allocator, name: []con
     if (!std.math.isInf(upper)) try output.print(file, allocator, " {s} BND1 {s} {d}\n", .{ upper_code, name, upper });
 }
 
+/// Split one free-format record into borrowed whitespace-delimited fields.
 fn tokenize(allocator: std.mem.Allocator, line: []const u8) types.IoError!std.ArrayListUnmanaged([]const u8) {
     var fields: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer fields.deinit(allocator);
@@ -253,6 +271,7 @@ fn tokenizeRecord(
     return fields;
 }
 
+/// Detect whether column positions should be interpreted as traditional MPS fields.
 fn isFixedRecord(raw: []const u8, section: Section) bool {
     if (raw.len < 5 or raw[0] != ' ' or raw[3] != ' ') return false;
     return switch (section) {
@@ -262,6 +281,7 @@ fn isFixedRecord(raw: []const u8, section: Section) bool {
     };
 }
 
+/// Trim and append one fixed-column substring when nonempty.
 fn appendFixedField(
     allocator: std.mem.Allocator,
     fields: *std.ArrayListUnmanaged([]const u8),
@@ -274,6 +294,7 @@ fn appendFixedField(
     if (field.len != 0) fields.append(allocator, field) catch return error.OutOfMemory;
 }
 
+/// Map a case-insensitive header field to the parser section state.
 fn sectionKeyword(field: []const u8) ?Section {
     if (std.ascii.eqlIgnoreCase(field, "NAME")) return .none;
     if (std.ascii.eqlIgnoreCase(field, "OBJSENSE")) return .obj_sense;
@@ -287,11 +308,13 @@ fn sectionKeyword(field: []const u8) ?Section {
     return null;
 }
 
+/// Parse the optional OBJSENSE record.
 fn parseObjectiveSense(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (fields.len != 1) return error.InvalidSyntax;
     if (std.ascii.startsWithIgnoreCase(fields[0], "MAX")) parser.builder.objective_sense = .maximize else if (std.ascii.startsWithIgnoreCase(fields[0], "MIN")) parser.builder.objective_sense = .minimize else return error.InvalidSyntax;
 }
 
+/// Parse one ROWS record and register objective or constraint semantics.
 fn parseRow(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (fields.len != 2 or fields[0].len != 1) return error.InvalidSyntax;
     const name = fields[1];
@@ -313,11 +336,13 @@ fn parseRow(parser: *Parser, fields: []const []const u8) types.IoError!void {
     }
 }
 
+/// Remove optional single quotes around INTORG/INTEND marker names.
 fn unquoteMarker(value: []const u8) []const u8 {
     if (value.len >= 2 and ((value[0] == '\'' and value[value.len - 1] == '\'') or (value[0] == '"' and value[value.len - 1] == '"'))) return value[1 .. value.len - 1];
     return value;
 }
 
+/// Parse one COLUMNS record, including integer-mode marker records.
 fn parseColumnRecord(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (fields.len >= 3 and std.ascii.eqlIgnoreCase(unquoteMarker(fields[1]), "MARKER")) {
         const marker = unquoteMarker(fields[2]);
@@ -331,6 +356,7 @@ fn parseColumnRecord(parser: *Parser, fields: []const []const u8) types.IoError!
     if (fields.len == 5) try addColumnPair(parser, column, fields[3], fields[4]);
 }
 
+/// Apply one row/value pair from a COLUMNS record.
 fn addColumnPair(parser: *Parser, column: usize, row_name: []const u8, number: []const u8) types.IoError!void {
     const value = try parseFinite(number);
     if (parser.objective_row != null and std.mem.eql(u8, row_name, parser.objective_row.?)) {
@@ -341,6 +367,7 @@ fn addColumnPair(parser: *Parser, column: usize, row_name: []const u8, number: [
     }
 }
 
+/// Parse one RHS record, honoring only the selected RHS set.
 fn parseRhs(parser: *Parser, fields: []const []const u8) types.IoError!void {
     const offset: usize = switch (fields.len) {
         2, 4 => 0,
@@ -355,6 +382,7 @@ fn parseRhs(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (fields.len - offset == 4) try setRhsPair(parser, fields[offset + 2], fields[offset + 3]);
 }
 
+/// Apply one RHS value to the objective offset or row bounds.
 fn setRhsPair(parser: *Parser, row_name: []const u8, number: []const u8) types.IoError!void {
     const value = try parseFinite(number);
     if (parser.objective_row != null and std.mem.eql(u8, row_name, parser.objective_row.?)) {
@@ -373,6 +401,7 @@ fn setRhsPair(parser: *Parser, row_name: []const u8, number: []const u8) types.I
     }
 }
 
+/// Parse one RANGES record, honoring only the selected range set.
 fn parseRanges(parser: *Parser, fields: []const []const u8) types.IoError!void {
     const offset: usize = switch (fields.len) {
         2, 4 => 0,
@@ -387,6 +416,7 @@ fn parseRanges(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (fields.len - offset == 4) try setRangePair(parser, fields[offset + 2], fields[offset + 3]);
 }
 
+/// Convert one MPS range value into a two-sided row interval.
 fn setRangePair(parser: *Parser, row_name: []const u8, number: []const u8) types.IoError!void {
     const signed_range = try parseFinite(number);
     const magnitude = @abs(signed_range);
@@ -438,6 +468,7 @@ test "MPS parser enforces record and semantic limits and cancellation" {
     try std.testing.expectError(error.Cancelled, parse(std.testing.allocator, source, "limits", .{ .interrupt_flag = &interrupted }));
 }
 
+/// Parse one BOUNDS record and update domain plus interval.
 fn parseBound(parser: *Parser, fields: []const []const u8) types.IoError!void {
     const code = fields[0];
     const requires_value = std.ascii.eqlIgnoreCase(code, "LO") or std.ascii.eqlIgnoreCase(code, "UP") or
@@ -487,6 +518,7 @@ fn parseBound(parser: *Parser, fields: []const []const u8) types.IoError!void {
     if (target.lower > target.upper) return error.InvalidBounds;
 }
 
+/// Convert an MPS numeric field and reject NaN or infinity.
 fn parseFinite(text: []const u8) types.IoError!f64 {
     const value = std.fmt.parseFloat(f64, text) catch return error.InvalidNumber;
     if (!std.math.isFinite(value)) return error.NonFiniteValue;

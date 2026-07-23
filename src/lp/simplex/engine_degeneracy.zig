@@ -58,6 +58,12 @@ pub fn countPrimalRatioTies(self: *const SimplexEngine, selected_step: f64) u32 
     return count;
 }
 
+/// Activate deterministic perturbation when the configured trigger is met.
+///
+/// Baseline mode never allocates or populates perturbation state. Automatic
+/// mode waits for a sustained 256-pivot degenerate chain, while explicitly
+/// requested perturbation may activate at the normal anti-cycling threshold.
+/// Ranks are generated in the current scaled coordinate system.
 pub fn prepareDegeneracyPolicy(self: *SimplexEngine, rows: usize, columns: usize) SolveStatus {
     if (self.active_degeneracy_strategy == .baseline or !self.numerical.anti_cycling_active or
         self.degeneracy.active)
@@ -80,6 +86,13 @@ pub fn prepareDegeneracyPolicy(self: *SimplexEngine, rows: usize, columns: usize
     return .optimal;
 }
 
+/// Record one committed pivot or same-basis bound move.
+///
+/// Besides phase-specific iteration counters, this classifies zero/sub-
+/// tolerance progress, advances the perturbation epoch, detects repeated
+/// bases when requested, and records taboo entries and optional trace events.
+/// The function is observational with respect to the accepted basis change:
+/// it may adjust future ordering policy but never revises the completed pivot.
 pub fn observeIterationStep(
     self: *SimplexEngine,
     step: f64,
@@ -103,7 +116,7 @@ pub fn observeIterationStep(
             .dual_phase_one => self.iteration_counters.dual_phase_one_pivots += 1,
             .dual_feasibility_repair => self.iteration_counters.dual_repair_pivots += 1,
             .phase_two => {
-                if (self.shifted_dual_accounting_active)
+                if (self.dual_control.costs_shifted)
                     self.iteration_counters.shifted_dual_pivots += 1
                 else if (self.algorithm == .dual_revised)
                     self.iteration_counters.dual_phase_two_pivots += 1
@@ -187,6 +200,11 @@ pub fn observeIterationStep(
     }
 }
 
+/// Hash basis membership and every column status into a stable 64-bit key.
+///
+/// FNV-1a-style wrapping arithmetic makes the result deterministic across
+/// allocator addresses and runs. It is used only for cycle diagnostics and
+/// taboo escalation, never as a correctness certificate.
 pub fn basisFingerprint(self: *const SimplexEngine) u64 {
     const basis = if (self.basis) |*value| value else return 0;
     var fingerprint: u64 = 0xcbf29ce484222325;
@@ -200,6 +218,11 @@ pub fn basisFingerprint(self: *const SimplexEngine) u64 {
     return fingerprint;
 }
 
+/// Insert a degenerate-basis fingerprint into the bounded history ring.
+///
+/// Returns `true` when the same fingerprint is already present. Otherwise the
+/// oldest slot is overwritten once the fixed-capacity ring is full, keeping
+/// per-iteration memory use constant.
 pub fn rememberDegenerateBasis(self: *SimplexEngine, fingerprint: u64) bool {
     for (self.degeneracy_basis_fingerprints[0..self.degeneracy_basis_fingerprint_count]) |previous| {
         if (previous == fingerprint) return true;

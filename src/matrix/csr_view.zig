@@ -9,6 +9,7 @@ const std = @import("std");
 const foundation = @import("foundation");
 const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
+const MatrixError = csc.MatrixError;
 const memory = @import("memory.zig");
 
 const RowId = foundation.RowId;
@@ -16,10 +17,15 @@ const ColId = foundation.ColId;
 
 /// Non-owning CSR slices. A view is cheap to copy and must not outlive its cache.
 pub const CsrView = struct {
+    /// Borrowed logical row dimension.
     num_rows: usize,
+    /// Borrowed logical column dimension.
     num_cols: usize,
+    /// Compact row offsets of length `num_rows + 1`.
     row_starts: []const foundation.HUInt,
+    /// Strictly increasing column IDs within each row range.
     col_indices: []const ColId,
+    /// Borrowed coefficients parallel to `col_indices`.
     values: []const f64,
 
     const Self = @This();
@@ -36,34 +42,35 @@ pub const CsrView = struct {
         return .{ .num_rows = num_rows, .num_cols = num_cols, .row_starts = row_starts, .col_indices = col_indices, .values = values };
     }
 
+    /// Number of stored nonzero coefficients.
     pub inline fn nnz(self: Self) usize {
         return self.values.len;
     }
 
     /// Full structural validation for parser, conversion, and test boundaries.
-    pub fn validate(self: Self) csc.MatrixError!void {
+    pub fn validate(self: Self) MatrixError!void {
         try csc.validateDimensions(self.num_rows, self.num_cols);
-        if (self.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
-        if (self.row_starts.len != self.num_rows + 1) return error.InvalidRowStarts;
-        if (self.col_indices.len != self.values.len) return error.InconsistentStorage;
-        if (self.row_starts[0] != 0) return error.InvalidRowStarts;
-        if (self.row_starts[self.num_rows] != self.nnz()) return error.InvalidRowStarts;
+        if (self.num_rows == std.math.maxInt(usize)) return MatrixError.DimensionTooLarge;
+        if (self.row_starts.len != self.num_rows + 1) return MatrixError.InvalidRowStarts;
+        if (self.col_indices.len != self.values.len) return MatrixError.InconsistentStorage;
+        if (self.row_starts[0] != 0) return MatrixError.InvalidRowStarts;
+        if (self.row_starts[self.num_rows] != self.nnz()) return MatrixError.InvalidRowStarts;
 
         for (0..self.num_rows) |row_index| {
             const begin: usize = @intCast(self.row_starts[row_index]);
             const end: usize = @intCast(self.row_starts[row_index + 1]);
-            if (begin > end or end > self.nnz()) return error.InvalidRowStarts;
+            if (begin > end or end > self.nnz()) return MatrixError.InvalidRowStarts;
 
             var previous_col: ?usize = null;
             for (begin..end) |position| {
                 const col = self.col_indices[position].toUsize();
                 const value = self.values[position];
-                if (col >= self.num_cols) return error.IndexOutOfBounds;
+                if (col >= self.num_cols) return MatrixError.IndexOutOfBounds;
                 if (previous_col) |previous| {
-                    if (col <= previous) return error.IndicesNotStrictlyIncreasing;
+                    if (col <= previous) return MatrixError.IndicesNotStrictlyIncreasing;
                 }
-                if (!std.math.isFinite(value)) return error.NonFiniteValue;
-                if (value == 0.0) return error.ExplicitZero;
+                if (!std.math.isFinite(value)) return MatrixError.NonFiniteValue;
+                if (value == 0.0) return MatrixError.ExplicitZero;
                 previous_col = col;
             }
         }
@@ -90,6 +97,8 @@ pub const CsrView = struct {
         self.multiplyAssumeValid(x, y);
     }
 
+    /// Trusted CSR `y = A*x` kernel. Each output is a contiguous row dot
+    /// product, and `y` is overwritten rather than accumulated.
     pub noinline fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
@@ -113,6 +122,7 @@ pub const CsrView = struct {
         self.transposeMultiplyAssumeValid(x, y);
     }
 
+    /// Trusted `y = A^T*x` scatter kernel. Clears `y` before accumulating rows.
     pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
@@ -134,12 +144,18 @@ pub const CsrView = struct {
 
 /// Caller-owned CSC-to-CSR output and cursor in one page-colored allocation.
 pub const CsrBuffers = struct {
+    /// Single aligned allocation backing all output and scratch slices.
     storage: []align(64) u8,
+    /// CSR row-offset output region.
     row_starts: []foundation.HUInt,
+    /// CSR column-index output region.
     col_indices: []ColId,
+    /// CSR coefficient output region.
     values: []f64,
+    /// Per-row insertion cursors used during CSC transposition.
     cursor: []foundation.HUInt,
 
+    /// Allocate page-colored CSR output plus conversion scratch in one block.
     pub fn init(allocator: std.mem.Allocator, num_rows: usize, nnz: usize) (std.mem.Allocator.Error || csc.MatrixError)!CsrBuffers {
         if (num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
         const starts_bytes = std.math.mul(usize, num_rows + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
@@ -161,6 +177,7 @@ pub const CsrBuffers = struct {
         };
     }
 
+    /// Release the single backing allocation.
     pub fn deinit(self: *CsrBuffers, allocator: std.mem.Allocator) void {
         allocator.free(self.storage);
         self.* = undefined;
@@ -173,12 +190,19 @@ pub const CsrBuffers = struct {
 /// cache cannot infer mutations from raw slices, so revision ownership belongs
 /// at Model level where structural changes are already coordinated.
 pub const CsrCache = struct {
+    /// Revision of the authoritative CSC matrix used to build this cache.
     source_revision: u64,
+    /// Cached logical row dimension.
     num_rows: usize,
+    /// Cached logical column dimension.
     num_cols: usize,
+    /// Mutable CSR row offsets within `storage`.
     row_starts: []foundation.HUInt,
+    /// Mutable CSR column IDs within `storage`.
     col_indices: []ColId,
+    /// Mutable CSR values within `storage`.
     values: []f64,
+    /// Single aligned allocation owning all three CSR arrays.
     storage: []align(64) u8,
 
     const Self = @This();
@@ -202,6 +226,8 @@ pub const CsrCache = struct {
         return buildWithScratchAssumeValid(allocator, matrix, source_revision, next);
     }
 
+    /// Validate CSC input, then build a cache while reusing caller-owned row
+    /// insertion cursors.
     pub fn buildWithScratch(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []foundation.HUInt) (std.mem.Allocator.Error || csc.MatrixError)!Self {
         try matrix.validate();
         return buildWithScratchAssumeValid(allocator, matrix, source_revision, row_cursor_scratch);
@@ -242,11 +268,13 @@ pub const CsrCache = struct {
         };
     }
 
+    /// Release the cache's packed CSR allocation.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.storage);
         self.* = undefined;
     }
 
+    /// Return whether this cache was built from `current_revision`.
     pub inline fn isCurrent(self: Self, current_revision: u64) bool {
         return self.source_revision == current_revision;
     }
@@ -276,6 +304,11 @@ pub fn fillFromCsc(matrix: csc.CscMatrix, row_starts: []foundation.HUInt, col_in
     return fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
 }
 
+/// Trusted allocation-free CSC-to-CSR conversion.
+///
+/// Output buffers must have exact logical lengths and `matrix` must already be
+/// canonical. The routine counts rows, prefix-sums offsets, and scatters CSC
+/// columns in ascending order, which preserves sorted column IDs in every row.
 pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []foundation.HUInt, col_indices: []ColId, values: []f64, row_cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
     if (row_starts.len != matrix.num_rows + 1 or col_indices.len != matrix.nnz() or
         values.len != matrix.nnz() or row_cursor_scratch.len < matrix.num_rows)
@@ -290,6 +323,7 @@ pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []foundation.HU
     return fillEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, col_indices, values);
 }
 
+/// Offset-width-specialized leaf that scatters coefficients into CSR slots.
 noinline fn fillEntries(
     comptime Offset: type,
     num_cols: usize,

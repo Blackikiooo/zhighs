@@ -23,68 +23,119 @@ pub const UpdateFailureKind = enum { dimension_mismatch, unsupported, singular, 
 /// Aggregate statistics across one solve. Counts are always populated; the
 /// `*_ns` timing fields require an explicit `statistics_io` clock to be set.
 pub const FactorizationStats = struct {
-    factorizations: usize = 0, // Total base factorizations built
-    ftran_calls: usize = 0, // Forward solves (B^-1 * x)
-    btran_calls: usize = 0, // Transpose solves (B^-T * x)
-    eta_updates: usize = 0, // Product-form Eta updates applied (dense backend)
-    ft_updates: usize = 0, // Forrest-Tomlin updates applied (sparse backend)
-    maximum_update_growth: f64 = 1.0, // Worst max/diagonal ratio observed
+    /// Number of complete base factorizations built.
+    factorizations: usize = 0,
+    /// Number of forward solves computing `B^-1 rhs`.
+    ftran_calls: usize = 0,
+    /// Number of transpose solves computing `B^-T rhs`.
+    btran_calls: usize = 0,
+    /// Product-form eta updates accepted by the dense backend.
+    eta_updates: usize = 0,
+    /// Forrest--Tomlin updates accepted by the sparse backend.
+    ft_updates: usize = 0,
+    /// Worst `max(abs(direction)) / abs(pivot)` update-growth indicator.
+    maximum_update_growth: f64 = 1.0,
+    /// Reinversions caused by exhausting the permitted update chain.
     update_limit_reinversions: usize = 0,
+    /// Reinversions caused by excessive update growth.
     update_growth_reinversions: usize = 0,
+    /// Reinversions requested after a solve residual failed validation.
     solve_residual_reinversions: usize = 0,
+    /// Reinversions requested because a pivotal coefficient was too small.
     small_pivot_reinversions: usize = 0,
-    maximum_update_count: usize = 0, // Peak update chain length seen
-    invert_ns: u64 = 0, // Time spent inside factorize*
-    ftran_ns: u64 = 0, // Time spent inside solve/solveForUpdate
-    btran_ns: u64 = 0, // Time spent inside solveTranspose
-    update_ns: u64 = 0, // Time spent inside update
+    /// Longest update chain observed between two base factorizations.
+    maximum_update_count: usize = 0,
+    /// Nanoseconds spent constructing base factorizations.
+    invert_ns: u64 = 0,
+    /// Nanoseconds spent in forward solves, including update preparation.
+    ftran_ns: u64 = 0,
+    /// Nanoseconds spent in transpose solves.
+    btran_ns: u64 = 0,
+    /// Nanoseconds spent installing basis updates.
+    update_ns: u64 = 0,
+    /// Number of FTRAN right-hand sides sampled for density statistics.
     ftran_rhs_samples: usize = 0,
-    ftran_rhs_nonzeros: usize = 0, // Total nonzeros across sampled FTRAN RHS vectors
+    /// Total exact nonzeros across sampled FTRAN right-hand sides.
+    ftran_rhs_nonzeros: usize = 0,
+    /// Number of BTRAN right-hand sides sampled for density statistics.
     btran_rhs_samples: usize = 0,
+    /// Total exact nonzeros across sampled BTRAN right-hand sides.
     btran_rhs_nonzeros: usize = 0,
+    /// Forward solves dispatched through the dense interface.
     dense_ftran_dispatches: usize = 0,
+    /// Transpose solves dispatched through the dense interface.
     dense_btran_dispatches: usize = 0,
-    hyper_ftran_dispatches: usize = 0, // Reserved for hyper-sparse dispatches
+    /// Forward solves for which the sparse backend selected hyper-sparse work.
+    hyper_ftran_dispatches: usize = 0,
+    /// Transpose solves for which the sparse backend selected hyper-sparse work.
     hyper_btran_dispatches: usize = 0,
     /// Sparse-index dispatches where the caller provided nonzero positions
     /// and the sparse LU backend used adaptive (hyper-sparse vs dense) solve.
     sparse_ftran_dispatches: usize = 0,
+    /// Sparse-index BTRAN calls presented to the sparse backend.
     sparse_btran_dispatches: usize = 0,
+    /// Update calls rejected because vector dimensions were inconsistent.
     update_dimension_failures: usize = 0,
+    /// Update calls rejected because the active backend lacks the operation.
     update_unsupported_failures: usize = 0,
+    /// Updates rejected because the resulting basis was singular.
     update_singular_failures: usize = 0,
+    /// Updates rejected for non-finite or unstable numerical state.
     update_numerical_failures: usize = 0,
+    /// Updates rejected because retained storage could not be allocated.
     update_out_of_memory_failures: usize = 0,
+    /// Total failed update attempts while the dense backend was active.
     dense_update_failures: usize = 0,
+    /// Total failed update attempts while the sparse backend was active.
     sparse_update_failures: usize = 0,
 };
 
 /// View of one pivot update supplied by the simplex engine.
 pub const PivotUpdateView = struct {
+    /// Basis row whose current basic column leaves.
     leaving_row: u32,
+    /// Global index of the column entering the basis.
     entering_col: u32,
-    direction: []const f64, // Updated tableau column (B^-1 * a_entering)
+    /// Updated tableau column `B^-1 a_entering`.
+    direction: []const f64,
     /// Converts a signed movement direction back to the actual entering
     /// basis column. Primal simplex uses -1 when entering from an upper bound.
     column_scale: f64 = 1.0,
 };
 
 pub const Factorization = struct {
+    /// Owner of all retained backend and update-chain storage.
     allocator: std.mem.Allocator,
-    update_count: usize = 0, // Updates applied since last factorize
-    dense_lu: matrix.DenseLU, // Dense LU backend (small bases)
-    sparse_lu: matrix.SparseLU, // Sparse LU backend (larger bases)
-    sparse_basis: matrix.SparseBasisBuffers, // Reusable CSC assembly buffers
-    eta_values: []f64 = &.{}, // Slab of Eta vectors (dense backend only)
-    eta_rows: []u32 = &.{}, // Leaving-row index for each Eta
-    identity_basic: []u32 = &.{}, // Identity basis head for `factorizeIdentity`
-    identity_scale: []f64 = &.{}, // Column scales for the identity basis
-    identity_sign: []f64 = &.{}, // Sign convention for artificial identity columns
-    eta_count: usize = 0, // Live Eta vectors in the slab
-    eta_capacity: usize = 64, // Max Eta vectors before forced refactor (dense backend)
-    dimension: usize = 0, // Current basis dimension (n = num_rows)
-    backend_kind: BackendKind = .dense_lu, // Active backend for the current basis
-    sparse_dimension_threshold: usize = 64, // Bases at or above this use the sparse backend
+    /// Updates installed since the last complete reinversion.
+    update_count: usize = 0,
+    //todo:need to retain only one lu backend after the debug, using enum(union).
+    /// Dense LU implementation retained for small bases and oracle tests.
+    dense_lu: matrix.DenseLU,
+    /// Sparse LU implementation used for production-sized bases.
+    sparse_lu: matrix.SparseLU,
+    /// Reusable CSC buffers used to assemble a basis from global columns.
+    sparse_basis: matrix.SparseBasisBuffers,
+    /// Row-major slab containing dense-backend eta vectors.
+    eta_values: []f64 = &.{},
+    /// Pivot/leaving row associated with each live eta vector.
+    eta_rows: []u32 = &.{},
+    /// Reusable global basis indices for sparse identity factorization.
+    identity_basic: []u32 = &.{},
+    /// Unit row scales paired with `identity_basic`.
+    identity_scale: []f64 = &.{},
+    /// Unit artificial-column signs paired with `identity_basic`.
+    identity_sign: []f64 = &.{},
+    /// Number of live eta vectors stored in `eta_values`.
+    eta_count: usize = 0,
+    /// Maximum dense eta-chain length allocated before reinversion is required.
+    eta_capacity: usize = 64,
+    /// Row count of the currently factorized square basis.
+    dimension: usize = 0,
+    /// Backend that owns the current base factorization and update chain.
+    backend_kind: BackendKind = .dense_lu,
+    /// Minimum basis dimension at which CSC assembly and sparse LU are used.
+    sparse_dimension_threshold: usize = 64,
+    /// Counters and optional timings accumulated for the current solve.
     stats: FactorizationStats = .{},
     /// Largest max(|d|)/|d[p]| observed since reinversion. This inexpensive
     /// signal estimates how strongly an update can amplify solve error.
@@ -385,6 +436,48 @@ pub const Factorization = struct {
             error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
             error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
         };
+    }
+
+    /// Materialize the sparse index component of the most recent FTRAN
+    /// result without allocating. HiGHS carries this beside `HVector.array`
+    /// and uses its order when extending the dual RHS infeasibility list.
+    /// HiGHS' sparse `ftranU` walks U pivots backwards. Sparse LU therefore
+    /// publishes nonzeros in reverse pivot-column order; dense LU has no
+    /// sparse traversal and uses natural row order.
+    pub fn gatherFtranResultIndices(self: *const Factorization, rhs: []const f64, output: []u32) usize {
+        if (rhs.len != self.dimension or output.len < self.dimension) return 0;
+        var count: usize = 0;
+        if (self.backend_kind == .sparse_lu) {
+            var nonzero_count: usize = 0;
+            for (rhs) |value| if (value != 0.0) {
+                nonzero_count += 1;
+            };
+            // HVector::reIndex replaces factor order by natural row order
+            // whenever the result exceeds 10% density.
+            if (nonzero_count * 10 > self.dimension) {
+                for (rhs, 0..) |value, row| {
+                    if (value == 0.0) continue;
+                    output[count] = @intCast(row);
+                    count += 1;
+                }
+            } else {
+                var position = self.dimension;
+                while (position > 0) {
+                    position -= 1;
+                    const row = self.sparse_lu.pivot_columns[position];
+                    if (rhs[row] == 0.0) continue;
+                    output[count] = row;
+                    count += 1;
+                }
+            }
+        } else {
+            for (rhs, 0..) |value, row| {
+                if (value == 0.0) continue;
+                output[count] = @intCast(row);
+                count += 1;
+            }
+        }
+        return count;
     }
 
     /// Transpose solve `rhs = B^-T * rhs` in place. Eta updates are applied

@@ -13,17 +13,28 @@ pub const ObjectiveSense = enum(i2) { minimize = 1, maximize = -1 };
 /// Non-owning view over a sparse LP in CSC form. All slices are borrowed from
 /// the caller; the view performs no allocation.
 pub const ProblemView = struct {
+    /// Number of constraint rows and therefore the dimension of every basis.
     num_rows: usize,
+    /// Number of structural columns, excluding logical and artificial columns.
     num_cols: usize,
-    col_cost: []const f64, // Objective coefficients (length = num_cols)
-    col_lower: []const f64, // Column lower bounds (length = num_cols)
-    col_upper: []const f64, // Column upper bounds (length = num_cols)
-    row_lower: []const f64, // Row lower bounds (length = num_rows)
-    row_upper: []const f64, // Row upper bounds (length = num_rows)
-    matrix: matrix.CscView, // Constraint matrix in compressed sparse column form
+    /// Objective coefficient for each structural column.
+    col_cost: []const f64,
+    /// Inclusive lower bound for each structural column.
+    col_lower: []const f64,
+    /// Inclusive upper bound for each structural column.
+    col_upper: []const f64,
+    /// Inclusive lower activity bound for each constraint row.
+    row_lower: []const f64,
+    /// Inclusive upper activity bound for each constraint row.
+    row_upper: []const f64,
+    /// Borrowed structural constraint matrix in compressed-column form.
+    matrix: matrix.CscView,
+    /// Direction of optimization before internal minimization normalization.
     objective_sense: ObjectiveSense,
-    objective_offset: f64, // Constant added to the objective value
+    /// Constant added to the reported objective value.
+    objective_offset: f64,
 
+    /// Structural validation failures detected before simplex initialization.
     pub const ViewError = error{ DimensionMismatch, InvalidBounds, InvalidMatrix };
 
     /// Validate borrowed dimensions and finite bound ordering without taking

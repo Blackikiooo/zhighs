@@ -8,39 +8,46 @@ const std = @import("std");
 
 /// Record of a single basis change, stored in the taboo circular buffer.
 pub const TabooChange = struct {
+    /// Global column that entered the basis.
     entering: u32 = 0,
+    /// Global column that left the basis.
     leaving: u32 = 0,
+    /// Signed nonbasic movement used by the entering column.
     direction: i8 = 0,
+    /// Perturbation generation in which the change was recorded.
     generation: u32 = 0,
 };
 
 pub const Workspace = struct {
+    /// Owner of all dynamically retained perturbation buffers.
     allocator: std.mem.Allocator,
-    // Perturbation magnitudes for rows and columns, deterministically generated per basis_epoch
+    /// Per-row lexicographic perturbation magnitude for the current epoch.
     row_rank: []f64 = &.{},
+    /// Per-column lexicographic perturbation magnitude for the current epoch.
     column_rank: []f64 = &.{},
-    // Tracks which generation each row/column last participated in perturbation (for cache invalidation)
+    /// Generation in which each `row_rank` entry was last populated.
     row_generation: []u32 = &.{},
+    /// Generation in which each `column_rank` entry was last populated.
     column_generation: []u32 = &.{},
-    // Column index -> taboo expiration (iteration count), 0 means not tabooed
+    /// Iteration at which each column's taboo expires; zero means unrestricted.
     taboo_until: []usize = &.{},
-    // Reduced cost snapshot for detecting progress during perturbation
+    /// Scratch copy used to compare incremental and exact reduced costs.
     reduced_cost_snapshot: []f64 = &.{},
-    // Circular buffer: records the last 64 basis changes (entering/leaving/direction)
+    /// Fixed-size history of recent degenerate basis exchanges.
     taboo: [64]TabooChange = @splat(.{}),
-    // Current perturbation generation (incrementing invalidates old records)
+    /// Current logical generation; incrementing invalidates cached records.
     generation: u32 = 0,
-    // Basis change counter (one of the inputs to deterministicUnit)
+    /// Epoch mixed into deterministic row and column ranks.
     basis_epoch: u64 = 0,
-    // Iteration count since activation (used to decide when to escalate)
+    /// Number of degenerate observations since the current activation.
     active_age: usize = 0,
-    // Perturbation intensity level 0-3 (escalation multiplier)
+    /// Perturbation strength level, saturated to the range 0...3.
     level: u8 = 0,
-    // Whether perturbation is currently active
+    /// Whether rank perturbations currently participate in pricing/ratios.
     active: bool = false,
-    // Whether perturbation has ever been activated (for diagnostics)
+    /// Whether any perturbation epoch was activated during this solve.
     ever_active: bool = false,
-    // Write cursor for the taboo circular buffer
+    /// Next slot overwritten in the circular taboo history.
     taboo_cursor: usize = 0,
 
     /// Construct an empty workspace; arrays are allocated lazily by `ensureCapacity`.

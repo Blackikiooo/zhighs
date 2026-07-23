@@ -22,6 +22,7 @@ const foundation = @import("foundation");
 const matrix = @import("matrix");
 const SimplexEngine = @import("engine.zig").SimplexEngine;
 
+/// Classify one row as a dual leaving candidate under current basic bounds.
 pub fn dualCandidate(self: *const SimplexEngine, row: usize) ?pricing_module.DualLeavingChoice {
     const basis = if (self.basis) |*value| value else return null;
     const value = basis.basic_value[row];
@@ -32,6 +33,7 @@ pub fn dualCandidate(self: *const SimplexEngine, row: usize) ?pricing_module.Dua
     return null;
 }
 
+/// Return the weighted CHUZR merit for a candidate row, or negative infinity.
 pub fn dualCandidateScore(self: *const SimplexEngine, row_u32: u32) f64 {
     const row: usize = @intCast(row_u32);
     const basis = if (self.basis) |*value| value else return 0.0;
@@ -39,6 +41,7 @@ pub fn dualCandidateScore(self: *const SimplexEngine, row_u32: u32) f64 {
     return candidate.violation / @sqrt(@max(basis.row_edge_weight[row], 1.0));
 }
 
+/// Select the highest-merit row from the active sparse candidate list.
 pub fn bestDualCandidate(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
     const basis = if (self.basis) |*value| value else return null;
     var best: ?pricing_module.DualLeavingChoice = null;
@@ -54,6 +57,7 @@ pub fn bestDualCandidate(self: *SimplexEngine) ?pricing_module.DualLeavingChoice
     return best;
 }
 
+/// Rebuild the sparse CHUZR candidate set and density cutoff from all rows.
 pub fn rebuildDualCandidateList(self: *SimplexEngine) void {
     const basis = if (self.basis) |*value| value else return;
     const capacity = @min(basis.num_rows, 32);

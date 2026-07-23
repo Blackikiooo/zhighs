@@ -27,20 +27,34 @@ pub const PivotKind = enum(u8) { row_singleton, column_singleton, markowitz };
 
 /// Borrowed pivot order. Slices remain valid until the workspace is reused.
 pub const SymbolicPlanView = struct {
+    /// Original row selected at each pivot position.
     pivot_rows: []const u32,
+    /// Original column selected at each pivot position.
     pivot_columns: []const u32,
+    /// Selection mechanism used at each position.
     pivot_kinds: []const PivotKind,
+    /// Number of fill-free singleton pivots in the returned prefix.
     singleton_pivots: usize,
+    /// Number of threshold-Markowitz pivots, currently at most one.
     markowitz_pivots: usize,
+    /// Active kernel dimension after the returned prefix is eliminated.
     remaining_dimension: usize,
+    /// Active mask for original rows.
     active_rows: []const bool,
+    /// Active mask for original columns.
     active_columns: []const bool,
+    /// Remaining active-entry count for each row.
     row_counts: []const u32,
+    /// Remaining active-entry count for each column.
     column_counts: []const u32,
+    /// CSR companion offsets over original basis entries.
     row_starts: []const Offset,
+    /// Original CSC entry positions grouped by row.
     row_entries: []const u32,
+    /// Original column belonging to each CSC entry position.
     entry_columns: []const u32,
 
+    /// Number of pivot decisions materialized in this borrowed plan.
     pub inline fn dimension(self: SymbolicPlanView) usize {
         return self.pivot_rows.len;
     }
@@ -48,35 +62,54 @@ pub const SymbolicPlanView = struct {
 
 /// Retaining SoA workspace for singleton elimination and threshold Markowitz.
 pub const SymbolicWorkspace = struct {
+    /// Owner of every retained symbolic array.
     allocator: std.mem.Allocator,
+    /// Allocated per-dimension capacity.
     dimension_capacity: usize = 0,
+    /// Allocated per-entry companion capacity.
     entry_capacity: usize = 0,
 
+    /// CSR companion offsets for row-wise entry lookup.
     row_starts: []Offset = &.{},
+    /// CSC entry positions grouped by row.
     row_entries: []u32 = &.{},
+    /// Column ID for each original CSC entry.
     entry_columns: []u32 = &.{},
+    /// Mutable active counts per row.
     row_counts: []u32 = &.{},
+    /// Mutable active counts per column.
     column_counts: []u32 = &.{},
+    /// Mutable active-row mask.
     row_active: []bool = &.{},
+    /// Mutable active-column mask.
     column_active: []bool = &.{},
 
+    /// Head column of each intrusive count bucket.
     bucket_first: []u32 = &.{},
+    /// Next column in the same count bucket.
     bucket_next: []u32 = &.{},
+    /// Previous column in the same count bucket.
     bucket_previous: []u32 = &.{},
+    /// Monotonic queue storage for newly singleton rows.
     singleton_rows: []u32 = &.{},
 
+    /// Retained output pivot rows.
     pivot_rows: []u32 = &.{},
+    /// Retained output pivot columns.
     pivot_columns: []u32 = &.{},
+    /// Retained output pivot classifications.
     pivot_kinds: []PivotKind = &.{},
     // Borrowed only during `plan`; fields avoid threading a wide view through
     // the hottest elimination helper. They are assigned before the pivot loop.
     current_starts: []const Offset = &.{},
     current_rows: []const foundation.RowId = &.{},
 
+    /// Construct an empty lazily allocated symbolic workspace.
     pub fn init(allocator: std.mem.Allocator) SymbolicWorkspace {
         return .{ .allocator = allocator };
     }
 
+    /// Release all dimension and entry companion arrays.
     pub fn deinit(self: *SymbolicWorkspace) void {
         self.freeDimensionArrays();
         self.allocator.free(self.row_entries);
@@ -110,6 +143,7 @@ pub const SymbolicWorkspace = struct {
         return self.planImpl(basis, 0.1, true);
     }
 
+    /// Shared planner implementing singleton-only and one-Markowitz modes.
     fn planImpl(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, pivot_threshold: f64, comptime singleton_only: bool) SymbolicError!SymbolicPlanView {
         const n = basis.dimension;
         if (basis.starts.len != n + 1 or basis.rows.len != basis.values.len or
@@ -199,6 +233,7 @@ pub const SymbolicWorkspace = struct {
         };
     }
 
+    /// Build the row companion, counts, masks, and column-count buckets.
     fn initialize(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView) SymbolicError!void {
         const n = basis.dimension;
         @memset(self.row_counts[0..n], 0);
@@ -246,8 +281,15 @@ pub const SymbolicWorkspace = struct {
         }
     }
 
-    const Choice = struct { row: u32, column: u32 };
+    /// Internal original-coordinate symbolic pivot candidate.
+    const Choice = struct {
+        /// Active original row.
+        row: u32,
+        /// Active original column.
+        column: u32,
+    };
 
+    /// Select the earliest minimum-merit threshold-eligible active pivot.
     fn chooseMarkowitz(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, threshold: f64) ?Choice {
         const n = basis.dimension;
         var best: ?Choice = null;
@@ -283,11 +325,13 @@ pub const SymbolicWorkspace = struct {
         return best;
     }
 
+    /// Deterministically break equal-merit choices by column then row.
     fn isEarlier(row: usize, column: u32, current: ?Choice) bool {
         const old = current orelse return true;
         return column < old.column or (column == old.column and row < old.row);
     }
 
+    /// Return the unique active column of a singleton row.
     fn onlyActiveColumn(self: *const SymbolicWorkspace, row: u32) ?u32 {
         const begin: usize = @intCast(self.row_starts[row]);
         const end: usize = @intCast(self.row_starts[row + 1]);
@@ -298,6 +342,7 @@ pub const SymbolicWorkspace = struct {
         return null;
     }
 
+    /// Symbolically remove a fill-free pivot and enqueue new singleton rows.
     fn eliminate(self: *SymbolicWorkspace, pivot_row: u32, pivot_column: u32, queue_tail: *usize) void {
         self.row_active[pivot_row] = false;
         self.column_active[pivot_column] = false;
@@ -331,6 +376,7 @@ pub const SymbolicWorkspace = struct {
         }
     }
 
+    /// Insert a column into its current-count intrusive bucket.
     fn bucketInsert(self: *SymbolicWorkspace, column: u32, count: u32) void {
         const first = self.bucket_first[count];
         self.bucket_previous[column] = none;
@@ -339,6 +385,7 @@ pub const SymbolicWorkspace = struct {
         self.bucket_first[count] = column;
     }
 
+    /// Remove a column from a known intrusive count bucket.
     fn bucketRemove(self: *SymbolicWorkspace, column: u32, count: u32) void {
         const previous = self.bucket_previous[column];
         const next = self.bucket_next[column];
@@ -348,6 +395,7 @@ pub const SymbolicWorkspace = struct {
         self.bucket_next[column] = none;
     }
 
+    /// Grow retained dimension and entry arrays for a new basis shape.
     fn ensureCapacity(self: *SymbolicWorkspace, n: usize, nnz: usize) SymbolicError!void {
         if (n > self.dimension_capacity) {
             const capacity = growCapacity(self.dimension_capacity, n) catch return error.DimensionTooLarge;
@@ -376,6 +424,7 @@ pub const SymbolicWorkspace = struct {
         }
     }
 
+    /// Release every array sized by `dimension_capacity`.
     fn freeDimensionArrays(self: *SymbolicWorkspace) void {
         self.allocator.free(self.row_starts);
         self.allocator.free(self.row_counts);
@@ -405,6 +454,7 @@ pub const SymbolicWorkspace = struct {
     }
 };
 
+/// Compute a geometric capacity target with overflow checking.
 fn growCapacity(current: usize, required: usize) error{Overflow}!usize {
     var capacity = @max(current, 8);
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;

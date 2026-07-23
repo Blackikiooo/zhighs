@@ -14,6 +14,7 @@ const factorization_module = @import("factorization.zig");
 const pricing_module = @import("pricing.zig");
 const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
+const highs_random = @import("highs_random.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
 const crash_module = @import("crash.zig");
 const degeneracy_module = @import("degeneracy.zig");
@@ -30,8 +31,22 @@ const SolveStatus = @import("engine.zig").SolveStatus;
 const DualPhaseOneCandidateReason = @import("engine.zig").DualPhaseOneCandidateReason;
 const DualPhaseOneFailureDiagnostic = @import("engine.zig").DualPhaseOneFailureDiagnostic;
 const SolveControl = @import("engine.zig").SolveControl;
+const RebuildReason = @import("engine.zig").RebuildReason;
 
+const enable_highs_rhs_infeasibility_list = false;
+
+/// Enter the ordinary dual-simplex Phase II loop.
+///
+/// The caller must already have installed and factorized a valid basis.
+/// This entry point binds the persistent dual workspace directly to the
+/// basis's original bounds and costs, marks the phase transition in the
+/// dual-control state machine, and then delegates all iteration decisions to
+/// `solveDualLoop`. Unlike `solveDualWithCostShifts`, it never constructs a
+/// perturbed auxiliary objective.
 pub fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    _ = self.dual_work.bindPhaseTwo(basis, problem.num_cols + problem.num_rows) catch return .numerical_failure;
+    self.dual_control.enterPhase(.phase_two);
     return solveDualLoop(self, problem, control, false);
 }
 
@@ -41,34 +56,13 @@ pub fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, cont
 pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = problem.num_cols + problem.num_rows;
-    self.dual_phase_one.beginCostEpoch(basis, count) catch return .numerical_failure;
+    self.dual_work.beginCostEpoch(basis, count) catch return .numerical_failure;
     self.buildDualPhaseOneCosts(problem);
-    if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .numerical_failure;
-    flipDualInfeasibleBoxedColumns(basis, count, self.numerical.dual_tolerance);
-
-    const margin = 2.0 * self.numerical.dual_tolerance;
-    var free_infeasibilities: usize = 0;
-    for (basis.col_status[0..count], basis.reduced_cost[0..count], 0..) |status, reduced, column| {
-        switch (status) {
-            .at_lower => {
-                if (reduced < -self.numerical.dual_tolerance)
-                    self.dual_phase_one.work_cost[column] += -reduced + margin;
-            },
-            .at_upper => {
-                if (reduced > self.numerical.dual_tolerance)
-                    self.dual_phase_one.work_cost[column] -= reduced + margin;
-            },
-            .free, .superbasic => if (@abs(reduced) > self.numerical.dual_tolerance) {
-                free_infeasibilities += 1;
-            },
-            .basic, .fixed => {},
-        }
-    }
-    if (free_infeasibilities != 0) {
+    const correction = rebuildDualState(self, problem, true, null, true) orelse return .numerical_failure;
+    if (correction.free_infeasibility_count != 0) {
         self.shifted_dual_exit = .setup_free_infeasibility;
         return .not_implemented;
     }
-    if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .numerical_failure;
     if (!self.classifyFeasibility(problem).dual) {
         self.shifted_dual_exit = .setup_not_dual_feasible;
         return .not_implemented;
@@ -89,15 +83,109 @@ pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.Pro
     return status;
 }
 
+/// `HEkkDual::rebuild` in upstream order. Refactorization is optional because
+/// HiGHS also rebuilds from a still-valid inverse for phase decisions.
+fn rebuildDualState(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    use_work_costs: bool,
+    refactor_reason: ?RebuildReason,
+    correct_dual: bool,
+) ?dual_phase_one_module.DualCorrection {
+    if (refactor_reason) |reason| {
+        if (self.refactorizeBasis(problem, reason) != .optimal) return null;
+    } else {
+        _ = self.dual_control.beginRebuild();
+    }
+    self.dual_control.has_fresh_rebuild = false;
+    const dual_status = if (use_work_costs)
+        self.recomputeReducedCostsFromWork(problem)
+    else
+        self.recomputeReducedCosts(problem);
+    if (dual_status != .optimal) return null;
+    const basis = if (self.basis) |*value| value else return null;
+    const count = problem.num_cols + problem.num_rows;
+    const correction = if (correct_dual)
+        self.dual_work.correctDualInfeasibilities(
+            basis,
+            count,
+            self.numerical.dual_tolerance,
+            self.dual_control.force_phase_two,
+        )
+    else
+        dual_phase_one_module.DualCorrection{};
+    if (correct_dual) {
+        self.dual_control.force_phase_two = false;
+        self.dual_control.costs_shifted = self.dual_control.costs_shifted or correction.shift_count != 0;
+    }
+    // Boxed flips change nonbasic values, so primal recomputation must follow
+    // correction. Repricing again would consume a different state than HiGHS:
+    // correctDual has already updated every shifted nonbasic workDual exactly.
+    if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return null;
+    if (!self.dual_work.recordRebuildState(basis, count, self.numerical.primal_tolerance)) return null;
+    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance)) return null;
+    self.dual_control.finishRebuild();
+    return correction;
+}
+
+/// Measure the unperturbed starting basis before selecting dual Phase I or II.
+///
+/// The three dual and three primal statistics are retained for diagnostics
+/// and for the HiGHS-compatible phase decision. `force_phase_two` accepts the
+/// same tiny squared-dual-error case as an effectively feasible basis, while
+/// `near_optimal` identifies starts for which cleanup should be inexpensive.
+/// Returns `false` only when no basis is installed.
+fn assessInitialDualState(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+    const basis = if (self.basis) |*value| value else return false;
+    const count = problem.num_cols + problem.num_rows;
+    const dual_stats = self.dual_work.dualInfeasibilityStats(
+        basis,
+        count,
+        self.numerical.dual_tolerance,
+    );
+    self.dual_control.unperturbed_dual_infeasibility_count = dual_stats.count;
+    self.dual_control.unperturbed_dual_infeasibility_max = dual_stats.maximum;
+    self.dual_control.unperturbed_dual_infeasibility_sum = dual_stats.sum;
+    self.dual_control.force_phase_two = dual_stats.maximum * dual_stats.maximum < self.numerical.dual_tolerance;
+
+    var primal_count: usize = 0;
+    var primal_max: f64 = 0.0;
+    var primal_sum: f64 = 0.0;
+    for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+        const violation = @max(@max(lower - value, value - upper), 0.0);
+        if (violation >= self.numerical.primal_tolerance) primal_count += 1;
+        primal_max = @max(primal_max, violation);
+        primal_sum += violation;
+    }
+    self.dual_control.initial_primal_infeasibility_count = primal_count;
+    self.dual_control.initial_primal_infeasibility_max = primal_max;
+    self.dual_control.initial_primal_infeasibility_sum = primal_sum;
+    const no_dual_infeasibilities = dual_stats.count == 0 or self.dual_control.force_phase_two;
+    self.dual_control.near_optimal = no_dual_infeasibilities and primal_count < 1000 and primal_max < 1e-3;
+    return true;
+}
+
+/// Run the serial revised dual-simplex Phase II state machine.
+///
+/// Each iteration performs CHUZR (including exact DSE validation), BTRAN and
+/// row pricing, CHUZC/BFRT, optional aggregate bound flips, and the accepted
+/// basis pivot. Rebuilds and repricing are deliberately centralized here so
+/// all numerical-recovery exits observe one consistent basis/work state.
+///
+/// When `initial_use_work_costs` is true, reduced costs come from the
+/// perturbed/shifted workspace until primal feasibility is reached. The loop
+/// then restores the original objective, performs a cleanup reinversion, and
+/// only reports a terminal status after classifying that original problem.
 fn solveDualLoop(
     self: *SimplexEngine,
     problem: problem_module.ProblemView,
     control: SolveControl,
-    use_work_costs: bool,
+    initial_use_work_costs: bool,
 ) SolveStatus {
-    const saved_shifted_accounting = self.shifted_dual_accounting_active;
-    if (use_work_costs) self.shifted_dual_accounting_active = true;
-    defer self.shifted_dual_accounting_active = saved_shifted_accounting;
+    var use_work_costs = initial_use_work_costs;
+    if (use_work_costs) self.dual_control.costs_shifted = true;
+    defer self.dual_control.costs_shifted = false;
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.beginDualEdgeWeightPhase();
@@ -122,6 +210,7 @@ fn solveDualLoop(
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .phase_two)) |status| return status;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const work = self.dual_work.view(basis, problem.num_cols + problem.num_rows) orelse return .numerical_failure;
         if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
             self.failure_site = .pivot_edge_weights;
             return .numerical_failure;
@@ -137,10 +226,7 @@ fn solveDualLoop(
             // first. Reusing the updated factor chain here made brandy's
             // original-cost cleanup fail after an otherwise successful dual
             // pass and triggered a full cold fallback.
-            if (self.refactorizeBasis(problem, .cleanup) != .optimal or
-                self.recomputeBasicValuesUnchecked(problem) != .optimal or
-                self.recomputeReducedCosts(problem) != .optimal)
-            {
+            if (rebuildDualState(self, problem, false, .cleanup, false) == null) {
                 self.shifted_dual_exit = .phase_two_numerical_failure;
                 return .numerical_failure;
             }
@@ -157,18 +243,21 @@ fn solveDualLoop(
                 // This is a valid original-cost dual Phase-II start, not an
                 // optimum. Calling finishOptimal here caused brandy to fail
                 // validation and cold-restart the entire solve.
-                self.pricing.rule = saved_pricing_rule;
-                const cleanup_started = self.iterations;
-                const saved_cleanup_active = self.cleanup_active;
-                self.cleanup_active = true;
-                defer self.cleanup_active = saved_cleanup_active;
-                const cleanup_status = self.solveDual(problem, control);
-                self.stats.shifted_cleanup_iterations += self.iterations -| cleanup_started;
-                self.shifted_dual_exit = if (cleanup_status == .optimal)
-                    .original_dual_phase_two_optimal
-                else
-                    .original_dual_phase_two_failed;
-                return cleanup_status;
+                // Continue original-cost Phase II in this controller. Calling
+                // solveDual recursively used to reset phase-local edge-weight,
+                // accounting and rebuild state, unlike HEkkDual's single major
+                // phase loop.
+                self.stats.shifted_dual_iterations += self.iterations -| shifted_iteration_started;
+                shifted_iterations_recorded = true;
+                use_work_costs = false;
+                self.dual_control.phase = .phase_two;
+                self.dual_control.costs_perturbed = false;
+                self.dual_control.costs_shifted = false;
+                self.dual_control.has_fresh_rebuild = true;
+                self.shifted_dual_exit = .original_dual_feasible;
+                no_entering_recovery_used = false;
+                fresh_no_entering_basis = true;
+                continue;
             }
             if (original_feasibility.primal) {
                 // Primal feasibility does not authorize an algorithm switch
@@ -191,17 +280,30 @@ fn solveDualLoop(
         if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
         const entering = active_ratio_test.chooseDualEntering(
             basis.tableau[0..original_cols],
-            basis.reduced_cost[0..original_cols],
+            work.dual,
             basis.col_status[0..original_cols],
-            &.{},
-            basis.col_lower[0..original_cols],
-            basis.col_upper[0..original_cols],
-            basis.primal[0..original_cols],
+            work.move,
+            work.lower,
+            work.upper,
+            work.value,
             leaving.bound,
             leaving.violation,
             basis.dual_ratio[0..original_cols],
             basis.dual_direction[0..original_cols],
             basis.flip_columns[0..original_cols],
+            .{
+                .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
+                .highs_large_step = self.active_dual_initialization_strategy == .highs,
+                .highs_breakpoint_groups = enable_highs_rhs_infeasibility_list,
+                .trace_chuzc = self.active_pivot_trace.len != 0,
+                .permutation = if (self.active_dual_initialization_strategy == .highs and
+                    self.dual_work.highs_permutation.len >= original_cols)
+                    self.dual_work.highs_permutation[0..original_cols]
+                else
+                    &.{},
+                .update_count = self.factorization.update_count,
+                .dual_feasibility_tolerance = self.numerical.dual_tolerance,
+            },
         );
 
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) {
@@ -212,9 +314,7 @@ fn solveDualLoop(
             if (use_work_costs) {
                 if (!no_entering_recovery_used) {
                     no_entering_recovery_used = true;
-                    if (self.refactorizeBasis(problem, .solve_residual) == .optimal and
-                        self.recomputeBasicValuesUnchecked(problem) == .optimal and
-                        self.recomputeReducedCostsFromWork(problem) == .optimal and
+                    if (rebuildDualState(self, problem, true, .solve_residual, true) != null and
                         self.classifyFeasibility(problem).dual)
                     {
                         fresh_no_entering_basis = true;
@@ -241,7 +341,7 @@ fn solveDualLoop(
             for (basis.pivot_direction) |*value| value.* = -value.*;
         }
         const leaving_row: usize = @intCast(leaving.row);
-        const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
+        const target = if (leaving.bound == .at_lower) work.lower[basis.basic_index[leaving_row]] else work.upper[basis.basic_index[leaving_row]];
         const pivot = basis.pivot_direction[leaving_row];
         if (@abs(pivot) <= self.numerical.pivot_tolerance) {
             self.failure_site = .ratio_test;
@@ -253,7 +353,12 @@ fn solveDualLoop(
             return .numerical_failure;
         }
         const leaving_column = basis.basic_index[leaving_row];
-        if (self.updateReducedCostsAfterDualPivot(problem, entering_index, leaving.row) != .optimal) {
+        if (self.updateReducedCostsAfterDualPivot(
+            problem,
+            entering_index,
+            leaving.row,
+            entering.zero_dual_step,
+        ) != .optimal) {
             self.failure_site = .reduced_cost;
             return .numerical_failure;
         }
@@ -265,6 +370,16 @@ fn solveDualLoop(
             leaving.bound,
             @max(step, 0.0),
         ) != .optimal) return .numerical_failure;
+        // `performPivot` may have reinverted after committing the basis. A
+        // fresh factorization is only the first half of dual rebuild: refresh
+        // all work solution state before another CHUZR decision.
+        if (self.dual_control.has_fresh_rebuild) {
+            const rebuild_dual = if (use_work_costs)
+                self.recomputeReducedCostsFromWork(problem)
+            else
+                self.recomputeReducedCosts(problem);
+            if (rebuild_dual != .optimal) return .numerical_failure;
+        }
         self.observeIterationStep(
             @max(step, 0.0),
             entering_index,
@@ -443,6 +558,7 @@ pub fn buildAndValidateInfeasibilityRay(
 /// ratio ties. The borrowed matrix is never copied and every iteration
 /// uses engine-owned work arrays.
 pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    self.dual_control.enterPhase(.phase_one);
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.beginDualEdgeWeightPhase();
@@ -451,31 +567,42 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     defer self.recordPhaseIterations(.dual_phase_one, iteration_started);
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const original_count = problem.num_cols + problem.num_rows;
-    self.dual_phase_one.begin(basis, original_count) catch return .numerical_failure;
-    defer if (self.dual_phase_one.active)
-        self.dual_phase_one.restoreOriginalBounds(basis, original_count);
+    self.dual_work.begin(basis, original_count) catch return .numerical_failure;
+    defer if (self.dual_work.active)
+        self.dual_work.restoreOriginalBounds(basis, original_count);
 
+    initializeUnperturbedDualCosts(self, problem);
+    if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .numerical_failure;
+    if (!assessInitialDualState(self, problem)) return .numerical_failure;
     self.buildDualPhaseOneCosts(problem);
+    self.dual_control.costs_perturbed = true;
     if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
-    // HiGHS removes avoidable boxed-column dual infeasibilities before it
-    // decides that dual Phase I is required. Once Phase-I bounds are
-    // installed those columns collapse to [0, 0] and must no longer appear
-    // in CHUZC/BFRT, so the flip belongs here rather than in the ratio test.
-    flipDualInfeasibleBoxedColumns(basis, original_count, self.numerical.dual_tolerance);
+    // Compatibility path retained until the complete B2 phase-transition
+    // lifecycle is enabled; the isolated source-equivalent no-flip/lower-side
+    // experiment is recorded in todo.md.
+    flipDualInfeasibleBoxedColumns(
+        basis,
+        self.dual_work.nonbasic_move[0..original_count],
+        original_count,
+        self.numerical.dual_tolerance,
+    );
     // Infeasibility is encoded in nonbasic primal values (±1/0), not
     // shifted costs. The raw scaled LP cost + perturbation keeps the
     // reduced cost magnitude intact so the Phase-I objective correctly
     // measures remaining infeasibility.
-    self.dual_phase_one.installWorkingBounds(basis, original_count);
+    self.dual_work.installWorkingBounds(basis, original_count);
     if (self.active_dual_initialization_strategy == .highs) {
-        self.dual_phase_one_initial_flips = self.dual_phase_one.correctInitialDualInfeasibilities(
+        self.dual_phase_one_initial_flips = self.dual_work.correctInitialDualInfeasibilities(
             basis,
             original_count,
             self.numerical.dual_tolerance,
         );
-        self.dual_phase_one_initial_objective = self.dual_phase_one.dualObjective(basis, original_count);
+        self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
+    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
+        return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
         self.dual_phase_one_initial_max_basic_violation = @max(
             self.dual_phase_one_initial_max_basic_violation,
@@ -500,21 +627,34 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             self.switchDualDseToDevex(.invalid);
         var active_ratio_test = self.ratio_test;
         if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
+        const work = self.dual_work.view(basis, original_count) orelse return .not_implemented;
         const entering = active_ratio_test.chooseDualEntering(
             basis.tableau[0..original_count],
-            basis.reduced_cost[0..original_count],
+            work.dual,
             basis.col_status[0..original_count],
-            self.dual_phase_one.nonbasic_move[0..original_count],
-            basis.col_lower[0..original_count],
-            basis.col_upper[0..original_count],
-            basis.primal[0..original_count],
+            work.move,
+            work.lower,
+            work.upper,
+            work.value,
             leaving.bound,
             leaving.violation,
             basis.dual_ratio[0..original_count],
             basis.dual_direction[0..original_count],
             basis.flip_columns[0..original_count],
+            .{
+                .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
+                .highs_large_step = self.active_dual_initialization_strategy == .highs,
+                .highs_breakpoint_groups = enable_highs_rhs_infeasibility_list,
+                .trace_chuzc = self.active_pivot_trace.len != 0,
+                .permutation = if (self.dual_work.highs_permutation.len >= original_count)
+                    self.dual_work.highs_permutation[0..original_count]
+                else
+                    &.{},
+                .update_count = self.factorization.update_count,
+                .dual_feasibility_tolerance = self.numerical.dual_tolerance,
+            },
         );
-        self.dual_phase_one.recordRemainingViolation(
+        self.dual_work.recordRemainingViolation(
             @intCast(leaving.row),
             leaving.violation,
             basis.tableau[0..original_count],
@@ -547,7 +687,15 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         const step = (basis.basic_value[leaving_row] - target) / pivot;
         if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .not_implemented;
         const leaving_column = basis.basic_index[leaving_row];
+        if (self.updateReducedCostsAfterDualPivot(
+            problem,
+            entering_index,
+            leaving.row,
+            entering.zero_dual_step,
+        ) != .optimal) return .not_implemented;
         if (self.performPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
+            return .not_implemented;
+        if (self.dual_control.has_fresh_rebuild and self.recomputeReducedCostsFromWork(problem) != .optimal)
             return .not_implemented;
         self.observeIterationStep(
             @max(step, 0.0),
@@ -560,7 +708,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             false,
             entering.flip_count,
         );
-        if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
     }
     if (self.iterations >= control.max_iterations) return .iteration_limit;
 
@@ -572,7 +719,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // Always restore the original model state before classifying feasibility
     // or entering either Phase-II algorithm. Boxed columns are placed on the
     // side implied by the freshly priced reduced cost during restoration.
-    self.dual_phase_one.restoreOriginalBounds(basis, original_count);
+    self.dual_work.restoreOriginalBounds(basis, original_count);
     if (self.refactorizeBasis(problem, .cleanup) != .optimal) return .not_implemented;
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
@@ -589,11 +736,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     }
     if (dual_infeasible == 0) return self.solveDual(problem, control);
 
-    // Remaining original-model dual infeasibilities are not a valid Phase-II
-    // start. Leave the existing correctness-preserving primal fallback in
-    // charge until HiGHS-style cleanup levels are implemented. In particular,
-    // do not use an exact floating-point Phase-I objective comparison here.
-
     var primal_feasible = true;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
         if (value < lower - self.numerical.primal_tolerance or value > upper + self.numerical.primal_tolerance) {
@@ -608,11 +750,21 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     return .not_implemented;
 }
 
+/// Repair dual-infeasible finite boxed nonbasic columns by moving each one to
+/// its opposite bound.
+///
+/// This is the allocation-free initialization step used before shifted-cost
+/// dual Phase II. It updates the public basis status and primal value together
+/// with the explicit HiGHS-style nonbasic move (`+1` from lower, `-1` from
+/// upper). Free, fixed, basic, and one-sided columns are intentionally left
+/// unchanged because a simple bound exchange cannot repair them.
 fn flipDualInfeasibleBoxedColumns(
     basis: *basis_module.BasisState,
+    nonbasic_move: []i8,
     column_count: usize,
     dual_tolerance: f64,
 ) void {
+    std.debug.assert(nonbasic_move.len >= column_count);
     for (0..column_count) |column| {
         const lower = basis.col_lower[column];
         const upper = basis.col_upper[column];
@@ -622,10 +774,12 @@ fn flipDualInfeasibleBoxedColumns(
             .at_lower => if (reduced < -dual_tolerance) {
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
+                nonbasic_move[column] = -1;
             },
             .at_upper => if (reduced > dual_tolerance) {
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
+                nonbasic_move[column] = 1;
             },
             else => {},
         }
@@ -652,8 +806,8 @@ pub fn recordDualPhaseOneNoEntering(
         .leaving_value = basis.basic_value[leaving.row],
         .working_lower = basis.basic_lower[leaving.row],
         .working_upper = basis.basic_upper[leaving.row],
-        .original_lower = self.dual_phase_one.saved_lower[basis.basic_index[leaving.row]],
-        .original_upper = self.dual_phase_one.saved_upper[basis.basic_index[leaving.row]],
+        .original_lower = self.dual_work.saved_lower[basis.basic_index[leaving.row]],
+        .original_upper = self.dual_work.saved_upper[basis.basic_index[leaving.row]],
         .ep_nonzeros = 0,
         .ep_max_abs = 0.0,
         .small_tableau = 0,
@@ -726,7 +880,7 @@ pub fn recordDualPhaseOneNoEntering(
             self.active_dual_phase_one_candidate_trace[self.dual_phase_one_candidate_trace_count] = .{
                 .column = @intCast(column),
                 .status = status,
-                .explicit_move = self.dual_phase_one.nonbasic_move[column],
+                .explicit_move = self.dual_work.nonbasic_move[column],
                 .tableau = alpha,
                 .direction = direction,
                 .signed_pivot = signed_pivot,
@@ -743,11 +897,26 @@ pub fn recordDualPhaseOneNoEntering(
     self.dual_phase_one_failure = diagnostic;
 }
 
+/// Construct the persistent perturbed working objective used by dual startup.
+///
+/// Structural costs are first converted to the engine's minimization sign and
+/// scaling convention. A bound-aware perturbation is then applied with either
+/// the HiGHS random stream/permutation or the deterministic comparison stream.
+/// Logical columns receive only a tiny perturbation. Original costs and bounds
+/// remain available in `DualPhaseOneWorkspace`, so cleanup can restore the
+/// exact LP objective without reallocating or reconstructing the basis.
 pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
     const basis = if (self.basis) |*value| value else return;
-    const workspace = &self.dual_phase_one;
+    const workspace = &self.dual_work;
     const original_count = problem.num_cols + problem.num_rows;
     const maximize = problem.objective_sense == .maximize;
+    if (self.active_dual_initialization_strategy == .highs)
+        highs_random.initializeVectors(
+            workspace.perturbation[0..original_count],
+            workspace.highs_permutation[0..original_count],
+            problem.num_cols,
+        );
+    workspace.resetCorrectionRandom(problem.num_cols, original_count);
     var maximum: f64 = 0.0;
     var boxed: usize = 0;
     for (0..problem.num_cols) |column| {
@@ -755,41 +924,76 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
             self.objective_scale * basis.column_scale[column];
         workspace.work_cost[column] = cost;
         maximum = @max(maximum, @abs(cost));
-        if (std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
-            workspace.saved_lower[column] != workspace.saved_upper[column])
-            boxed += 1;
+        if (!enable_highs_rhs_infeasibility_list and
+            std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
+            workspace.saved_lower[column] != workspace.saved_upper[column]) boxed += 1;
     }
+    if (enable_highs_rhs_infeasibility_list) for (workspace.work_range[0..original_count]) |range| {
+        if (range < 1e30) boxed += 1;
+    };
     if (maximum > 100.0) maximum = @sqrt(@sqrt(maximum));
-    if (problem.num_cols != 0 and boxed * 100 < problem.num_cols) maximum = @min(maximum, 1.0);
-    const base = 5e-7 * @max(maximum, 1.0);
+    const boxed_denominator = if (enable_highs_rhs_infeasibility_list) original_count else problem.num_cols;
+    if (boxed_denominator != 0 and boxed * 100 < boxed_denominator) maximum = @min(maximum, 1.0);
+    const base = 5e-7 * if (enable_highs_rhs_infeasibility_list) maximum else @max(maximum, 1.0);
     for (0..problem.num_cols) |column| {
-        const random = deterministicUnit(column, workspace.basis_epoch);
+        const random_value = if (enable_highs_rhs_infeasibility_list)
+            workspace.perturbation[column]
+        else
+            deterministicUnit(column, workspace.basis_epoch);
         const lower = workspace.saved_lower[column];
         const upper = workspace.saved_upper[column];
         var perturbation: f64 = 0.0;
         if (lower != upper) {
+            const magnitude = if (enable_highs_rhs_infeasibility_list)
+                (1.0 + random_value) * (@abs(workspace.work_cost[column]) + 1.0) * base
+            else
+                random_value * base;
             if (std.math.isFinite(lower) and !std.math.isFinite(upper)) {
-                perturbation = random * base;
+                perturbation = magnitude;
             } else if (!std.math.isFinite(lower) and std.math.isFinite(upper)) {
-                perturbation = -random * base;
+                perturbation = -magnitude;
             } else if (std.math.isFinite(lower) and std.math.isFinite(upper)) {
-                perturbation = if (workspace.work_cost[column] >= 0.0) random * base else -random * base;
+                perturbation = if (workspace.work_cost[column] >= 0.0) magnitude else -magnitude;
             }
         }
         workspace.perturbation[column] = perturbation;
         workspace.work_cost[column] += perturbation;
     }
     for (problem.num_cols..original_count) |column| {
-        const perturbation = deterministicUnit(column, workspace.basis_epoch) * 1e-12;
+        const perturbation = if (self.active_dual_initialization_strategy == .highs)
+            (0.5 - workspace.perturbation[column]) * 1e-12
+        else
+            deterministicUnit(column, workspace.basis_epoch) * 1e-12;
         workspace.perturbation[column] = perturbation;
         workspace.work_cost[column] = perturbation;
     }
 }
 
-/// Shift only currently infeasible nonbasic costs to the feasibility
-/// boundary. Unlike the former zero-objective repair, feasible reduced
-/// costs and all basic costs remain intact, so Phase I retains a meaningful
-/// dual objective and deterministic ratio ordering.
+/// First `initialiseCost(..., phase unknown)` pass from HEkkDual::solve.
+/// This materializes the original scaled objective in the persistent work
+/// arrays before the unperturbed dual/feasibility assessment. Logical costs
+/// are zero in the original LP.
+fn initializeUnperturbedDualCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
+    const basis = if (self.basis) |*value| value else return;
+    const workspace = &self.dual_work;
+    const original_count = problem.num_cols + problem.num_rows;
+    const maximize = problem.objective_sense == .maximize;
+    for (0..problem.num_cols) |column| {
+        workspace.work_cost[column] =
+            (if (maximize) -problem.col_cost[column] else problem.col_cost[column]) *
+            self.objective_scale * basis.column_scale[column];
+        workspace.perturbation[column] = 0.0;
+    }
+    @memset(workspace.work_cost[problem.num_cols..original_count], 0.0);
+    @memset(workspace.perturbation[problem.num_cols..original_count], 0.0);
+    @memset(workspace.work_shift[0..original_count], 0.0);
+}
+
+/// Map `(column, basis epoch)` to a reproducible sample in `(0, 1]`.
+///
+/// The SplitMix64-style integer avalanche avoids shared mutable RNG state and
+/// is used only by the deterministic baseline initialization path. The upper
+/// 53 bits are converted exactly to an IEEE-754-compatible unit sample.
 fn deterministicUnit(column: usize, epoch: u64) f64 {
     var value = @as(u64, @intCast(column)) +% epoch *% 0x9e3779b97f4a7c15;
     value = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
@@ -837,6 +1041,7 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
             basis.dual_ratio[0..original_cols],
             basis.dual_direction[0..original_cols],
             basis.flip_columns[0..original_cols],
+            .{},
         );
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
         const entering_col = entering.column orelse return .infeasible;
@@ -876,6 +1081,14 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
     return .iteration_limit;
 }
 
+/// Materialize the pivotal dual tableau row for `leaving_row`.
+///
+/// The routine computes `e_p^T B^-1` by sparse BTRAN, validates/corrects the
+/// selected row's exact steepest-edge weight, and prices that vector against
+/// every structural, logical, and artificial column. Row-wise pricing is used
+/// for sufficiently sparse BTRAN results; otherwise the column representation
+/// is scanned. On success `basis.dual_row`, `basis.tableau`, and
+/// `dual_row_index` describe the same leaving row.
 pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.ProblemView, leaving_row: u32) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
@@ -966,8 +1179,29 @@ fn chooseDualLeavingWithExactDseValidation(
 ) SolveStatus {
     leaving_choice.* = null;
     while (true) {
-        const leaving = self.pricing.chooseDualLeaving(self) orelse return .optimal;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
+        const leaving = if (self.active_dual_initialization_strategy == .highs and
+            self.dual_work.infeasibility_list_active)
+        blk: {
+            const row_u32 = self.dual_work.choosePrimalInfeasibleRow(basis, problem.num_rows) orelse return .optimal;
+            const row: usize = @intCast(row_u32);
+            const value = basis.basic_value[row];
+            if (value < basis.basic_lower[row] - self.numerical.primal_tolerance) {
+                break :blk pricing_module.DualLeavingChoice{
+                    .row = row_u32,
+                    .bound = .at_lower,
+                    .violation = basis.basic_lower[row] - value,
+                };
+            }
+            if (value > basis.basic_upper[row] + self.numerical.primal_tolerance) {
+                break :blk pricing_module.DualLeavingChoice{
+                    .row = row_u32,
+                    .bound = .at_upper,
+                    .violation = value - basis.basic_upper[row],
+                };
+            }
+            return .optimal;
+        } else self.pricing.chooseDualLeaving(self) orelse return .optimal;
         const row: usize = @intCast(leaving.row);
         if (row >= basis.row_edge_weight.len) return .numerical_failure;
         const updated_weight = basis.row_edge_weight[row];
@@ -1030,6 +1264,14 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
     try std.testing.expectEqual(pricing_module.PricingRule.steepest_edge, engine.pricing.rule);
 }
 
+/// Atomically apply the BFRT flip prefix selected by CHUZC.
+///
+/// All column displacements are accumulated in equation space and transformed
+/// with one FTRAN. The solve is residual-checked and retried after reinversion
+/// when necessary. No status, primal value, or infeasibility-list entry is
+/// published until that aggregate solve succeeds, so numerical failure cannot
+/// leave a partially committed flip batch. `flip_count` addresses the prefix
+/// of `basis.flip_columns` produced by the ratio test.
 pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
     if (flip_count == 0) return .optimal;
     self.stats.bound_flips += flip_count;
@@ -1058,6 +1300,10 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
         for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
         if (!self.boundFlipResidualAcceptable(problem)) return .numerical_failure;
     }
+    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+        basis.rhs_work,
+        self.dual_work.changed_row_index,
+    );
 
     // Commit only after the aggregate solve succeeds. Thus an invalid
     // width, column, or numerical solve never publishes a partial batch.
@@ -1071,9 +1317,14 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
         };
         basis.primal[column] += delta;
         basis.col_status[column] = if (delta > 0.0) .at_upper else .at_lower;
-        self.dual_phase_one.noteBoundFlip(column);
+        self.dual_work.noteBoundFlip(column);
     }
     for (basis.basic_index, basis.basic_value) |basic_column, value| basis.primal[basic_column] = value;
+    self.dual_work.updatePrimalInfeasibilityList(
+        basis,
+        self.dual_work.changed_row_index[0..self.dual_work.changed_row_count],
+        self.numerical.primal_tolerance,
+    );
     return .optimal;
 }
 
@@ -1148,24 +1399,33 @@ pub fn updateReducedCostsAfterDualPivot(
     problem: problem_module.ProblemView,
     entering_col: usize,
     leaving_row: u32,
+    zero_dual_step: bool,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
     const original_count = problem.num_cols + problem.num_rows;
     if (row >= problem.num_rows or entering_col >= original_count) return .numerical_failure;
+    const leaving_col = basis.basic_index[row];
+    if (leaving_col >= original_count) return .numerical_failure;
     const alpha_pq = basis.tableau[entering_col];
     if (!std.math.isFinite(alpha_pq) or @abs(alpha_pq) <= self.numerical.pivot_tolerance)
         return .numerical_failure;
-    const theta = basis.reduced_cost[entering_col] / alpha_pq;
-    if (!std.math.isFinite(theta)) return .numerical_failure;
-
-    for (basis.reduced_cost[0..original_count], basis.tableau[0..original_count]) |*reduced, alpha|
-        reduced.* -= theta * alpha;
-    const artificial_begin = original_count;
-    for (0..problem.num_rows) |logical_row|
-        basis.reduced_cost[artificial_begin + logical_row] -=
-            theta * basis.dual_row[logical_row] * basis.artificial_sign[logical_row];
+    if (zero_dual_step) {
+        const shift = -basis.reduced_cost[entering_col];
+        if (!std.math.isFinite(shift) or !self.dual_work.shiftCost(entering_col, shift))
+            return .numerical_failure;
+    } else {
+        const theta = basis.reduced_cost[entering_col] / alpha_pq;
+        if (!std.math.isFinite(theta)) return .numerical_failure;
+        for (basis.reduced_cost[0..original_count], basis.tableau[0..original_count]) |*reduced, alpha|
+            reduced.* -= theta * alpha;
+        const artificial_begin = original_count;
+        for (0..problem.num_rows) |logical_row|
+            basis.reduced_cost[artificial_begin + logical_row] -=
+                theta * basis.dual_row[logical_row] * basis.artificial_sign[logical_row];
+    }
     basis.reduced_cost[entering_col] = 0.0;
+    if (!self.dual_work.shiftBack(basis.reduced_cost, leaving_col)) return .numerical_failure;
     for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
     self.reduced_cost_update_count += 1;
     self.stats.dual_reduced_cost_updates += 1;
@@ -1229,6 +1489,7 @@ test "dual bound flips share one aggregate FTRAN" {
 test "neither-feasible imported basis is repaired without a crash restart" {
     const Context = struct {
         saw_repair: bool = false,
+        /// Test callback detecting entry into dual-feasibility repair.
         fn callback(event: ProgressEventView, context_ptr: ?*anyopaque) CallbackAction {
             const self: *@This() = @ptrCast(@alignCast(context_ptr.?));
             self.saw_repair = self.saw_repair or event.phase == .dual_feasibility_repair;
@@ -1295,7 +1556,7 @@ test "dual rank one reduced cost update uses the old tableau row" {
     engine.basis.?.dual_row[0] = 1;
     engine.basis.?.artificial_sign[0] = -1;
 
-    try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0));
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0, false));
     try std.testing.expectApproxEqAbs(@as(f64, 0), engine.basis.?.reduced_cost[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, -2.5), engine.basis.?.reduced_cost[1], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, -0.5), engine.basis.?.reduced_cost[2], 1e-12);

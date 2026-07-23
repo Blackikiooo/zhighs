@@ -13,60 +13,109 @@ const sparse_ft = @import("sparse_ft.zig");
 
 pub const SparseLuError = sparse_kernel.KernelError || sparse_symbolic.SymbolicError || sparse_ft.FtError || error{ DimensionMismatch, NumericalFailure };
 
-pub const PivotTrace = struct { rows: []const u32, columns: []const u32 };
+/// Borrowed original-coordinate pivot order used for replay diagnostics.
+pub const PivotTrace = struct {
+    /// Original row selected at each pivot position.
+    rows: []const u32,
+    /// Original column selected at each pivot position.
+    columns: []const u32,
+};
 pub const OrderingStrategy = enum { automatic, dod_markowitz, highs_kernel };
 
 pub const SparseLU = struct {
+    /// Owner of every retained factorization workspace.
     allocator: std.mem.Allocator,
+    /// Mutable numerical elimination kernel.
     kernel: sparse_kernel.MutableSparseKernel,
+    /// Fill-free singleton symbolic planner.
     symbolic: sparse_symbolic.SymbolicWorkspace,
+    /// Mutable U and Forrest--Tomlin update chain.
     ft: sparse_ft.SparseForrestTomlin,
+    /// Whether `ft` represents the currently packed U factors.
     ft_ready: bool = false,
+    /// Allocated capacity of per-dimension arrays.
     dimension_capacity: usize = 0,
+    /// Allocated capacity of packed factor-entry arrays.
     factor_capacity: usize = 0,
+    /// Dimension of the current square factorization.
     dimension: usize = 0,
+    /// Number of packed off-diagonal L entries.
     l_nonzeros: usize = 0,
+    /// Number of packed off-diagonal U entries.
     u_nonzeros: usize = 0,
+    /// Fill entries inserted during numerical elimination.
     inserted_fill: usize = 0,
+    /// Active-index workspace length during hyper-sparse solves.
     active_count: usize = 0,
+    /// Whether transpose companion views match the packed factors.
     hyper_views_ready: bool = false,
+    /// Caller-selected ordering policy.
     ordering_strategy: OrderingStrategy = .automatic,
+    /// Concrete ordering used by the current factorization.
     selected_ordering: OrderingStrategy = .dod_markowitz,
+    /// Singleton pivots peeled before loading the numerical kernel.
     peeled_pivots: usize = 0,
+    /// Reduced numerical-kernel dimension after peeling.
     kernel_dimension: usize = 0,
+    /// Entries loaded into the reduced numerical kernel.
     kernel_nonzeros: usize = 0,
+    /// Maximum reduced-kernel row degree.
     kernel_maximum_row_count: u32 = 0,
+    /// Maximum reduced-kernel column degree.
     kernel_maximum_column_count: u32 = 0,
     /// Pivots accepted from the beginning of a validated previous trace.
     trace_replayed_pivots: usize = 0,
     /// Pivots reordered after the first trace validation failure.
     trace_repaired_pivots: usize = 0,
-
+    /// Original row selected at each pivot position.
     pivot_rows: []u32 = &.{},
+    /// Original column selected at each pivot position.
     pivot_columns: []u32 = &.{},
+    /// Original row to pivot-position permutation.
     row_position: []u32 = &.{},
+    /// Original column to pivot-position permutation.
     column_position: []u32 = &.{},
+    /// U diagonal at each pivot position.
     pivot_values: []f64 = &.{},
+    /// Packed L-column offsets.
     l_starts: []usize = &.{},
+    /// Packed U-row offsets.
     u_starts: []usize = &.{},
+    /// Original row IDs of packed L entries.
     l_rows: []u32 = &.{},
+    /// L multipliers parallel to `l_rows`.
     l_values: []f64 = &.{},
+    /// Original column IDs of packed U entries.
     u_columns: []u32 = &.{},
+    /// U coefficients parallel to `u_columns`.
     u_values: []f64 = &.{},
+    /// Reused dense solve workspace.
     work: []f64 = &.{},
+    /// Active index stack/list for hyper-sparse solves.
     active: []u32 = &.{},
+    /// Stable sparse output indices from the last solve.
     hyper_output: []u32 = &.{},
+    /// Reachability marks used by hyper-sparse triangular traversal.
     marked: []bool = &.{},
+    /// U column-view offsets derived from packed U rows.
     u_column_starts: []usize = &.{},
+    /// Pivot-row positions in the U column view.
     u_column_rows: []u32 = &.{},
+    /// Coefficients in the U column view.
     u_column_values: []f64 = &.{},
+    /// L row-view offsets derived from packed L columns.
     l_row_starts: []usize = &.{},
+    /// Pivot-column positions in the L row view.
     l_row_columns: []u32 = &.{},
+    /// Coefficients in the L row view.
     l_row_values: []f64 = &.{},
 
+    /// Relative column threshold for accepting numerical pivots.
     pivot_threshold: f64 = 0.1,
+    /// Absolute drop/zero threshold used by sparse elimination and solves.
     zero_tolerance: f64 = 1e-14,
 
+    /// Construct an empty factorization and its reusable sub-workspaces.
     pub fn init(allocator: std.mem.Allocator) SparseLU {
         return .{
             .allocator = allocator,
@@ -76,6 +125,7 @@ pub const SparseLU = struct {
         };
     }
 
+    /// Release packed factors, solve companions, and all sub-workspaces.
     pub fn deinit(self: *SparseLU) void {
         self.kernel.deinit();
         self.symbolic.deinit();
@@ -109,6 +159,7 @@ pub const SparseLU = struct {
         };
     }
 
+    /// Validate and factorize a compact CSC basis as `P*B*Q=L*U`.
     pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
         return self.factorizeImpl(basis, true, null, false);
     }
@@ -136,6 +187,7 @@ pub const SparseLU = struct {
         return self.factorizeImpl(basis, false, trace, true);
     }
 
+    /// Shared factorization driver for validated, replayed, and repaired ordering.
     fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace, repair_trace: bool) SparseLuError!void {
         const n = basis.dimension;
         try self.ensureDimension(n);
@@ -251,6 +303,7 @@ pub const SparseLU = struct {
         self.hyper_views_ready = false;
     }
 
+    /// Pack one fill-free symbolic singleton directly into L/U streams.
     fn packSymbolicSingleton(self: *SparseLU, basis: sparse_basis.SparseBasisView, plan: sparse_symbolic.SymbolicPlanView, position: usize) SparseLuError!void {
         const row = plan.pivot_rows[position];
         const column = plan.pivot_columns[position];
@@ -323,6 +376,7 @@ pub const SparseLU = struct {
         return self.solveFt(rhs, true);
     }
 
+    /// Solve through L, FT corrections, and mutable U, optionally capturing Aq.
     fn solveFt(self: *SparseLU, rhs: []f64, comptime capture: bool) SparseLuError!void {
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
@@ -362,6 +416,7 @@ pub const SparseLU = struct {
         for (0..n) |position| rhs[self.pivot_rows[position]] = self.work[position];
     }
 
+    /// Solve the transpose system through mutable U, corrections, and L.
     fn solveTransposeFt(self: *SparseLU, rhs: []f64) SparseLuError!void {
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
@@ -388,6 +443,7 @@ pub const SparseLU = struct {
         try self.ft.update(leaving_column, alpha, self.zero_tolerance);
     }
 
+    /// Borrow the mutable U/UR representation, initializing FT storage if needed.
     pub fn mutableUpperView(self: *SparseLU) SparseLuError!sparse_ft.MutableUpperView {
         try self.ensureFt();
         return self.ft.mutableUpperView();
@@ -554,6 +610,7 @@ pub const SparseLU = struct {
         @memcpy(rhs, self.work[0..self.dimension]);
     }
 
+    /// Total stored L and U off-diagonal entries plus the diagonal.
     pub fn factorNonzeros(self: *const SparseLU) usize {
         return self.dimension + self.l_nonzeros + self.u_nonzeros;
     }
@@ -601,6 +658,7 @@ pub const SparseLU = struct {
         return total;
     }
 
+    /// Resolve automatic ordering from reduced-kernel size and density.
     fn selectOrdering(self: *const SparseLU, shape: sparse_kernel.KernelShape) OrderingStrategy {
         return switch (self.ordering_strategy) {
             .automatic => if (self.peeled_pivots >= self.dimension - self.peeled_pivots and
@@ -626,6 +684,7 @@ pub const SparseLU = struct {
         return 8;
     }
 
+    /// Grow every per-dimension permutation, diagonal, work, and view array.
     fn ensureDimension(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
@@ -645,6 +704,7 @@ pub const SparseLU = struct {
         self.dimension_capacity = capacity;
     }
 
+    /// Grow all packed L/U entry streams.
     fn ensureFactorCapacity(self: *SparseLU, required: usize) SparseLuError!void {
         if (required <= self.factor_capacity) return;
         const capacity = grow(self.factor_capacity, required) catch return error.CapacityOverflow;
@@ -659,10 +719,12 @@ pub const SparseLU = struct {
         self.factor_capacity = capacity;
     }
 
+    /// Reallocate one retained slice through the factorization allocator.
     fn resizeRetained(self: *SparseLU, slice: anytype, capacity: usize) SparseLuError!void {
         slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
 
+    /// Build U-by-column and L-by-row companions for reachability solves.
     fn buildHyperViews(self: *SparseLU) void {
         const n = self.dimension;
         @memset(self.u_column_starts[0 .. n + 1], 0);
@@ -694,10 +756,12 @@ pub const SparseLU = struct {
         self.hyper_views_ready = true;
     }
 
+    /// Lazily build hyper-sparse companion views once per factorization.
     inline fn ensureHyperViews(self: *SparseLU) void {
         if (!self.hyper_views_ready) self.buildHyperViews();
     }
 
+    /// Initialize mutable U/UR from packed U when first update/solve requires it.
     fn ensureFt(self: *SparseLU) SparseLuError!void {
         if (self.ft_ready) return;
         self.ensureHyperViews();
@@ -711,10 +775,12 @@ pub const SparseLU = struct {
         self.ft_ready = true;
     }
 
+    /// Clear marks for the active sparse workspace and reset its length.
     fn clearActive(self: *SparseLU) void {
         for (self.active[0..self.active_count]) |position| self.marked[position] = false;
         self.active_count = 0;
     }
+    /// Mark a position active and initialize its work value.
     fn activate(self: *SparseLU, position: u32, value: f64) void {
         if (!self.marked[position]) {
             self.marked[position] = true;
@@ -723,11 +789,13 @@ pub const SparseLU = struct {
             self.work[position] = value;
         } else self.work[position] += value;
     }
+    /// Add to a work position, activating it on first touch.
     fn accumulate(self: *SparseLU, position: u32, value: f64) void {
         self.activate(position, value);
     }
 };
 
+/// Compute a geometric retained-capacity target.
 fn grow(current: usize, required: usize) error{Overflow}!usize {
     var capacity = @max(current, 8);
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;

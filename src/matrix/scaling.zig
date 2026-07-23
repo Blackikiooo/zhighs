@@ -10,9 +10,12 @@ const csc = @import("csc.zig");
 const memory = @import("memory.zig");
 
 pub const ScalingView = struct {
+    /// Positive finite multiplier for each matrix row.
     row: []const f64,
+    /// Positive finite multiplier for each matrix column.
     col: []const f64,
 
+    /// Validate dimensions and positivity/finiteness of every factor.
     pub fn validate(self: @This(), num_rows: usize, num_cols: usize) csc.MatrixError!void {
         if (self.row.len != num_rows or self.col.len != num_cols) return error.DimensionMismatch;
         for (self.row) |factor| if (!validFactor(factor)) return error.InvalidScaling;
@@ -52,6 +55,7 @@ pub fn remove(matrix: *csc.CscMatrix, factors: ScalingView) csc.MatrixError!void
     removeAssumeValid(matrix, factors);
 }
 
+/// Trusted inverse scaling; divides each coefficient by its row/column product.
 pub fn removeAssumeValid(matrix: *csc.CscMatrix, factors: ScalingView) void {
     for (0..matrix.num_cols) |col| {
         const col_factor = factors.col[col];
@@ -62,6 +66,7 @@ pub fn removeAssumeValid(matrix: *csc.CscMatrix, factors: ScalingView) void {
     }
 }
 
+/// Transactionally multiply one checked column by a positive finite factor.
 pub fn scaleColumn(matrix: *csc.CscMatrix, col: foundation.ColId, factor: f64) csc.MatrixError!void {
     const col_index = col.toUsize();
     if (col_index >= matrix.num_cols) return error.IndexOutOfBounds;
@@ -75,6 +80,7 @@ pub fn scaleColumn(matrix: *csc.CscMatrix, col: foundation.ColId, factor: f64) c
     scaleContiguousAssumeValid(matrix.values[begin..end], factor);
 }
 
+/// Transactionally multiply all entries of one checked row.
 pub fn scaleRow(matrix: *csc.CscMatrix, row: foundation.RowId, factor: f64) csc.MatrixError!void {
     const row_index = row.toUsize();
     if (row_index >= matrix.num_rows) return error.IndexOutOfBounds;
@@ -89,6 +95,7 @@ pub fn scaleRow(matrix: *csc.CscMatrix, row: foundation.RowId, factor: f64) csc.
     }
 }
 
+/// Apply a complete column-factor vector after preflighting every product.
 pub fn applyColumnFactors(matrix: *csc.CscMatrix, factors: []const f64) csc.MatrixError!void {
     if (factors.len != matrix.num_cols) return error.DimensionMismatch;
     // Validate and preflight directly, avoiding allocation of unit row factors.
@@ -121,6 +128,7 @@ inline fn scaleContiguousAssumeValid(values: []f64, factor: f64) void {
     while (position < values.len) : (position += 1) values[position] *= factor;
 }
 
+/// Apply a complete row-factor vector after preflighting every product.
 pub fn applyRowFactors(matrix: *csc.CscMatrix, factors: []const f64) csc.MatrixError!void {
     if (factors.len != matrix.num_rows) return error.DimensionMismatch;
     for (factors) |factor| if (!validFactor(factor)) return error.InvalidScaling;
@@ -181,10 +189,12 @@ pub fn computePowerOfTwoRowFactors(matrix: csc.CscMatrix, max_exponent: u10, out
     for (output) |*maximum| maximum.* = powerOfTwoReciprocal(maximum.*, max_exponent);
 }
 
+/// Return whether a scaling factor is positive and finite.
 fn validFactor(factor: f64) bool {
     return std.math.isFinite(factor) and factor > 0.0;
 }
 
+/// Round a reciprocal maximum to a clamped binary power.
 fn powerOfTwoReciprocal(maximum: f64, max_exponent: u10) f64 {
     if (maximum == 0.0) return 1.0;
     const limit: f64 = @floatFromInt(max_exponent);
@@ -192,6 +202,7 @@ fn powerOfTwoReciprocal(maximum: f64, max_exponent: u10) f64 {
     return @exp2(exponent);
 }
 
+/// Check every scaled coefficient before transactional mutation.
 fn preflight(matrix: csc.CscMatrix, factors: ScalingView, inverse: bool) csc.MatrixError!void {
     for (0..matrix.num_cols) |col| {
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {

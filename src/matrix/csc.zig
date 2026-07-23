@@ -40,12 +40,19 @@ pub const MatrixError = sparse_vector.SparseVectorError || error{
 /// Owning CSC matrix. Column j occupies the half-open range described by
 /// col_starts[j] and col_starts[j + 1].
 pub const CscMatrix = struct {
+    /// Logical row dimension.
     num_rows: usize,
+    /// Logical column dimension.
     num_cols: usize,
+    /// Column offsets of length `num_cols + 1`; the final entry equals `nnz`.
     col_starts: []usize,
+    /// Strictly increasing row IDs within each column range.
     row_indices: []RowId,
+    /// Nonzero coefficients parallel to `row_indices`.
     values: []f64,
+    /// Optional single allocation backing the three primary slices.
     storage: ?[]align(64) u8 = null,
+    /// Optional narrow offset mirror used by specialized multiply kernels.
     compact_col_starts: ?[]foundation.HUInt = null,
     /// Relevant when `storage == null`: true means the three slices are
     /// independent allocator-owned allocations; false denotes a borrowed
@@ -153,6 +160,11 @@ pub const CscMatrix = struct {
         return result;
     }
 
+    /// Release owned storage according to the constructor's ownership mode.
+    ///
+    /// Packed matrices free only `storage`; independently owned matrices free
+    /// each slice; borrowed facades free nothing. The supplied allocator must
+    /// be the allocator used by the owning constructor.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.storage) |storage| {
             allocator.free(storage);
@@ -236,6 +248,8 @@ pub const CscMatrix = struct {
         return multiplyDenseKernel(usize, self.num_cols, self.col_starts, self.row_indices, self.values, x, y);
     }
 
+    /// Compute `y = A*x` while skipping columns whose multiplier is exactly
+    /// zero, after checking vector dimensions.
     pub fn multiplySkippingZeros(self: Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplySkippingZerosAssumeValid(x, y);
@@ -261,11 +275,14 @@ pub const CscMatrix = struct {
         self.multiplySparseAssumeValid(x, y);
     }
 
+    /// Trusted sparse-input multiply. Clears `y`, then accumulates only columns
+    /// explicitly present in canonical sparse vector `x`.
     pub fn multiplySparseAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
         memory.clearF64(y);
         self.addSparseProductAssumeValid(x, y);
     }
 
+    /// Checked accumulation `y += A*x` for a canonical sparse input vector.
     pub fn addSparseProduct(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
         if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         try x.validate();
@@ -328,10 +345,15 @@ pub const CscMatrix = struct {
 /// Non-owning CSC matrix view.  All slices are borrowed `[]const` references
 /// into caller-owned buffers; the view itself can be copied freely.
 pub const CscView = struct {
+    /// Borrowed logical row dimension.
     num_rows: usize,
+    /// Borrowed logical column dimension.
     num_cols: usize,
+    /// Borrowed column offsets of length `num_cols + 1`.
     col_starts: []const usize,
+    /// Borrowed canonical row IDs.
     row_indices: []const RowId,
+    /// Borrowed coefficients parallel to `row_indices`.
     values: []const f64,
 
     /// Creates and validates a borrowed immutable CSC view.
@@ -346,6 +368,7 @@ pub const CscView = struct {
         return .{ .num_rows = num_rows, .num_cols = num_cols, .col_starts = col_starts, .row_indices = row_indices, .values = values };
     }
 
+    /// Number of stored nonzero coefficients.
     pub inline fn nnz(self: CscView) usize {
         return self.values.len;
     }
@@ -353,23 +376,23 @@ pub const CscView = struct {
     /// Full structural validation matching CscMatrix.validate semantics.
     pub fn validate(self: CscView) MatrixError!void {
         try validateDimensions(self.num_rows, self.num_cols);
-        if (self.col_starts.len != self.num_cols + 1) return error.InvalidColumnStarts;
-        if (self.row_indices.len != self.values.len) return error.InconsistentStorage;
-        if (self.col_starts[0] != 0) return error.InvalidColumnStarts;
-        if (self.col_starts[self.num_cols] != self.nnz()) return error.InvalidColumnStarts;
+        if (self.col_starts.len != self.num_cols + 1) return MatrixError.InvalidColumnStarts;
+        if (self.row_indices.len != self.values.len) return MatrixError.InconsistentStorage;
+        if (self.col_starts[0] != 0) return MatrixError.InvalidColumnStarts;
+        if (self.col_starts[self.num_cols] != self.nnz()) return MatrixError.InvalidColumnStarts;
 
         for (0..self.num_cols) |col| {
             const begin = self.col_starts[col];
             const end = self.col_starts[col + 1];
-            if (begin > end or end > self.nnz()) return error.InvalidColumnStarts;
+            if (begin > end or end > self.nnz()) return MatrixError.InvalidColumnStarts;
             var prev: ?usize = null;
             for (begin..end) |pos| {
                 const row = self.row_indices[pos].toUsize();
                 const value = self.values[pos];
-                if (row >= self.num_rows) return error.IndexOutOfBounds;
-                if (prev) |p| if (row <= p) return error.IndicesNotStrictlyIncreasing;
-                if (!std.math.isFinite(value)) return error.NonFiniteValue;
-                if (value == 0.0) return error.ExplicitZero;
+                if (row >= self.num_rows) return MatrixError.IndexOutOfBounds;
+                if (prev) |p| if (row <= p) return MatrixError.IndicesNotStrictlyIncreasing;
+                if (!std.math.isFinite(value)) return MatrixError.NonFiniteValue;
+                if (value == 0.0) return MatrixError.ExplicitZero;
                 prev = row;
             }
         }
@@ -434,6 +457,8 @@ noinline fn addSparseProductCompact(
     }
 }
 
+/// Offset-width-specialized `A*x` leaf that vector-scans dense `x` for blocks
+/// containing nonzero multipliers before traversing the corresponding columns.
 noinline fn multiplySkippingZerosKernel(
     comptime Offset: type,
     num_cols: usize,
@@ -481,9 +506,9 @@ noinline fn multiplySkippingZerosKernel(
 /// Checks whether dimensions can be represented by the strong ID types.
 pub fn validateDimensions(num_rows: usize, num_cols: usize) MatrixError!void {
     // CSC needs num_cols + 1 offsets; reject the sole overflowing usize value.
-    if (num_cols == std.math.maxInt(usize)) return error.DimensionTooLarge;
-    if (num_rows != 0) _ = RowId.fromUsize(num_rows - 1) catch return error.DimensionTooLarge;
-    if (num_cols != 0) _ = ColId.fromUsize(num_cols - 1) catch return error.DimensionTooLarge;
+    if (num_cols == std.math.maxInt(usize)) return MatrixError.DimensionTooLarge;
+    if (num_rows != 0) _ = RowId.fromUsize(num_rows - 1) catch return MatrixError.DimensionTooLarge;
+    if (num_cols != 0) _ = ColId.fromUsize(num_cols - 1) catch return MatrixError.DimensionTooLarge;
 }
 
 test "CSC zero matrix is valid and multiplies to zero" {

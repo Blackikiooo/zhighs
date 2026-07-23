@@ -13,6 +13,7 @@ const transform_buffers = @import("transform_buffers.zig");
 
 const CscTransformBuffers = transform_buffers.CscTransformBuffers;
 
+/// Validate and append a canonical CSC column block, returning a new owner.
 pub fn appendColumns(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -51,6 +52,7 @@ pub fn appendColumns(
     return result;
 }
 
+/// Validate both blocks and append columns into reusable caller buffers.
 pub fn appendColumnsInto(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -64,6 +66,7 @@ pub fn appendColumnsInto(
     return appendColumnsIntoAssumeValid(buffers, matrix, columns);
 }
 
+/// Trusted allocation-free column append into sufficiently large buffers.
 pub fn appendColumnsIntoAssumeValid(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -89,6 +92,7 @@ pub fn appendColumnsIntoAssumeValid(
     return buffers.viewAssumeValid(matrix.num_rows, new_num_cols, total_nnz);
 }
 
+/// Validate and append a canonical CSC row block, returning a new owner.
 pub fn appendRows(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -149,6 +153,7 @@ pub fn appendRows(
     return result;
 }
 
+/// Validate both blocks and append rows into reusable caller buffers.
 pub fn appendRowsInto(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -162,6 +167,7 @@ pub fn appendRowsInto(
     return appendRowsIntoAssumeValid(buffers, matrix, rows_to_add);
 }
 
+/// Trusted allocation-free row append into sufficiently large buffers.
 pub fn appendRowsIntoAssumeValid(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -220,6 +226,7 @@ pub fn appendRowsFromCsr(
     return appendRowsFromCsrAssumeValid(allocator, matrix, row_starts, col_indices, stream_values);
 }
 
+/// Validate a CSR row block and append it below CSC into caller buffers.
 pub fn appendRowsFromCsrInto(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -232,6 +239,7 @@ pub fn appendRowsFromCsrInto(
     return appendRowsFromCsrIntoAssumeValid(buffers, matrix, row_starts, col_indices, stream_values);
 }
 
+/// Trusted CSR-to-CSC row append using prevalidated exact-size buffers.
 pub fn appendRowsFromCsrIntoAssumeValid(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -340,6 +348,7 @@ pub fn appendRowsFromCsrAssumeValid(
     return result;
 }
 
+/// Validate canonical CSR offsets, IDs, values, and requested row dimension.
 fn validateCsrRowStreams(
     num_cols: usize,
     row_starts: []const usize,
@@ -365,6 +374,7 @@ fn validateCsrRowStreams(
     }
 }
 
+/// Return an owning matrix with the checked, strictly increasing columns removed.
 pub fn deleteColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     try matrix.validate();
     try validateDeleted(foundation.ColId, deleted, matrix.num_cols);
@@ -383,6 +393,7 @@ pub fn deleteColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, delete
     return slice.extractColumnsAssumeValid(allocator, matrix, kept);
 }
 
+/// Delete checked columns into reusable output and index-scratch buffers.
 pub fn deleteColumnsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, deleted: []const foundation.ColId) csc.MatrixError!csc.CscView {
     try matrix.validate();
     try validateDeleted(foundation.ColId, deleted, matrix.num_cols);
@@ -415,6 +426,7 @@ pub fn deleteColumnsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, d
     return buffers.viewAssumeValid(matrix.num_rows, output_cols, output_nnz);
 }
 
+/// Return an owning matrix with checked rows removed and remaining IDs remapped.
 pub fn deleteRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: []const foundation.RowId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     try matrix.validate();
     try validateDeleted(foundation.RowId, deleted, matrix.num_rows);
@@ -433,6 +445,7 @@ pub fn deleteRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, deleted: 
     return slice.extractRowsAssumeValid(allocator, matrix, kept);
 }
 
+/// Delete checked rows into reusable buffers, using scratch for the ID remap.
 pub fn deleteRowsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, deleted: []const foundation.RowId) csc.MatrixError!csc.CscView {
     try matrix.validate();
     try validateDeleted(foundation.RowId, deleted, matrix.num_rows);
@@ -471,6 +484,7 @@ pub fn deleteRowsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, dele
     return buffers.viewAssumeValid(next_row, matrix.num_cols, output_nnz);
 }
 
+/// Shift cursor-mutated CSC end offsets back into canonical start offsets.
 fn restoreStartsAfterCursorUse(starts: []usize) void {
     var col = starts.len - 1;
     while (col > 0) {
@@ -480,6 +494,7 @@ fn restoreStartsAfterCursorUse(starts: []usize) void {
     starts[0] = 0;
 }
 
+/// Require a strictly increasing in-range deletion list.
 fn validateDeleted(comptime Id: type, deleted: []const Id, dimension: usize) csc.MatrixError!void {
     var previous: ?usize = null;
     for (deleted) |id| {

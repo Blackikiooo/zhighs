@@ -17,10 +17,12 @@ pub const MatrixStore = struct {
     /// Authoritative matrix. Treat this field as private even though Zig struct
     /// fields are visible: replacing it directly bypasses cache invalidation.
     matrix_storage: csc_module.CscMatrix,
+    /// Monotonic revision of the authoritative matrix.
     matrix_revision: u64 = 0,
     /// High-water-mark output and cursor storage retained across revisions.
     /// `csr_cache_revision == null` means contents must be rebuilt before use.
     csr_buffers: ?csr_module.CsrBuffers = null,
+    /// Revision currently materialized in `csr_buffers`, or null when invalid.
     csr_cache_revision: ?u64 = null,
 
     const Self = @This();
@@ -37,6 +39,7 @@ pub const MatrixStore = struct {
         return .{ .matrix_storage = matrix };
     }
 
+    /// Release the authoritative CSC matrix and any materialized CSR cache.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.csr_buffers) |*buffers| buffers.deinit(allocator);
         self.matrix_storage.deinit(allocator);
@@ -48,6 +51,7 @@ pub const MatrixStore = struct {
         return &self.matrix_storage;
     }
 
+    /// Current structural/value revision used to validate derived views.
     pub inline fn matrixRevision(self: Self) u64 {
         return self.matrix_revision;
     }
@@ -102,6 +106,7 @@ pub const MatrixStore = struct {
         return self.csrViewAssumeCurrent();
     }
 
+    /// Borrow the cache after its revision was checked by the caller.
     fn csrViewAssumeCurrent(self: *const Self) csr_module.CsrView {
         const buffers = self.csr_buffers.?;
         const rows = self.matrix_storage.num_rows;

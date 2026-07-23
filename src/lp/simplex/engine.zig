@@ -1,4 +1,9 @@
-//! Revised-simplex orchestration boundary; policies remain replaceable.
+//! Revised-simplex orchestration boundary.
+//!
+//! `SimplexEngine` owns all mutable solve state and reusable workspaces but
+//! borrows the problem matrix through `ProblemView`. Algorithm implementations
+//! are split into `engine_*.zig` files; their methods share this struct so the
+//! hot path does not allocate or copy large state objects.
 const std = @import("std");
 const basis_module = @import("basis.zig");
 const basis_snapshot_module = @import("basis_snapshot.zig");
@@ -7,6 +12,7 @@ const pricing_module = @import("pricing.zig");
 const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
+const dual_state_module = @import("dual_state.zig");
 const crash_module = @import("crash.zig");
 const degeneracy_module = @import("degeneracy.zig");
 const pricing_workspace_module = @import("pricing_workspace.zig");
@@ -15,36 +21,59 @@ const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
 const matrix = @import("matrix");
 
+/// Revised-simplex direction used for the active phase.
 pub const Algorithm = enum { primal_revised, dual_revised };
+/// Cold-start method used when the logical basis is not immediately feasible.
 pub const PhaseOneStrategy = enum { primal, dual, automatic };
+/// Initial-basis construction policy.
 pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
+/// Degeneracy and cycling mitigation policy.
 pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo, automatic };
+/// Pricing rule installed during primal Phase I.
 pub const PhaseOnePricingStrategy = enum { inherit, dantzig, devex, steepest_edge };
+/// Matrix traversal used to construct pricing results.
 pub const PricingKernel = enum { column, row, automatic };
+/// Primal Devex weight-maintenance implementation.
 pub const DevexStrategy = enum { legacy, framework };
+/// Optional segmented pricing policy for primal simplex.
 pub const PrimalPricingStrategy = enum { inherit, partial };
 /// Dual edge-weight lifecycle. `inherit` preserves the caller's pricing rule;
 /// `steepest_devex` starts with exact DSE and deterministically falls back to
 /// full dual Devex when the recurrence is rejected or exceeds its work budget.
 pub const DualEdgeWeightStrategy = enum { inherit, steepest_devex };
+/// Dual initialization formulas used before Phase I/II selection.
 pub const DualInitializationStrategy = enum { baseline, highs };
+/// Public progress phase reported to callbacks and traces.
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
+/// Return value by which a progress callback requests continuation or stop.
 pub const CallbackAction = enum { continue_solve, stop };
 /// Borrowed scalar progress snapshot. It owns no memory and is valid only for
 /// the callback invocation.
 pub const ProgressEventView = struct {
+    /// Phase executing when the event was emitted.
     phase: SolvePhase,
+    /// Primal or dual revised algorithm currently performing pivots.
     algorithm: Algorithm,
+    /// Attempted-iteration counter visible to the public solve.
     iterations: usize,
+    /// Deterministic work units consumed so far.
     work_used: u64,
+    /// Current internally scaled objective estimate.
     objective_value: f64,
+    /// Largest current primal bound violation.
     primal_infeasibility: f64,
+    /// Largest current reduced-cost sign violation.
     dual_infeasibility: f64,
 };
+/// User callback invoked at configured work intervals; storage is caller-owned.
 pub const IterationCallback = *const fn (event: ProgressEventView, user_data: ?*anyopaque) CallbackAction;
+/// Informational callback that cannot stop the solve.
 pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data: ?*anyopaque) void;
+/// Built-in iteration logging level.
 pub const LogLevel = enum { off, iterations };
+/// Public solve result status re-exported by the engine API.
 pub const SolveStatus = solution_module.SolveStatus;
+/// Internal stage at which an unrecovered numerical failure occurred.
 pub const FailureSite = enum {
     none,
     direction_column,
@@ -61,6 +90,7 @@ pub const FailureSite = enum {
     optimality_check,
 };
 
+/// Diagnostic exit route from the shifted-cost dual Phase-II path.
 pub const ShiftedDualExit = enum {
     none,
     running,
@@ -78,6 +108,7 @@ pub const ShiftedDualExit = enum {
     cleanup_primal_failed,
     cleanup_neither_feasible,
 };
+/// Reason validation of an infeasibility certificate was rejected.
 pub const InfeasibilityCertificateFailure = enum {
     none,
     invalid_workspace,
@@ -88,19 +119,32 @@ pub const InfeasibilityCertificateFailure = enum {
     nonfinite_proof,
     nonpositive_gap,
 };
+/// Deterministic record of one committed pivot for differential testing.
 pub const PivotTraceEvent = struct {
+    /// Phase in which the pivot was committed.
     phase: SolvePhase,
+    /// Global attempted-iteration number.
     iteration: usize,
+    /// Internal column entering the basis.
     entering_column: u32,
+    /// Internal column leaving the basis.
     leaving_column: u32,
+    /// Basis row replaced by the entering column.
     leaving_row: u32,
+    /// Accepted tableau pivot after direction normalization.
     pivot: f64,
+    /// Nonnegative primal movement applied during the pivot.
     step: f64,
+    /// Factor updates present immediately before/after trace publication.
     update_count: usize,
+    /// Relative residual measured for the entering-column FTRAN.
     ftran_relative_residual: f64,
+    /// Current inexpensive pivot-spread stability estimate.
     condition_estimate: f64,
+    /// Number of nonbasic bound flips associated with this iteration.
     bound_flip_count: usize,
 };
+/// Mutually exclusive primary cause assigned to a degenerate iteration.
 pub const DegeneracyReason = enum {
     bound_tie,
     ratio_tie,
@@ -113,15 +157,24 @@ pub const DegeneracyReason = enum {
 /// Allocation-free diagnostic emitted only for a numerically degenerate
 /// iteration. Storage is owned by the solve caller.
 pub const DegeneracyTraceEvent = struct {
+    /// Phase in which degeneracy was detected.
     phase: SolvePhase,
+    /// Global attempted-iteration number.
     iteration: usize,
+    /// Primary classification used for statistics.
     reason: DegeneracyReason,
+    /// Internal entering column, or the sentinel chosen by the producer.
     entering_column: u32,
+    /// Internal leaving column, or the sentinel chosen by the producer.
     leaving_column: u32,
+    /// Primal movement associated with the event.
     step: f64,
+    /// Objective movement associated with the event.
     objective_change: f64,
+    /// Hash of the basis head used to detect repeated bases.
     basis_fingerprint: u64,
 };
+/// Classification assigned to one CHUZC candidate in failure diagnostics.
 pub const DualPhaseOneCandidateReason = enum {
     small_tableau,
     basic_or_fixed,
@@ -129,52 +182,97 @@ pub const DualPhaseOneCandidateReason = enum {
     accepted_bound_flip,
     eligible_unselected,
 };
+/// Snapshot of one dual Phase-I CHUZC candidate at a no-entering failure.
 pub const DualPhaseOneCandidateTraceEvent = struct {
+    /// Internal candidate column.
     column: u32,
+    /// Basis/bound status at the time of CHUZC.
     status: basis_module.BasisStatus,
+    /// Explicit persistent nonbasic movement in {-1,0,+1}.
     explicit_move: i8,
+    /// Pivotal tableau coefficient.
     tableau: f64,
+    /// Temporary CHUZC movement direction.
     direction: f64,
+    /// Tableau coefficient after leaving/movement sign normalization.
     signed_pivot: f64,
+    /// Working reduced cost.
     reduced_cost: f64,
+    /// Working lower bound.
     lower: f64,
+    /// Working upper bound.
     upper: f64,
+    /// Working nonbasic primal value.
     primal: f64,
+    /// Amount of leaving-row violation removable by flipping this column.
     flip_capacity: f64,
+    /// Reason the candidate was rejected, flipped or left unselected.
     reason: DualPhaseOneCandidateReason,
 };
-pub const DualPhaseOneEpTraceEvent = struct { row: u32, value: f64 };
+/// One nonzero of the pivotal BTRAN row captured for diagnostics.
+pub const DualPhaseOneEpTraceEvent = struct {
+    /// Basis-row index of this retained BTRAN entry.
+    row: u32,
+    /// Numerical value of `e_p^T B^-1` at `row`.
+    value: f64,
+};
+/// Aggregate context recorded when dual Phase I cannot choose an entering column.
 pub const DualPhaseOneFailureDiagnostic = struct {
+    /// Attempted iteration on which CHUZC failed.
     iteration: usize,
+    /// Selected leaving basis row.
     leaving_row: u32,
+    /// Internal basic column occupying `leaving_row`.
     leaving_column: u32,
+    /// Working bound violated by the leaving variable.
     leaving_bound: basis_module.BasisStatus,
+    /// Magnitude of the leaving variable's bound violation.
     violation: f64,
+    /// Working value of the leaving variable.
     leaving_value: f64,
+    /// Phase-I lower bound of the leaving variable.
     working_lower: f64,
+    /// Phase-I upper bound of the leaving variable.
     working_upper: f64,
+    /// Original LP lower bound of the leaving variable.
     original_lower: f64,
+    /// Original LP upper bound of the leaving variable.
     original_upper: f64,
+    /// Number of retained nonzeros in the pivotal BTRAN row.
     ep_nonzeros: usize,
+    /// Largest absolute pivotal-row coefficient.
     ep_max_abs: f64,
+    /// Candidates rejected for a coefficient below pivot tolerance.
     small_tableau: usize,
+    /// Candidates rejected because they were basic or fixed.
     basic_or_fixed: usize,
+    /// Candidates rejected by the required pivot sign.
     wrong_pivot_sign: usize,
+    /// Candidates consumed as accepted BFRT flips.
     accepted_bound_flips: usize,
+    /// Eligible candidates not selected before failure.
     eligible_unselected: usize,
 };
+/// Result of the primal ratio-test wrapper, including early failure status.
 pub const PrimalLeavingResult = struct {
+    /// `.optimal` means `row`/`step` contain a valid choice.
     status: SolveStatus,
+    /// Leaving basis row, or null when the ray is unbounded.
     row: ?u32 = null,
+    /// Maximum feasible primal movement.
     step: f64 = 0.0,
+    /// Bound at which the leaving variable becomes nonbasic.
     bound: basis_module.BasisStatus = .at_lower,
 };
+/// Errors exposed while validating and installing a caller-provided basis.
 pub const BasisImportError = basis_snapshot_module.BasisViewError || error{
     InvalidNonbasicStatus,
     SingularBasis,
     NumericalFailure,
 };
+/// Caller-owned policy, limits, callbacks and diagnostic buffers for one solve.
 pub const SolveControl = struct {
+    /// Maximum attempted simplex iterations across all internal phases.
     max_iterations: usize = 1_000_000,
     /// `null` disables the wall-clock limit; zero requests immediate stop.
     time_limit_ns: ?u64 = null,
@@ -188,12 +286,19 @@ pub const SolveControl = struct {
     /// Deterministic simplex work budget. One unit is charged for each
     /// attempted primal, dual, or Phase-I iteration.
     work_limit: ?u64 = null,
+    /// Progress callback invoked according to `callback_interval_work`.
     iteration_callback: ?IterationCallback = null,
+    /// Opaque pointer forwarded unchanged to `iteration_callback`.
     callback_user_data: ?*anyopaque = null,
+    /// Deterministic work units between progress callbacks; zero is normalized.
     callback_interval_work: u64 = 1,
+    /// Built-in logging mode.
     log_level: LogLevel = .off,
+    /// Optional external iteration-log sink.
     log_callback: ?IterationLogCallback = null,
+    /// Opaque pointer forwarded unchanged to `log_callback`.
     log_user_data: ?*anyopaque = null,
+    /// Deterministic work units between log events.
     log_interval_work: u64 = 100,
     /// Optional caller-owned trace storage used for deterministic pivot-path
     /// differential tests. Events beyond the supplied capacity are dropped.
@@ -204,6 +309,7 @@ pub const SolveControl = struct {
     /// Optional caller-owned storage populated only when dual Phase I has no
     /// entering column. These buffers are diagnostic and never affect pricing.
     dual_phase_one_candidate_trace: []DualPhaseOneCandidateTraceEvent = &.{},
+    /// Optional caller-owned storage for nonzeros of the failing BTRAN row.
     dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
     /// Collect phase and kernel timings. Disabled by default so production
     /// solves do not perform clock reads in simplex hot paths.
@@ -221,7 +327,9 @@ pub const SolveControl = struct {
     /// the anti-cycling trigger; terminal validation cold-restarts baseline if
     /// the perturbed epoch cannot publish a valid status or certificate.
     degeneracy_strategy: DegeneracyStrategy = .automatic,
+    /// Pricing rule override used only during primal Phase I.
     phase_one_pricing: PhaseOnePricingStrategy = .inherit,
+    /// Enable drift-triggered exact reduced-cost repricing.
     adaptive_reprice: bool = false,
     /// Select once per pricing operation; no representation branch exists in
     /// either coefficient inner loop.
@@ -246,86 +354,163 @@ pub const SolveControl = struct {
     dual_initialization_strategy: DualInitializationStrategy = .baseline,
 };
 
+/// Optional counters and timings accumulated during one solve.
 pub const SimplexStats = struct {
+    /// Attempted primal Phase-I iterations.
     phase_one_iterations: usize = 0,
+    /// Attempted dual Phase-I iterations.
     dual_phase_one_iterations: usize = 0,
+    /// Dual Phase-I paths that fell back to primal Phase I.
     dual_phase_one_fallbacks: usize = 0,
+    /// Transactional basis restores followed by a dual Phase-I retry.
     dual_phase_one_snapshot_retries: usize = 0,
+    /// Iterations executed with temporary shifted costs.
     shifted_dual_iterations: usize = 0,
+    /// Cleanup iterations after removing shifted costs.
     shifted_cleanup_iterations: usize = 0,
+    /// Sparse crash-basis construction attempts.
     crash_attempts: usize = 0,
+    /// Crash attempts rejected in favor of the logical basis.
     crash_fallbacks: usize = 0,
+    /// Structural columns considered by the crash planner.
     crash_planned_columns: usize = 0,
+    /// Structural columns installed in the accepted crash basis.
     crash_structural_columns: usize = 0,
+    /// Nonzeros in the accepted crash basis.
     crash_basis_nonzeros: usize = 0,
+    /// Stability estimate of the accepted crash factorization.
     crash_condition_estimate: f64 = 1.0,
+    /// Iterations spent repairing a warm basis.
     dual_repair_iterations: usize = 0,
+    /// Attempted Phase-II iterations.
     phase_two_iterations: usize = 0,
+    /// Nanoseconds spent in primal Phase I.
     phase_one_ns: u64 = 0,
+    /// Nanoseconds spent in dual Phase I.
     dual_phase_one_ns: u64 = 0,
+    /// Nanoseconds spent repairing warm-basis feasibility.
     dual_repair_ns: u64 = 0,
+    /// Nanoseconds spent in Phase II.
     phase_two_ns: u64 = 0,
+    /// Nanoseconds spent in terminal cleanup.
     cleanup_ns: u64 = 0,
+    /// Complete basis rebuild pipelines executed.
     rebuild_calls: usize = 0,
+    /// Nanoseconds spent in basis rebuild pipelines.
     rebuild_ns: u64 = 0,
+    /// Pricing operations executed.
     pricing_calls: usize = 0,
+    /// Nanoseconds spent in pricing operations.
     pricing_ns: u64 = 0,
+    /// Vectors sampled for pricing-density statistics.
     pricing_samples: usize = 0,
+    /// Retained nonzeros across sampled pricing vectors.
     pricing_nonzeros: usize = 0,
+    /// Total entries across sampled pricing vectors.
     pricing_entries: usize = 0,
+    /// Individual nonbasic columns flipped by BFRT.
     bound_flips: usize = 0,
+    /// BFRT batches containing at least one flip.
     bound_flip_batches: usize = 0,
+    /// FTRAN calls avoided by aggregating each flip batch.
     bound_flip_ftran_savings: usize = 0,
+    /// Incremental dual reduced-cost updates.
     dual_reduced_cost_updates: usize = 0,
+    /// Exact dual reduced-cost recomputations.
     dual_exact_reprices: usize = 0,
+    /// Successful dual steepest-edge recurrence updates.
     dual_dse_updates: usize = 0,
     /// CHUZR candidates rejected after BTRAN exposed an updated DSE weight
     /// below one quarter of its exact value.
     dual_dse_weight_rejections: usize = 0,
+    /// Successful dual Devex recurrence updates.
     dual_devex_updates: usize = 0,
+    /// DSE-to-Devex switches caused by invalid recurrence state.
     dual_dse_invalid_fallbacks: usize = 0,
+    /// DSE-to-Devex switches caused by the configured update budget.
     dual_dse_budget_fallbacks: usize = 0,
+    /// Primal Devex reference frameworks initialized.
     devex_frameworks: usize = 0,
+    /// Pivots updating a primal Devex framework.
     devex_framework_updates: usize = 0,
+    /// Invalid primal Devex weights observed.
     devex_bad_weights: usize = 0,
+    /// Degenerate iterations classified as bound ties.
     degeneracy_bound_ties: usize = 0,
+    /// Degenerate iterations classified as ratio ties.
     degeneracy_ratio_ties: usize = 0,
+    /// Degenerate iterations classified as zero primal steps.
     degeneracy_zero_primal_steps: usize = 0,
+    /// Degenerate iterations classified as Phase-I objective stalls.
     degeneracy_phase_one_objective_stalls: usize = 0,
+    /// Degenerate iterations classified as repeated bases.
     degeneracy_repeated_bases: usize = 0,
+    /// Degenerate iterations requiring a small-pivot retry.
     degeneracy_small_pivot_retries: usize = 0,
+    /// Degenerate iterations associated with a bound flip.
     degeneracy_bound_flips: usize = 0,
+    /// Perturbation epochs activated.
     perturbation_activations: usize = 0,
+    /// Perturbation epochs expired by policy.
     perturbation_expirations: usize = 0,
+    /// Cleanup passes performed after perturbation.
     perturbation_cleanups: usize = 0,
+    /// Internal cold restarts performed.
     cold_restart_solves: usize = 0,
+    /// Cold restarts returning specifically to Phase I.
     cold_restart_phase_one: usize = 0,
+    /// Basis/taboo entries recorded.
     taboo_records: usize = 0,
+    /// Candidate choices retried due to taboo state.
     taboo_retries: usize = 0,
+    /// Entering FTRAN vectors sampled for density.
     aq_samples: usize = 0,
+    /// Nonzeros across sampled entering FTRAN vectors.
     aq_nonzeros: usize = 0,
+    /// Pivotal BTRAN rows sampled for density.
     ep_samples: usize = 0,
+    /// Nonzeros across sampled pivotal BTRAN rows.
     ep_nonzeros: usize = 0,
+    /// Pricing operations dispatched to dense traversal.
     dense_pricing_dispatches: usize = 0,
+    /// Pricing operations dispatched to hyper-sparse traversal.
     hyper_pricing_dispatches: usize = 0,
+    /// Pricing operations using the row-oriented matrix.
     row_pricing_dispatches: usize = 0,
+    /// Pricing operations using CSC column traversal.
     column_pricing_dispatches: usize = 0,
+    /// Rebuilds requested to set up Phase I.
     rebuild_phase_one_setup: usize = 0,
+    /// Rebuilds requested by solve residual validation.
     rebuild_solve_residual: usize = 0,
+    /// Rebuilds requested after a small pivot.
     rebuild_small_pivot: usize = 0,
+    /// Rebuilds requested by factor update-count limit.
     rebuild_update_limit: usize = 0,
+    /// Rebuilds requested by factor growth.
     rebuild_update_growth: usize = 0,
+    /// Rebuilds requested after entering-direction refinement.
     rebuild_direction_refinement: usize = 0,
+    /// Rebuilds requested while operating in fresh-factor mode.
     rebuild_fresh_mode: usize = 0,
+    /// Rebuilds requested because a factor update was rejected.
     rebuild_update_rejected: usize = 0,
+    /// Rebuilds requested for original-objective cleanup.
     rebuild_cleanup: usize = 0,
+    /// Rebuilds requested to initialize/reset edge weights.
     rebuild_edge_weight_reset: usize = 0,
+    /// Rebuilds requested by the general numerical policy.
     rebuild_numerical_policy: usize = 0,
+    /// Classification of the first factor-update failure.
     first_update_failure_kind: ?factorization_module.UpdateFailureKind = null,
+    /// Iteration at which the first factor-update failure occurred.
     first_update_failure_iteration: usize = 0,
+    /// Entering column involved in the first factor-update failure.
     first_update_failure_entering: u32 = 0,
+    /// Leaving row involved in the first factor-update failure.
     first_update_failure_leaving_row: u32 = 0,
 
+    /// Sum rebuild counters classified by reason.
     pub fn classifiedRebuilds(self: SimplexStats) usize {
         return self.rebuild_phase_one_setup + self.rebuild_solve_residual + self.rebuild_small_pivot +
             self.rebuild_update_limit + self.rebuild_update_growth + self.rebuild_direction_refinement +
@@ -333,6 +518,7 @@ pub const SimplexStats = struct {
             self.rebuild_edge_weight_reset + self.rebuild_numerical_policy;
     }
 
+    /// Sum degeneracy counters classified by mutually exclusive reason.
     pub fn classifiedDegeneratePivots(self: SimplexStats) usize {
         return self.degeneracy_bound_ties + self.degeneracy_ratio_ties +
             self.degeneracy_zero_primal_steps + self.degeneracy_phase_one_objective_stalls +
@@ -346,17 +532,28 @@ pub const SimplexStats = struct {
 /// HiGHS' simplex iteration count corresponds to committed basis changes;
 /// bound-only moves are therefore reported separately.
 pub const IterationCounters = struct {
+    /// Iteration bodies entered, including iterations that do not commit a basis change.
     attempted_iterations: usize = 0,
+    /// Total committed basis changes across all phases.
     committed_pivots: usize = 0,
+    /// Nonbasic bound changes that do not alter basis membership.
     bound_moves: usize = 0,
+    /// Pivots performed while temporary shifted costs are installed.
     shifted_dual_pivots: usize = 0,
+    /// Pivots performed by dual Phase I.
     dual_phase_one_pivots: usize = 0,
+    /// Pivots performed by dual Phase II with original/working costs.
     dual_phase_two_pivots: usize = 0,
+    /// Pivots performed by artificial primal Phase I.
     primal_phase_one_pivots: usize = 0,
+    /// Pivots performed by primal Phase II.
     primal_phase_two_pivots: usize = 0,
+    /// Pivots performed while repairing a warm basis for dual feasibility.
     dual_repair_pivots: usize = 0,
+    /// Pivots performed during terminal cleanup.
     cleanup_pivots: usize = 0,
 
+    /// Sum pivots assigned to a concrete phase; should equal `committed_pivots`.
     pub fn classifiedPivots(self: IterationCounters) usize {
         return self.shifted_dual_pivots + self.dual_phase_one_pivots +
             self.dual_phase_two_pivots + self.primal_phase_one_pivots +
@@ -365,6 +562,7 @@ pub const IterationCounters = struct {
     }
 };
 
+/// Reason the numerical factorization layer requests a basis rebuild.
 pub const RebuildReason = enum {
     phase_one_setup,
     solve_residual,
@@ -379,108 +577,189 @@ pub const RebuildReason = enum {
     numerical_policy,
 };
 
+/// Owning revised-simplex solver instance and reusable workspace.
 pub const SimplexEngine = struct {
+    /// Allocator owning the basis and every reusable sub-workspace.
     allocator: std.mem.Allocator,
+    /// Revised-simplex direction currently executing.
     algorithm: Algorithm = .dual_revised,
+    /// Model-shaped mutable basis, allocated at the start of a solve.
     basis: ?basis_module.BasisState = null,
+    /// Current basis inverse/factor representation and update chain.
     factorization: factorization_module.Factorization,
-    dual_phase_one: dual_phase_one_module.DualPhaseOneWorkspace,
+    /// Persistent dual Phase-I/II bounds, moves, shifts and diagnostics.
+    dual_work: dual_phase_one_module.DualWorkState,
+    /// Unified dual phase and rebuild controller.
+    dual_control: dual_state_module.ControlState = .{},
+    /// Reusable sparse crash-basis planner.
     crash: crash_module.CrashWorkspace,
+    /// Perturbation, taboo and repeated-basis workspace.
     degeneracy: degeneracy_module.Workspace,
+    /// Optional CSR companion used by row-oriented pricing.
     pricing_row_view: pricing_workspace_module.RowView,
+    /// Pricing rule and partial-pricing cursor state.
     pricing: pricing_module.Pricing = .{},
+    /// Active primal/dual ratio-test policy.
     ratio_test: ratio_module.RatioTest = .{},
+    /// Tolerances, residual observations and reinversion policy.
     numerical: numerical_module.NumericalState = .{},
+    /// Attempted iterations in the current internal solve path.
     iterations: usize = 0,
+    /// Monotonic public-solve pivot accounting across fallback paths.
     iteration_counters: IterationCounters = .{},
+    /// Recursion depth used to distinguish public solves from internal fallbacks.
     solve_depth: usize = 0,
+    /// Current scaled objective estimate or final published objective.
     objective_value: f64 = 0.0,
+    /// Multiplier mapping working objective coefficients to original scale.
     objective_scale: f64 = 1.0,
+    /// Whether `basis.unbounded_ray` contains a validated certificate.
     unbounded_ray_valid: bool = false,
+    /// Whether `basis.infeasibility_ray` contains a validated certificate.
     infeasibility_ray_valid: bool = false,
+    /// Positive separation established by the most recent Farkas validation.
     infeasibility_certificate_gap: f64 = 0.0,
+    /// First reason the most recent Farkas validation failed.
     infeasibility_certificate_failure: InfeasibilityCertificateFailure = .none,
+    /// Ray mass touching infinite row bounds during validation.
     infeasibility_certificate_infinite_row_mass: f64 = 0.0,
+    /// Ray mass touching infinite column bounds during validation.
     infeasibility_certificate_infinite_column_mass: f64 = 0.0,
+    /// Whether artificial primal Phase I is required after initialization.
     phase1_needed: bool = false,
+    /// Monotonic start timestamp, absent when no time source is configured.
     solve_start_ns: ?i96 = null,
+    /// Borrowed clock backend used for stop checks.
     solve_clock_io: ?std.Io = null,
+    /// Deterministic work units consumed by the public solve.
     work_used: u64 = 0,
+    /// Whether row dual edge weights match the current basis.
     dual_edge_weights_valid: bool = false,
+    /// Basis row whose `dual_row`/tableau workspace is currently valid.
     dual_row_index: ?u32 = null,
+    /// Active entries in the hyper-sparse dual leaving candidate list.
     dual_candidate_count: usize = 0,
+    /// Score cutoff used to retain hyper-sparse dual candidates.
     dual_candidate_cutoff: f64 = 0.0,
+    /// Whether CHUZR currently uses its sparse candidate representation.
     dual_hyper_sparse_active: bool = false,
     /// Structural basic columns replaced by logical columns while repairing a
     /// singular imported basis during the current solve.
     rank_repair_count: usize = 0,
+    /// Number of pivot events written to caller trace storage.
     pivot_trace_count: usize = 0,
+    /// Borrowed caller storage active for the current solve.
     active_pivot_trace: []PivotTraceEvent = &.{},
+    /// Number of degeneracy events written to caller storage.
     degeneracy_trace_count: usize = 0,
+    /// Borrowed caller degeneracy trace storage.
     active_degeneracy_trace: []DegeneracyTraceEvent = &.{},
+    /// Fixed-size recent-basis hash ring for repeated-basis detection.
     degeneracy_basis_fingerprints: [32]u64 = @splat(0),
+    /// Number of initialized entries in the basis hash ring.
     degeneracy_basis_fingerprint_count: usize = 0,
+    /// Next hash-ring slot to overwrite.
     degeneracy_basis_fingerprint_cursor: usize = 0,
+    /// Last captured dual Phase-I no-entering diagnostic.
     dual_phase_one_failure: ?DualPhaseOneFailureDiagnostic = null,
+    /// Number of candidate diagnostic events written.
     dual_phase_one_candidate_trace_count: usize = 0,
+    /// Borrowed candidate trace storage for the current solve.
     active_dual_phase_one_candidate_trace: []DualPhaseOneCandidateTraceEvent = &.{},
+    /// Number of pivotal-row diagnostic entries written.
     dual_phase_one_ep_trace_count: usize = 0,
+    /// Borrowed pivotal-row trace storage for the current solve.
     active_dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
+    /// Boxed columns flipped during initial dual infeasibility correction.
     dual_phase_one_initial_flips: usize = 0,
+    /// Working dual objective immediately after Phase-I initialization.
     dual_phase_one_initial_objective: f64 = 0.0,
+    /// Largest basic-bound violation immediately after Phase-I initialization.
     dual_phase_one_initial_max_basic_violation: f64 = 0.0,
+    /// First leaving row selected by dual Phase I, if any.
     dual_phase_one_initial_leaving_row: ?u32 = null,
+    /// Public progress phase currently reported by callbacks.
     current_phase: SolvePhase = .phase_two,
+    /// Entering-column refinement requested reinversion instead of FT update.
     direction_requires_reinversion: bool = false,
+    /// Pivots still forced to use a fresh factorization after an accuracy warning.
     fresh_factorization_pivots_remaining: usize = 0,
+    /// Incremental reduced-cost updates since the last exact reprice.
     reduced_cost_update_count: usize = 0,
+    /// Fixed/adaptive maximum incremental updates between exact reprices.
     reduced_cost_refresh_period: usize = 8,
+    /// Internal stage of the most recent unrecovered failure.
     failure_site: FailureSite = .none,
+    /// Exit route taken by shifted-cost dual Phase II.
     shifted_dual_exit: ShiftedDualExit = .none,
+    /// Failure stage saved before shifted-path fallback overwrites it.
     shifted_dual_failure_site: FailureSite = .none,
+    /// Solve statistics; timing fields remain zero when collection is disabled.
     stats: SimplexStats = .{},
+    /// Borrowed clock backend used only for optional statistics.
     statistics_io: ?std.Io = null,
+    /// Whether the current primal/dual pass is original-objective cleanup.
     cleanup_active: bool = false,
-    shifted_dual_accounting_active: bool = false,
+    /// Resolved degeneracy policy for the current solve.
     active_degeneracy_strategy: DegeneracyStrategy = .baseline,
+    /// Resolved reduced-cost drift repricing policy.
     active_adaptive_reprice: bool = false,
+    /// Largest reduced-cost drift observed at an exact reprice.
     maximum_reduced_cost_drift: f64 = 0.0,
+    /// Number of exact reprices performed in the current solve.
     exact_reprices: usize = 0,
+    /// Resolved row/column pricing traversal.
     active_pricing_kernel: PricingKernel = .column,
+    /// Resolved primal Devex implementation.
     active_devex_strategy: DevexStrategy = .legacy,
+    /// Resolved segmented primal pricing policy.
     active_primal_pricing_strategy: PrimalPricingStrategy = .inherit,
+    /// Resolved dual DSE-to-Devex lifecycle.
     active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
+    /// Resolved DSE update budget before Devex fallback.
     active_dual_dse_update_budget: usize = 64,
+    /// Resolved dual initialization formulas.
     active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
+    /// Successful DSE recurrences since the current dual phase began.
     dual_dse_updates_since_start: usize = 0,
+    /// Pivots performed in the current primal Devex reference framework.
     devex_framework_iterations: usize = 0,
+    /// Invalid/nonpositive Devex weights observed in the current framework.
     devex_bad_weight_count: usize = 0,
+    /// Request to rebuild the Devex reference set after committing the pivot.
     devex_reset_after_pivot: bool = false,
 
+    /// Construct an empty engine; model-shaped storage is allocated lazily.
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{
             .allocator = a,
             .factorization = factorization_module.Factorization.init(a),
-            .dual_phase_one = dual_phase_one_module.DualPhaseOneWorkspace.init(a),
+            .dual_work = dual_phase_one_module.DualWorkState.init(a),
             .crash = crash_module.CrashWorkspace.init(a),
             .degeneracy = degeneracy_module.Workspace.init(a),
             .pricing_row_view = pricing_workspace_module.RowView.init(a),
         };
     }
+    /// Release the active basis and every retained sub-workspace.
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
         self.factorization.deinit();
-        self.dual_phase_one.deinit();
+        self.dual_work.deinit();
         self.crash.deinit();
         self.degeneracy.deinit();
         self.pricing_row_view.deinit();
     }
 
+    /// Return requested bytes held by retained engine workspaces.
+    ///
+    /// Allocator metadata and borrowed problem storage are excluded.
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.factorization.requestedBytes() + self.dual_phase_one.requestedBytes() +
+        return basis_bytes + self.factorization.requestedBytes() + self.dual_work.requestedBytes() +
             self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes();
     }
+    /// Legacy dimension-only entry point retained for API compatibility.
+    /// Use `solveProblem` for an actual LP.
     pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
         return .not_implemented;
     }
@@ -494,6 +773,7 @@ pub const SimplexEngine = struct {
         self.solve_depth += 1;
         defer self.solve_depth -= 1;
         if (root_solve) self.iteration_counters = .{};
+        if (root_solve) self.dual_control.reset();
         self.pricing.resetPartial();
         self.startSolveClock(control);
         self.resetStatistics(control);
@@ -516,12 +796,7 @@ pub const SimplexEngine = struct {
         self.dual_phase_one_initial_leaving_row = null;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
-        self.active_degeneracy_strategy = switch (control.degeneracy_strategy) {
-            .automatic => .automatic,
-            .baseline => .baseline,
-            .perturbation => .perturbation,
-            .perturbation_taboo => .perturbation_taboo,
-        };
+        self.active_degeneracy_strategy = control.degeneracy_strategy;
         self.active_adaptive_reprice = control.adaptive_reprice;
         self.active_pricing_kernel = control.pricing_kernel;
         self.active_devex_strategy = control.devex_strategy;
@@ -639,7 +914,7 @@ pub const SimplexEngine = struct {
             const numerical_before_dual_phase_one = if (crash_installed) logical_numerical_state else self.numerical;
             const pricing_before_dual_phase_one = if (crash_installed) logical_pricing_state else self.pricing;
             const checkpoint_basis = if (self.basis) |*basis| basis else return .numerical_failure;
-            self.dual_phase_one.captureBasisCheckpoint(
+            self.dual_work.captureBasisCheckpoint(
                 checkpoint_basis,
                 problem.num_cols + problem.num_rows,
                 problem.num_rows,
@@ -659,7 +934,7 @@ pub const SimplexEngine = struct {
             // from the pre-A1 path. If its Phase I fails, restore the exact
             // pre-shift basis transactionally and give the original dual
             // Phase I one bounded retry before the primal cold fallback.
-            if (self.dual_phase_one.checkpoint_valid) retry: {
+            if (self.dual_work.checkpoint_valid) retry: {
                 self.numerical = numerical_before_dual_phase_one;
                 self.pricing = pricing_before_dual_phase_one;
                 self.failure_site = .none;
@@ -667,9 +942,9 @@ pub const SimplexEngine = struct {
                 self.reduced_cost_update_count = 0;
                 self.dual_edge_weights_valid = true;
                 const checkpoint_view = basis_snapshot_module.BasisView{
-                    .structural_status = self.dual_phase_one.checkpoint_status[0..problem.num_cols],
-                    .logical_status = self.dual_phase_one.checkpoint_status[problem.num_cols..][0..problem.num_rows],
-                    .basic_index = self.dual_phase_one.checkpoint_basic_index[0..problem.num_rows],
+                    .structural_status = self.dual_work.checkpoint_status[0..problem.num_cols],
+                    .logical_status = self.dual_work.checkpoint_status[problem.num_cols..][0..problem.num_rows],
+                    .basic_index = self.dual_work.checkpoint_basic_index[0..problem.num_rows],
                 };
                 self.importBasis(problem, checkpoint_view) catch break :retry;
                 if (self.recomputeReducedCosts(problem) != .optimal) break :retry;

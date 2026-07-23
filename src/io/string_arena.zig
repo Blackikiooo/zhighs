@@ -7,12 +7,17 @@
 
 const std = @import("std");
 
+/// Failure returned when a caller-provided arena cannot hold the next string.
 pub const Error = error{CapacityExceeded};
 
+/// Monotonic writer over caller-owned contiguous byte storage.
 pub const StringArena = struct {
+    /// Complete writable backing region; this type never frees it.
     storage: []u8,
+    /// Byte offset immediately after the retained prefix and appended strings.
     cursor: usize = 0,
 
+    /// Start an empty arena over `storage`.
     pub fn init(storage: []u8) StringArena {
         return .{ .storage = storage };
     }
@@ -33,10 +38,12 @@ pub const StringArena = struct {
         return destination;
     }
 
+    /// Number of bytes occupied by the retained prefix and appended strings.
     pub inline fn used(self: StringArena) usize {
         return self.cursor;
     }
 
+    /// Number of bytes available before the next append would fail.
     pub inline fn remaining(self: StringArena) usize {
         return self.storage.len - self.cursor;
     }

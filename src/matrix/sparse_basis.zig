@@ -26,11 +26,16 @@ pub const SparseBasisError = error{
 /// or is deinitialized.  Offsets use the configured HiGHS integer width, which
 /// halves offset traffic in the default w32 build compared with `usize`.
 pub const SparseBasisView = struct {
+    /// Row/column dimension of the square basis.
     dimension: usize,
+    /// Compact CSC offsets of length `dimension + 1`.
     starts: []const Offset,
+    /// Row IDs parallel to basis coefficients.
     rows: []const RowId,
+    /// Scaled nonzero basis coefficients.
     values: []const f64,
 
+    /// Number of stored basis coefficients.
     pub inline fn nnz(self: SparseBasisView) usize {
         return self.values.len;
     }
@@ -43,19 +48,29 @@ pub const SparseBasisView = struct {
 /// rows/values.  Keeping these streams separate avoids loading unused fields
 /// and lets the allocator preserve capacity across simplex reinversions.
 pub const SparseBasisBuffers = struct {
+    /// Allocator owning all aligned retained streams.
     allocator: std.mem.Allocator,
+    /// Active compact column-offset prefix.
     starts: []align(64) Offset = &.{},
+    /// Active row-ID prefix.
     rows: []align(64) RowId = &.{},
+    /// Active coefficient prefix parallel to `rows`.
     values: []align(64) f64 = &.{},
+    /// Allocated element capacity behind `starts`.
     starts_capacity: usize = 0,
+    /// Allocated element capacity shared by `rows` and `values`.
     entry_capacity: usize = 0,
+    /// Dimension of the currently assembled square basis.
     dimension: usize = 0,
+    /// Active number of retained basis coefficients.
     nonzeros: usize = 0,
 
+    /// Construct empty lazily growing basis buffers.
     pub fn init(allocator: std.mem.Allocator) SparseBasisBuffers {
         return .{ .allocator = allocator };
     }
 
+    /// Release all aligned streams at their allocated capacities.
     pub fn deinit(self: *SparseBasisBuffers) void {
         if (self.starts_capacity != 0) self.allocator.free(self.starts.ptr[0..self.starts_capacity]);
         if (self.entry_capacity != 0) {
@@ -150,6 +165,7 @@ pub const SparseBasisBuffers = struct {
         return self.view();
     }
 
+    /// Borrow the currently active compact CSC basis prefixes.
     pub inline fn view(self: *const SparseBasisBuffers) SparseBasisView {
         return .{
             .dimension = self.dimension,
@@ -159,6 +175,7 @@ pub const SparseBasisBuffers = struct {
         };
     }
 
+    /// Grow aligned start and entry streams without discarding active contents.
     fn ensureCapacity(self: *SparseBasisBuffers, starts_needed: usize, entries_needed: usize) SparseBasisError!void {
         if (starts_needed > self.starts_capacity) {
             const capacity = growCapacity(self.starts_capacity, starts_needed) catch return error.CapacityOverflow;
@@ -183,6 +200,7 @@ pub const SparseBasisBuffers = struct {
     }
 };
 
+/// Compute a geometric retained-capacity growth target.
 fn growCapacity(current: usize, required: usize) error{Overflow}!usize {
     var capacity = @max(current, 8);
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;

@@ -22,32 +22,45 @@ const memory = @import("memory.zig");
 const sentinel: f64 = -0.0;
 const sentinel_bits: u64 = @bitCast(sentinel);
 
+/// Test the bit-level untouched-positive-zero convention.
 inline fn isTouchedValue(value: f64) bool {
     return @as(u64, @bitCast(value)) != 0;
 }
 
+/// Test the negative-zero touched-but-cancelled sentinel.
 inline fn isSentinel(value: f64) bool {
     return @as(u64, @bitCast(value)) == sentinel_bits;
 }
 
+/// Return a dense-plus-active sparse accumulator specialized for matrix IDs.
 pub fn SparseAccumulator(comptime Id: type) type {
     const OwnedVector = sparse_vector.SparseVector(Id);
     const View = sparse_vector.SparseVectorView(Id);
 
     return struct {
+        /// Logical dense dimension addressed by `Id`.
         dimension: usize,
+        /// Dense O(1)-lookup values; positive zero denotes untouched.
         dense_values: []f64,
+        /// Allocation base for separately allocated padded active IDs.
         active_base_ptr: [*]Id = undefined,
+        /// First usable active-ID slot after front padding.
         active_ptr: [*]Id = undefined,
+        /// Number of currently touched IDs.
         active_len: usize = 0,
+        /// Usable active-ID capacity excluding padding.
         active_cap: usize = 0,
+        /// Allocator retained for allocation-free hot-path ownership.
         alloc: std.mem.Allocator = undefined,
+        /// Optional packed allocation containing dense and active streams.
         combined_storage: ?[]align(64) u8 = null,
+        /// Whether the active-ID stream must be freed independently.
         active_separate: bool = true,
 
         const Self = @This();
         const active_padding = @max(1, 64 / @sizeOf(Id));
 
+        /// Allocate a zeroed dense accumulator; active IDs grow lazily.
         pub fn init(allocator: std.mem.Allocator, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
             if (dimension != 0) _ = Id.fromUsize(dimension - 1) catch return error.DimensionTooLarge;
             const dense_values = try allocator.alloc(f64, dimension);
@@ -81,6 +94,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             };
         }
 
+        /// Release packed or separate dense/active storage.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.combined_storage) |storage| allocator.free(storage) else allocator.free(self.dense_values);
             if (self.active_separate and self.active_cap > 0)
@@ -88,10 +102,12 @@ pub fn SparseAccumulator(comptime Id: type) type {
             self.* = undefined;
         }
 
+        /// Number of unique IDs touched since the last clear.
         pub inline fn touchedCount(self: Self) usize {
             return self.active_len;
         }
 
+        /// Ensure the active-ID list can hold at least `cap` unique touches.
         pub fn reserve(self: *Self, allocator: std.mem.Allocator, cap: usize) std.mem.Allocator.Error!void {
             if (cap > self.active_cap) {
                 const buf = try allocator.alloc(Id, cap + active_padding);
@@ -107,6 +123,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             }
         }
 
+        /// Reset touched values, choosing sparse or dense clearing by density.
         pub fn clear(self: *Self) void {
             if (10 * self.active_len < 3 * self.dimension) {
                 var i: usize = 0;
@@ -118,6 +135,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             self.active_len = 0;
         }
 
+        /// Checked addition to one coordinate, growing the active list if needed.
         pub fn add(self: *Self, allocator: std.mem.Allocator, id: Id, value: f64) (std.mem.Allocator.Error || csc.MatrixError)!void {
             const index = id.toUsize();
             if (index >= self.dimension) return error.IndexOutOfBounds;
@@ -154,6 +172,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             }
         }
 
+        /// Accumulate `alpha * vector` after validating dimensions and values.
         pub fn addVector(self: *Self, allocator: std.mem.Allocator, alpha: f64, vector: View) (std.mem.Allocator.Error || csc.MatrixError)!void {
             if (vector.dimension != self.dimension) return error.DimensionMismatch;
             if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
@@ -161,6 +180,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             for (vector.indices, vector.values) |id, value| try self.add(allocator, id, alpha * value);
         }
 
+        /// Read one coordinate, translating the touched-zero sentinel to `0.0`.
         pub inline fn get(self: Self, id: Id) f64 {
             const index = id.toUsize();
             std.debug.assert(index < self.dimension);
@@ -168,6 +188,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return if (isSentinel(value)) 0.0 else value;
         }
 
+        /// Sort touched IDs and copy retained values into an owned canonical vector.
         pub fn freeze(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64) (std.mem.Allocator.Error || csc.MatrixError)!OwnedVector {
             if (!std.math.isFinite(zero_tolerance) or zero_tolerance < 0.0) return error.InvalidTolerance;
             const slice = self.active_ptr[0..self.active_len];
@@ -192,10 +213,12 @@ pub fn SparseAccumulator(comptime Id: type) type {
             return OwnedVector.initOwnedSlicesAssumeValid(self.dimension, indices, vs);
         }
 
+        /// Sort active IDs into canonical ascending order.
         fn lessThanId(_: void, lhs: Id, rhs: Id) bool {
             return lhs.toUsize() < rhs.toUsize();
         }
 
+        /// Geometrically grow the padded active-ID list.
         fn growActive(allocator: std.mem.Allocator, self: *Self) std.mem.Allocator.Error!void {
             const new_cap = @max(self.active_cap + 16, self.active_cap * 2);
             const buf = try allocator.alloc(Id, new_cap + active_padding);

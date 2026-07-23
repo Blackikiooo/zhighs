@@ -13,31 +13,69 @@ const none = std.math.maxInt(u32);
 
 pub const KernelError = error{ InvalidBasis, Singular, OutOfMemory, CapacityOverflow };
 
-pub const PivotChoice = struct { row: u32, column: u32, value: f64, merit: u64 };
-pub const KernelShape = struct { dimension: usize, nonzeros: usize, maximum_row_count: u32, maximum_column_count: u32 };
+/// Numerically eligible sparse pivot and its Markowitz fill merit.
+pub const PivotChoice = struct {
+    /// Original active row.
+    row: u32,
+    /// Original active column.
+    column: u32,
+    /// Current pivotal coefficient.
+    value: f64,
+    /// Saturating `(row_count-1)*(column_count-1)` merit.
+    merit: u64,
+};
+/// Shape summary used to select an ordering strategy.
+pub const KernelShape = struct {
+    /// Current active square dimension.
+    dimension: usize,
+    /// Current active entry count.
+    nonzeros: usize,
+    /// Largest active row degree.
+    maximum_row_count: u32,
+    /// Largest active column degree.
+    maximum_column_count: u32,
+};
 
 /// Borrowed elimination data valid until the next kernel mutation.
 pub const PivotView = struct {
+    /// Eliminated original row.
     pivot_row: u32,
+    /// Eliminated original column.
     pivot_column: u32,
+    /// Accepted pivotal coefficient.
     pivot_value: f64,
+    /// Original rows receiving L multipliers.
     l_rows: []const u32,
+    /// L multipliers parallel to `l_rows`.
     l_values: []const f64,
+    /// Original columns present in the pivotal U row.
     u_columns: []const u32,
+    /// U coefficients parallel to `u_columns`.
     u_values: []const f64,
+    /// Fill entries inserted by this Schur update.
     inserted_fill: usize,
+    /// Active entries removed by the elimination.
     removed_entries: usize,
 };
 
 pub const MutableSparseKernel = struct {
+    /// Owner of all retained SoA, bucket, and scratch arrays.
     allocator: std.mem.Allocator,
+    /// Allocated row/column capacity.
     dimension_capacity: usize = 0,
+    /// Allocated intrusive-entry capacity.
     entry_capacity: usize = 0,
+    /// Logical square dimension of the loaded kernel.
     dimension: usize = 0,
+    /// First never-used entry slot; freed lower slots are recycled.
     entry_high_water: usize = 0,
+    /// Head of the recycled-entry free list.
     free_head: u32 = none,
+    /// Whether row/column count buckets reflect the current kernel.
     buckets_ready: bool = false,
+    /// Whether per-column maxima are maintained lazily.
     cache_column_maxima: bool = false,
+    /// Whether threshold-eligible local column candidates are cached.
     cache_local_candidates: bool = false,
     /// Maximum non-singleton columns inspected after an eligible pivot is
     /// known. Low-count buckets remain first, preserving the Markowitz bias.
@@ -48,58 +86,101 @@ pub const MutableSparseKernel = struct {
     markowitz_search_limit: usize = 8,
     // Eight is the validated HiGHS baseline. Adaptation may spend more work
     // when that demonstrably improves merit, but never undercut the baseline.
+    /// Lower bound applied to the adaptive search budget.
     markowitz_search_minimum: usize = 8,
+    /// Upper bound applied to the adaptive search budget.
     markowitz_search_maximum: usize = 64,
     /// Below this kernel size, bounded-search overhead dominates the possible
     /// reduction in later fill; retain the proven eight-candidate baseline.
     adaptive_markowitz_minimum_dimension: usize = 512,
+    /// Candidates inspected by the most recent Markowitz choice.
     last_markowitz_searches: usize = 0,
+    /// Whether the most recent search consumed its complete budget.
     last_markowitz_budget_exhausted: bool = false,
+    /// Whether extending the latest search found a lower-merit pivot.
     last_markowitz_extension_improved: bool = false,
+    /// Pivots observed in the current adaptation window.
     markowitz_window_pivots: usize = 0,
+    /// Budget exhaustions observed in the current window.
     markowitz_window_exhaustions: usize = 0,
+    /// Search extensions improving merit in the current window.
     markowitz_window_improvements: usize = 0,
 
+    /// Intrusive row-list head for each row.
     row_head: []u32 = &.{},
+    /// Intrusive column-list head for each column.
     column_head: []u32 = &.{},
+    /// Current active-entry count per row.
     row_count: []u32 = &.{},
+    /// Current active-entry count per column.
     column_count: []u32 = &.{},
+    /// Cached maximum absolute entry per active column.
     column_maximum: []f64 = &.{},
+    /// Invalidity marker for each cached column maximum.
     column_maximum_dirty: []bool = &.{},
+    /// Invalidity marker for each cached local pivot candidate.
     local_candidate_dirty: []bool = &.{},
+    /// Whether each cached local candidate is numerically eligible.
     local_candidate_valid: []bool = &.{},
+    /// Cached candidate row per column.
     local_candidate_row: []u32 = &.{},
+    /// Cached candidate coefficient per column.
     local_candidate_value: []f64 = &.{},
+    /// Active-row mask.
     row_active: []bool = &.{},
+    /// Active-column mask.
     column_active: []bool = &.{},
+    /// Head row of each row-count bucket.
     row_bucket_first: []u32 = &.{},
+    /// Head column of each column-count bucket.
     column_bucket_first: []u32 = &.{},
+    /// Next row in the same count bucket.
     row_bucket_next: []u32 = &.{},
+    /// Previous row in the same count bucket.
     row_bucket_previous: []u32 = &.{},
+    /// Next column in the same count bucket.
     column_bucket_next: []u32 = &.{},
+    /// Previous column in the same count bucket.
     column_bucket_previous: []u32 = &.{},
 
+    /// Row ID for each intrusive entry slot.
     entry_row: []u32 = &.{},
+    /// Column ID for each intrusive entry slot.
     entry_column: []u32 = &.{},
+    /// Numerical value for each intrusive entry slot.
     entry_value: []f64 = &.{},
+    /// Next entry in the same row.
     row_next: []u32 = &.{},
+    /// Previous entry in the same row.
     row_previous: []u32 = &.{},
+    /// Next entry in the same column.
     column_next: []u32 = &.{},
+    /// Previous entry in the same column.
     column_previous: []u32 = &.{},
+    /// Next recycled entry slot.
     free_next: []u32 = &.{},
 
+    /// Pivot-update row IDs returned through `PivotView`.
     scratch_rows: []u32 = &.{},
+    /// Pivot-update column IDs returned through `PivotView`.
     scratch_columns: []u32 = &.{},
+    /// L multipliers returned through `PivotView`.
     scratch_l: []f64 = &.{},
+    /// U row values returned through `PivotView`.
     scratch_u: []f64 = &.{},
+    /// Generation-tagged row-to-entry lookup for Schur updates.
     scratch_lookup: []u32 = &.{},
+    /// Generation tag parallel to `scratch_lookup`.
     scratch_lookup_generation: []u32 = &.{},
+    /// Current nonzero lookup generation.
     lookup_generation: u32 = 0,
 
+    /// Construct an empty lazily allocated elimination kernel.
     pub fn init(allocator: std.mem.Allocator) MutableSparseKernel {
         return .{ .allocator = allocator };
     }
 
+    /// Release every retained dimension, entry, bucket, and scratch stream.
     pub fn deinit(self: *MutableSparseKernel) void {
         self.allocator.free(self.row_head);
         self.allocator.free(self.column_head);
@@ -176,6 +257,7 @@ pub const MutableSparseKernel = struct {
         return total;
     }
 
+    /// Validate and load a complete compact CSC basis into intrusive row/column lists.
     pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
         return self.loadImpl(basis, true, null, null, false, &.{}, &.{});
     }
@@ -209,6 +291,7 @@ pub const MutableSparseKernel = struct {
         return self.loadImpl(basis, false, active_rows, active_columns, true, row_counts, column_counts);
     }
 
+    /// Shared loader for validated, reduced, and symbolic-count input modes.
     fn loadImpl(
         self: *MutableSparseKernel,
         basis: sparse_basis.SparseBasisView,
@@ -503,6 +586,7 @@ pub const MutableSparseKernel = struct {
         self.markowitz_window_improvements = 0;
     }
 
+    /// Find/cache the lowest-merit threshold-eligible entry in one column.
     fn localColumnCandidate(self: *MutableSparseKernel, column: usize, threshold: f64) ?PivotChoice {
         if (self.local_candidate_dirty[column]) {
             self.local_candidate_dirty[column] = false;
@@ -555,6 +639,7 @@ pub const MutableSparseKernel = struct {
         return choice;
     }
 
+    /// Return the sole active member of an intrusive singleton list.
     fn singletonMember(self: *const MutableSparseKernel, first: u32, next: []const u32) ?u32 {
         if (first == none) return null;
         if (self.dimension >= 128) return first;
@@ -686,12 +771,14 @@ pub const MutableSparseKernel = struct {
         };
     }
 
+    /// Count entries whose row and column remain active.
     pub fn activeEntries(self: *const MutableSparseKernel) usize {
         var total: usize = 0;
         for (self.row_count[0..self.dimension]) |count| total += count;
         return total;
     }
 
+    /// Summarize active dimension, entries, and maximum degrees.
     pub fn shape(self: *const MutableSparseKernel) KernelShape {
         var nonzeros: usize = 0;
         var maximum_row_count: u32 = 0;
@@ -708,6 +795,7 @@ pub const MutableSparseKernel = struct {
         return .{ .dimension = active_dimension, .nonzeros = nonzeros, .maximum_row_count = maximum_row_count, .maximum_column_count = maximum_column_count };
     }
 
+    /// Locate an active coordinate by scanning its row list.
     fn find(self: *const MutableSparseKernel, row: u32, column: u32) ?u32 {
         if (self.row_count[row] <= self.column_count[column]) {
             var entry = self.row_head[row];
@@ -732,6 +820,7 @@ pub const MutableSparseKernel = struct {
         return self.lookup_generation;
     }
 
+    /// Return/recompute the maximum active magnitude in one column.
     fn columnMaximum(self: *MutableSparseKernel, column: usize) f64 {
         if (self.cache_column_maxima and !self.column_maximum_dirty[column]) return self.column_maximum[column];
         var maximum: f64 = 0.0;
@@ -743,6 +832,7 @@ pub const MutableSparseKernel = struct {
         return maximum;
     }
 
+    /// Allocate and link one entry into both row and column lists.
     fn insert(self: *MutableSparseKernel, row: u32, column: u32, value: f64) KernelError!u32 {
         if (self.entry_high_water == self.entry_capacity and self.free_head == none)
             try self.ensureEntries(self.entry_capacity + self.entry_capacity / 2 + 8);
@@ -830,11 +920,13 @@ pub const MutableSparseKernel = struct {
         self.releaseEntry(entry);
     }
 
+    /// Push one unlinked entry slot onto the free list.
     inline fn releaseEntry(self: *MutableSparseKernel, entry: u32) void {
         self.free_next[entry] = self.free_head;
         self.free_head = entry;
     }
 
+    /// Grow all row/column, bucket, cache, and dimension scratch arrays.
     fn ensureDimension(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.dimension_capacity) return;
         const capacity = grow(self.dimension_capacity, required) catch return error.CapacityOverflow;
@@ -865,6 +957,7 @@ pub const MutableSparseKernel = struct {
         self.dimension_capacity = capacity;
     }
 
+    /// Grow every parallel intrusive-entry stream.
     fn ensureEntries(self: *MutableSparseKernel, required: usize) KernelError!void {
         if (required <= self.entry_capacity) return;
         const capacity = grow(self.entry_capacity, required) catch return error.CapacityOverflow;
@@ -879,10 +972,12 @@ pub const MutableSparseKernel = struct {
         self.entry_capacity = capacity;
     }
 
+    /// Reallocate one retained slice through the kernel allocator.
     fn resizeRetained(self: *MutableSparseKernel, slice: anytype, capacity: usize) KernelError!void {
         slice.* = self.allocator.realloc(slice.*, capacity) catch return error.OutOfMemory;
     }
 
+    /// Insert an active row into its degree bucket.
     fn rowBucketInsert(self: *MutableSparseKernel, row: u32, count: u32) void {
         const first = self.row_bucket_first[count];
         self.row_bucket_previous[row] = none;
@@ -891,6 +986,7 @@ pub const MutableSparseKernel = struct {
         self.row_bucket_first[count] = row;
     }
 
+    /// Remove an active row from a known degree bucket.
     fn rowBucketRemove(self: *MutableSparseKernel, row: u32, count: u32) void {
         const previous = self.row_bucket_previous[row];
         const next = self.row_bucket_next[row];
@@ -900,6 +996,7 @@ pub const MutableSparseKernel = struct {
         self.row_bucket_next[row] = none;
     }
 
+    /// Insert an active column into its degree bucket.
     fn columnBucketInsert(self: *MutableSparseKernel, column: u32, count: u32) void {
         const first = self.column_bucket_first[count];
         self.column_bucket_previous[column] = none;
@@ -908,6 +1005,7 @@ pub const MutableSparseKernel = struct {
         self.column_bucket_first[count] = column;
     }
 
+    /// Remove an active column from a known degree bucket.
     fn columnBucketRemove(self: *MutableSparseKernel, column: u32, count: u32) void {
         const previous = self.column_bucket_previous[column];
         const next = self.column_bucket_next[column];
@@ -918,6 +1016,7 @@ pub const MutableSparseKernel = struct {
     }
 };
 
+/// Compute a geometric retained-capacity target.
 fn grow(current: usize, required: usize) error{Overflow}!usize {
     var capacity = @max(current, 8);
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;

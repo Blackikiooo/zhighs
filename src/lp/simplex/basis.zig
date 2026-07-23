@@ -15,37 +15,60 @@ pub const BasisError = error{ RowOutOfRange, ColumnOutOfRange, ColumnAlreadyBasi
 /// Hot, mutable simplex state. All SoA vectors are owned by this struct so
 /// that the pivot loop never needs to allocate.
 pub const BasisState = struct {
+    /// Allocator owning every SoA buffer in this state.
     allocator: std.mem.Allocator,
-    num_structural_cols: usize = 0, // Original model columns (excludes logical/artificial)
+    /// Original model column count; excludes logical and artificial columns.
+    num_structural_cols: usize = 0,
+    /// Basis dimension and length of every row-indexed vector.
     num_rows: usize = 0,
 
     // --- Basis membership ---
-    row_status: []BasisStatus = &.{}, // Status of each logical column (length = num_rows)
-    col_status: []BasisStatus = &.{}, // Status of every internal column (length = num_cols + 2*num_rows)
-    basic_index: []u32 = &.{}, // For each basis row, the column currently basic there (length = num_rows)
-    basic_pos: []u32 = &.{}, // For each column, its row in the basis (maxInt(u32) when nonbasic)
+    /// Compatibility status for each logical row column.
+    row_status: []BasisStatus = &.{},
+    /// Status of every structural, logical and artificial internal column.
+    col_status: []BasisStatus = &.{},
+    /// Internal column occupying each basis row.
+    basic_index: []u32 = &.{},
+    /// Inverse basis map; `maxInt(u32)` marks a nonbasic column.
+    basic_pos: []u32 = &.{},
 
     // --- Primal/dual solution vectors ---
-    primal: []f64 = &.{}, // Primal value of every internal column
-    dual: []f64 = &.{}, // Dual value of every row
-    reduced_cost: []f64 = &.{}, // Reduced cost of every internal column
-    pivot_direction: []f64 = &.{}, // Direction of the current primal pivot (length = num_rows)
+    /// Current primal value of every internal column.
+    primal: []f64 = &.{},
+    /// Current row multipliers in the engine's scaled coordinates.
+    dual: []f64 = &.{},
+    /// Current reduced cost of every internal column.
+    reduced_cost: []f64 = &.{},
+    /// Entering tableau column `B^-1 a_q`, indexed by basis row.
+    pivot_direction: []f64 = &.{},
 
     // --- Basic variable bookkeeping ---
-    basic_value: []f64 = &.{}, // Current value of each basic variable
-    basic_lower: []f64 = &.{}, // Lower bound of each basic variable
-    basic_upper: []f64 = &.{}, // Upper bound of each basic variable
-    basic_margin: []f64 = &.{}, // Distance from current value to the active bound
-    ratio_direction: []f64 = &.{}, // Sign of feasibility movement used by the ratio test
+    /// Current value of the variable occupying each basis row.
+    basic_value: []f64 = &.{},
+    /// Working lower bound of the variable occupying each basis row.
+    basic_lower: []f64 = &.{},
+    /// Working upper bound of the variable occupying each basis row.
+    basic_upper: []f64 = &.{},
+    /// Reusable row workspace for bound distances and residual magnitudes.
+    basic_margin: []f64 = &.{},
+    /// Feasibility movement sign consumed by primal ratio tests.
+    ratio_direction: []f64 = &.{},
 
     // --- Scaling and bounds (working copies) ---
-    row_scale: []f64 = &.{}, // Row equilibration scale
-    column_scale: []f64 = &.{}, // Column equilibration scale
-    row_rhs: []f64 = &.{}, // Scaled row right-hand side
-    col_lower: []f64 = &.{}, // Working lower bound for every internal column
-    col_upper: []f64 = &.{}, // Working upper bound for every internal column
-    artificial_sign: []f64 = &.{}, // Sign convention for artificial columns (phase-one)
-    rhs_work: []f64 = &.{}, // Scratch RHS used during FTran/BTran
+    /// Multiplicative equilibration scale for each model row.
+    row_scale: []f64 = &.{},
+    /// Multiplicative scale for every internal column.
+    column_scale: []f64 = &.{},
+    /// Scaled row right-hand side used to reconstruct basic values.
+    row_rhs: []f64 = &.{},
+    /// Active lower bound for every internal column; Phase I may replace it.
+    col_lower: []f64 = &.{},
+    /// Active upper bound for every internal column; Phase I may replace it.
+    col_upper: []f64 = &.{},
+    /// Coefficient sign of each artificial identity column.
+    artificial_sign: []f64 = &.{},
+    /// General row-sized RHS/result workspace for FTRAN and BTRAN.
+    rhs_work: []f64 = &.{},
     /// Residual/correction workspace used by iterative refinement. Keeping it
     /// beside the other row vectors makes every FTRAN refinement allocation-free.
     residual_work: []f64 = &.{},
@@ -54,26 +77,39 @@ pub const BasisState = struct {
     /// Devex/steepest-edge reference weights. These are solver-owned because
     /// pricing mutates them, while pricing scans remain contiguous SoA loops.
     col_edge_weight: []f64 = &.{},
+    /// Dual steepest-edge/Devex weight for each basis row.
     row_edge_weight: []f64 = &.{},
     /// Frozen nonbasic reference set for a primal Devex framework. Bytes keep
     /// the hot weighted-norm loop branch-light and avoid packed-bit updates.
     devex_reference: []u8 = &.{},
 
     // --- Dual simplex workspace ---
-    dual_row: []f64 = &.{}, // BTran result for the chosen pivot row
-    tableau: []f64 = &.{}, // Updated tableau row (alpha values) for the pivot
-    dual_ratio: []f64 = &.{}, // Per-column dual ratio-test value
-    dual_direction: []f64 = &.{}, // Direction of the current dual pivot
-    flip_columns: []u32 = &.{}, // Columns whose bounds should be flipped at the pivot
-    dual_candidate_rows: []u32 = &.{}, // Heap of candidate rows for dual pricing
-    dual_candidate_score: []f64 = &.{}, // Score for each entry in `dual_candidate_rows`
+    /// Pivotal row solve `B^-T e_p`.
+    dual_row: []f64 = &.{},
+    /// Pivotal tableau row `e_p^T B^-1 A` for all internal columns.
+    tableau: []f64 = &.{},
+    /// Per-column ratios or group identifiers used by CHUZC.
+    dual_ratio: []f64 = &.{},
+    /// Temporary nonbasic movement direction selected by CHUZC.
+    dual_direction: []f64 = &.{},
+    /// Ordered BFRT flip set produced by the dual ratio test.
+    flip_columns: []u32 = &.{},
+    /// Sparse/hyper-sparse CHUZR candidate row indexes.
+    dual_candidate_rows: []u32 = &.{},
+    /// Weighted infeasibility score parallel to `dual_candidate_rows`.
+    dual_candidate_score: []f64 = &.{},
 
     // --- Published solution (post-cleanup, original coordinates) ---
-    published_primal: []f64 = &.{}, // Final primal values for structural columns
-    published_dual: []f64 = &.{}, // Final dual values for rows
-    published_reduced_cost: []f64 = &.{}, // Final reduced costs for structural columns
-    unbounded_ray: []f64 = &.{}, // Primal ray (empty unless the solve is unbounded)
-    infeasibility_ray: []f64 = &.{}, // Original-row Farkas ray for an infeasible solve
+    /// Final structural primal values after unscaling and cleanup.
+    published_primal: []f64 = &.{},
+    /// Final row multipliers after unscaling and objective-sense restoration.
+    published_dual: []f64 = &.{},
+    /// Final structural reduced costs in original coordinates.
+    published_reduced_cost: []f64 = &.{},
+    /// Structural improving direction published for an unbounded result.
+    unbounded_ray: []f64 = &.{},
+    /// Original-row Farkas certificate published for an infeasible result.
+    infeasibility_ray: []f64 = &.{},
 
     /// Allocate all SoA vectors for a model with `rows` rows and `cols`
     /// structural columns. Internal column count is `cols + 2*rows` to make

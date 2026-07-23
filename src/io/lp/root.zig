@@ -21,12 +21,18 @@ pub const token = @import("token.zig");
 const Section = enum { none, objective, constraints, bounds, binaries, generals, semicont, semiint, end };
 
 const Parser = struct {
+    /// Shared semantic output builder and temporary term storage.
     builder: Builder,
+    /// Borrowed-name to temporary structural-column index.
     variables: std.StringHashMap(usize),
+    /// Cooperative cancellation state.
     control: types.ParseControl,
+    /// Objective scalar held until the next term/header disambiguates it.
     pending_objective_coefficient: ?f64 = null,
+    /// Sign applied while parsing the current objective sense.
     objective_sign: f64 = 1.0,
 
+    /// Initialize parser indexes and the LP column-chain builder fast path.
     fn init(allocator: std.mem.Allocator, name: []const u8, options: types.ReadOptions) Parser {
         var builder = Builder.init(allocator);
         builder.configureLimits(options);
@@ -35,6 +41,7 @@ const Parser = struct {
         return .{ .builder = builder, .variables = std.StringHashMap(usize).init(allocator), .control = types.ParseControl.init(options) };
     }
 
+    /// Release name indexes and all unfinished semantic state.
     fn deinit(self: *Parser) void {
         self.variables.deinit();
         self.builder.deinit();
@@ -47,6 +54,7 @@ const Parser = struct {
         self.variables = std.StringHashMap(usize).init(self.builder.allocator);
     }
 
+    /// Resolve or create one LP variable symbol.
     fn variable(self: *Parser, name: []const u8) types.IoError!usize {
         if (!validName(name)) return error.InvalidName;
         if (self.variables.get(name)) |index| return index;
@@ -56,6 +64,7 @@ const Parser = struct {
     }
 };
 
+/// Parse a complete borrowed CPLEX-LP source into owned canonical model data.
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, model_name: []const u8, options: types.ReadOptions) types.IoError!ModelData {
     if (input.len > options.max_file_bytes) return error.FileTooLarge;
     try options.checkCancelled();
@@ -111,6 +120,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, model_name: []cons
     return parser.builder.finish(options);
 }
 
+/// Serialize a borrowed linear model in deterministic CPLEX-LP syntax.
 pub fn write(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.ModelView, names: output.Names, options: types.WriteOptions) types.IoError!void {
     _ = options;
     for (names.columns) |name| if (!validName(name)) return error.InvalidName;
@@ -178,6 +188,7 @@ pub fn write(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.Mo
     try output.write(file, "End\n");
 }
 
+/// Emit one signed nonzero linear-expression term with stable spacing.
 fn writeTerm(file: *std.Io.Writer, allocator: std.mem.Allocator, coefficient: f64, name: []const u8, first: *bool) types.IoError!void {
     if (coefficient == 0.0) return;
     if (!std.math.isFinite(coefficient)) return error.NonFiniteValue;
@@ -188,6 +199,7 @@ fn writeTerm(file: *std.Io.Writer, allocator: std.mem.Allocator, coefficient: f6
     first.* = false;
 }
 
+/// Emit the shortest LP bound statement representing one variable interval.
 fn writeBound(file: *std.Io.Writer, allocator: std.mem.Allocator, name: []const u8, lower: f64, upper: f64) types.IoError!void {
     if (std.math.isNan(lower) or std.math.isNan(upper) or lower > upper) return error.InvalidBounds;
     if (std.math.isInf(lower) and lower < 0 and std.math.isInf(upper) and upper > 0)
@@ -202,6 +214,7 @@ fn writeBound(file: *std.Io.Writer, allocator: std.mem.Allocator, name: []const 
         try output.print(file, allocator, " {s} <= {d}\n", .{ name, upper });
 }
 
+/// Emit one optional variable-domain section for matching columns.
 fn writeTypes(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.ModelView, names: []const []u8, kind: types.VariableType, title: []const u8) types.IoError!void {
     var any = false;
     for (model.col_type) |actual| if (actual == kind) {
@@ -213,7 +226,13 @@ fn writeTypes(file: *std.Io.Writer, allocator: std.mem.Allocator, model: types.M
     for (model.col_type, names) |actual, name| if (actual == kind) try output.print(file, allocator, " {s}\n", .{name});
 }
 
-const Header = struct { section: Section, sense: ?types.ObjectiveSense = null };
+/// Result of recognizing one LP section header.
+const Header = struct {
+    /// Parser state entered after consuming the header.
+    section: Section,
+    /// Objective direction carried only by minimize/maximize headers.
+    sense: ?types.ObjectiveSense = null,
+};
 
 /// Recognize a section header only at the parser's current line start. The
 /// checkpoint is committed only when the complete line matches a header, so a
@@ -265,6 +284,7 @@ fn consumeHeaderLine(lexer: *Lexer, first: Token) types.IoError!?Header {
     return header_value;
 }
 
+/// Recognize the two-token `semi-continuous`/`semi-integer` header spellings.
 fn consumeHyphenatedSemiHeader(lexer: *Lexer) types.IoError!?Header {
     const hyphen = try nextToken(lexer);
     if (hyphen.tag != .minus) return null;
@@ -275,11 +295,13 @@ fn consumeHyphenatedSemiHeader(lexer: *Lexer) types.IoError!?Header {
     return null;
 }
 
+/// Case-insensitively compare one spelling against a keyword set.
 fn equalsAny(value: []const u8, candidates: []const []const u8) bool {
     for (candidates) |candidate| if (std.ascii.eqlIgnoreCase(value, candidate)) return true;
     return false;
 }
 
+/// Return whether a symbol can be emitted unquoted by this LP frontend.
 fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 255 or std.ascii.isDigit(name[0])) return false;
     if (std.mem.indexOfScalar(u8, "<>=()[],", name[0]) != null) return false;
@@ -289,12 +311,14 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
+/// Convert a numeric token and reject NaN or infinity.
 fn parseFinite(text: []const u8) types.IoError!f64 {
     const value = std.fmt.parseFloat(f64, text) catch return error.InvalidNumber;
     if (!std.math.isFinite(value)) return error.NonFiniteValue;
     return value;
 }
 
+/// Read one token while mapping lexer errors to stable public I/O errors.
 fn nextToken(lexer: *Lexer) types.IoError!Token {
     return lexer.next() catch |err| return switch (err) {
         error.ResourceLimitExceeded => error.ResourceLimitExceeded,
@@ -302,6 +326,7 @@ fn nextToken(lexer: *Lexer) types.IoError!Token {
     };
 }
 
+/// Inspect one token without advancing parser state.
 fn peekToken(lexer: *Lexer) types.IoError!Token {
     return lexer.peek() catch |err| return switch (err) {
         error.ResourceLimitExceeded => error.ResourceLimitExceeded,
@@ -309,17 +334,20 @@ fn peekToken(lexer: *Lexer) types.IoError!Token {
     };
 }
 
+/// Consume one token and require the requested lexical tag.
 fn expect(lexer: *Lexer, expected: Tag) types.IoError!Token {
     const found = try nextToken(lexer);
     if (found.tag != expected) return error.InvalidSyntax;
     return found;
 }
 
+/// Require newline or EOF after a complete LP statement/header.
 fn expectLineEnd(lexer: *Lexer) types.IoError!void {
     const terminator = try nextToken(lexer);
     if (terminator.tag != .newline and terminator.tag != .eof) return error.InvalidSyntax;
 }
 
+/// Consume an optional `identifier:` prefix and return its borrowed name.
 fn consumeOptionalLabel(lexer: *Lexer) types.IoError!?[]const u8 {
     var probe = lexer.*;
     const name = try nextToken(&probe);
@@ -331,6 +359,7 @@ fn consumeOptionalLabel(lexer: *Lexer) types.IoError!?[]const u8 {
     return name.lexeme;
 }
 
+/// Parse one objective line directly into column costs and constant offset.
 fn parseObjective(parser: *Parser, lexer: *Lexer) types.IoError!void {
     _ = try consumeOptionalLabel(lexer);
     if (parser.pending_objective_coefficient) |coefficient| {
@@ -371,8 +400,15 @@ fn parseObjective(parser: *Parser, lexer: *Lexer) types.IoError!void {
     }
 }
 
-const ParsedExpression = struct { relation: Tag, constant: f64 };
+/// Relation and constant separated from a parsed linear row expression.
+const ParsedExpression = struct {
+    /// One of less-equal, equal, or greater-equal.
+    relation: Tag,
+    /// Right-hand constant after moving expression constants.
+    constant: f64,
+};
 
+/// Parse a row expression into column-chain terms and return relation/constant.
 fn parseLinearExpression(parser: *Parser, lexer: *Lexer, row: usize) types.IoError!ParsedExpression {
     var sign: f64 = 1.0;
     var constant: f64 = 0.0;
@@ -406,6 +442,7 @@ fn parseLinearExpression(parser: *Parser, lexer: *Lexer, row: usize) types.IoErr
     }
 }
 
+/// Parse one labelled or anonymous linear constraint and install row bounds.
 fn parseConstraint(parser: *Parser, lexer: *Lexer) types.IoError!void {
     const row_name = try consumeOptionalLabel(lexer);
     var lower_prefix: ?f64 = null;
@@ -443,10 +480,12 @@ fn parseConstraint(parser: *Parser, lexer: *Lexer) types.IoError!void {
     }
 }
 
+/// Return whether a token may begin a signed numeric bound scalar.
 fn isScalarStart(value: Token) bool {
     return value.tag == .number or value.tag == .plus or value.tag == .minus or value.tag == .identifier;
 }
 
+/// Parse a signed finite scalar or permitted infinity spelling.
 fn parseScalar(lexer: *Lexer, allow_infinity: bool) types.IoError!f64 {
     var sign: f64 = 1.0;
     var value = try nextToken(lexer);
@@ -459,6 +498,7 @@ fn parseScalar(lexer: *Lexer, allow_infinity: bool) types.IoError!f64 {
     return error.InvalidNumber;
 }
 
+/// Parse one LP bound form and update the referenced column interval.
 fn parseBound(parser: *Parser, lexer: *Lexer) types.IoError!void {
     var probe = lexer.*;
     const first = try nextToken(&probe);
@@ -497,6 +537,7 @@ fn parseBound(parser: *Parser, lexer: *Lexer) types.IoError!void {
     }
 }
 
+/// Parse one variable-name list and assign the requested domain type.
 fn parseTypes(parser: *Parser, lexer: *Lexer, kind: types.VariableType) types.IoError!void {
     while (true) {
         try parser.control.tick();

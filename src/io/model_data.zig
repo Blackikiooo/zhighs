@@ -12,21 +12,37 @@ const matrix = @import("matrix");
 const types = @import("types.zig");
 const StringArena = @import("string_arena.zig").StringArena;
 
+/// Fully owned canonical model produced by a format parser.
 pub const ModelData = struct {
+    /// Allocator that owns every allocation reachable from this value.
     allocator: std.mem.Allocator,
+    /// Single 64-byte-aligned allocation backing all numeric/attribute slices.
     attribute_storage: []align(64) u8,
+    /// Contiguous byte pool backing the model, column and row names.
     name_storage: []u8,
+    /// Model name borrowed from `name_storage`.
     name: []u8,
+    /// Original objective direction.
     objective_sense: types.ObjectiveSense = .minimize,
+    /// Constant objective term.
     objective_offset: f64 = 0.0,
+    /// Structural objective coefficients; length equals `matrix.num_cols`.
     col_cost: []f64,
+    /// Structural column lower bounds.
     col_lower: []f64,
+    /// Structural column upper bounds.
     col_upper: []f64,
+    /// Structural column domains.
     col_type: []types.VariableType,
+    /// Optional names borrowing from `name_storage`, or an empty table.
     col_names: []?[]u8,
+    /// Row activity lower bounds; length equals `matrix.num_rows`.
     row_lower: []f64,
+    /// Row activity upper bounds.
     row_upper: []f64,
+    /// Optional names borrowing from `name_storage`, or an empty table.
     row_names: []?[]u8,
+    /// Owned canonical constraint matrix.
     matrix: matrix.CscMatrix,
 
     /// Allocate packed attribute arrays and a contiguous name pool. Ownership
@@ -104,6 +120,7 @@ pub const ModelData = struct {
         };
     }
 
+    /// Release packed attributes, names and CSC storage.
     pub fn deinit(self: *ModelData) void {
         const allocator = self.allocator;
         allocator.free(self.attribute_storage);
@@ -112,6 +129,7 @@ pub const ModelData = struct {
         self.* = undefined;
     }
 
+    /// Create a non-owning writer view valid until this model is mutated or freed.
     pub fn view(self: *const ModelData) types.ModelView {
         return .{
             .name = self.name,
@@ -130,10 +148,12 @@ pub const ModelData = struct {
     }
 };
 
+/// Compute the byte count of a `T[len]` array with overflow checking.
 fn arrayBytes(comptime T: type, len: usize) types.IoError!usize {
     return std.math.mul(usize, @sizeOf(T), len) catch error.InvalidDimensions;
 }
 
+/// Lay out eight arrays consecutively while respecting each requested alignment.
 fn packedLayout(sizes: [8]usize, alignments: [8]usize) error{Overflow}!struct { offsets: [8]usize, total: usize } {
     var offsets: [8]usize = undefined;
     var cursor: usize = 0;
@@ -146,6 +166,10 @@ fn packedLayout(sizes: [8]usize, alignments: [8]usize) error{Overflow}!struct { 
     return .{ .offsets = offsets, .total = cursor };
 }
 
+/// Reinterpret an aligned subrange of packed attribute storage as `[]T`.
+///
+/// Callers must obtain `offset` and `len` from `packedLayout`; this helper
+/// deliberately performs no runtime bounds check in the construction hot path.
 fn sliceAt(comptime T: type, storage: []align(64) u8, offset: usize, len: usize) []T {
     const pointer: [*]T = @ptrCast(@alignCast(storage.ptr + offset));
     return pointer[0..len];

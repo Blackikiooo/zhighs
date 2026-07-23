@@ -20,12 +20,20 @@ pub const SolveStatus = enum {
 /// Read-only view of the solver result. All slices point at engine storage
 /// and remain valid until the next `solve*` call or `deinit`.
 pub const SolutionView = struct {
+    /// Terminal or early-exit condition produced by the solve.
     status: SolveStatus,
-    primal: []const f64, // Primal variable values (length = num_cols)
-    dual: []const f64, // Row dual values (length = num_rows)
-    reduced_cost: []const f64, // Column reduced costs (length = num_cols)
-    unbounded_ray: []const f64, // Primal ray when `status == .unbounded`; empty otherwise
-    infeasibility_ray: []const f64, // Row-space Farkas ray when `status == .infeasible`
-    objective_value: f64, // Final objective value (including offset)
-    iterations: usize, // Number of simplex pivots performed
+    /// Structural primal values in original model coordinates.
+    primal: []const f64,
+    /// Row multipliers in original row coordinates and objective convention.
+    dual: []const f64,
+    /// Reduced costs for structural columns in original coordinates.
+    reduced_cost: []const f64,
+    /// Improving structural direction when `status == .unbounded`; empty otherwise.
+    unbounded_ray: []const f64,
+    /// Row-space Farkas certificate when `status == .infeasible`; empty otherwise.
+    infeasibility_ray: []const f64,
+    /// Final objective including the model offset; meaningful for an optimal solution.
+    objective_value: f64,
+    /// Number of committed simplex pivots across every phase and cleanup pass.
+    iterations: usize,
 };

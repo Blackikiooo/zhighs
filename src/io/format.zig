@@ -4,6 +4,11 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+/// Detect the model grammar and optional compression wrapper from `path`.
+///
+/// Matching is ASCII case-insensitive. The compression suffix is removed
+/// before inspecting the model extension. No file is opened and returned
+/// slices never borrow from the path.
 pub fn detect(path: []const u8) types.IoError!types.FileKind {
     if (path.len == 0) return error.UnsupportedFormat;
     var base = path;

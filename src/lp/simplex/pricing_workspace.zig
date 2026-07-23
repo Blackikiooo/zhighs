@@ -12,15 +12,24 @@ const foundation = @import("foundation");
 /// Row-major (CSR) transpose of the retained CSC entries. Built once per solve
 /// and reused by every row-pricing operation without further allocation.
 pub const RowView = struct {
+    /// Allocator owning retained CSR buffers.
     allocator: std.mem.Allocator,
-    row_starts: []usize = &.{}, // CSR row pointers (length = num_rows + 1)
-    row_columns: []u32 = &.{}, // Column index for each nonzero (length = nonzeros)
-    row_values: []f64 = &.{}, // Value for each nonzero (length = nonzeros)
-    row_cursor: []usize = &.{}, // Scratch cursor used during `build` (length = num_rows)
+    /// CSR row offsets; active prefix length is `num_rows + 1`.
+    row_starts: []usize = &.{},
+    /// Structural column index parallel to `row_values`.
+    row_columns: []u32 = &.{},
+    /// Retained model coefficient parallel to `row_columns`.
+    row_values: []f64 = &.{},
+    /// Row insertion cursor used only while rebuilding CSR.
+    row_cursor: []usize = &.{},
+    /// Active row count of the last matrix passed to `build`.
     num_rows: usize = 0,
+    /// Active structural column count of the last built matrix.
     num_cols: usize = 0,
+    /// Number of retained entries in the active CSR prefix.
     nonzeros: usize = 0,
 
+    /// Construct an empty reusable row workspace.
     pub fn init(allocator: std.mem.Allocator) RowView {
         return .{ .allocator = allocator };
     }

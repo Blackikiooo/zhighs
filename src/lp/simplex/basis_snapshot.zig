@@ -19,9 +19,14 @@ pub const BasisViewError = error{
 };
 
 /// Borrowed basis description. All slices must outlive the consuming call.
+/// `Borrowed` means that the caller is responsible for ensuring that the
+/// underlying data remains valid for the duration of the borrow, in zig,
+/// means the `BasisView` does not own allocator.
 pub const BasisView = struct {
-    structural_status: []const BasisStatus, // Per structural column (length = num_cols)
-    logical_status: []const BasisStatus, // Per logical column / row (length = num_rows)
+    /// Status of each structural model column.
+    structural_status: []const BasisStatus,
+    /// Status of each logical row column.
+    logical_status: []const BasisStatus,
     /// Global internal column index for every basis row. Imported snapshots
     /// may reference structural and logical columns, never artificial columns.
     basic_index: []const u32,
@@ -60,11 +65,16 @@ pub const BasisView = struct {
 /// Owning, move-only basis snapshot. The status arrays are stored in one
 /// contiguous allocation to keep cache traffic tight during MIP re-optimization.
 pub const BasisSnapshot = struct {
+    /// Allocator owning the status block and basis head.
     allocator: std.mem.Allocator,
-    status_storage: []BasisStatus, // Backing buffer for structural_status + logical_status
-    structural_status: []BasisStatus, // Alias into status_storage[0..num_cols]
-    logical_status: []BasisStatus, // Alias into status_storage[num_cols..]
-    basic_index: []u32, // Dense list of basic column indices (length = num_rows)
+    /// Backing buffer shared by both public status slices.
+    status_storage: []BasisStatus,
+    /// Structural prefix aliasing `status_storage`.
+    structural_status: []BasisStatus,
+    /// Logical suffix aliasing `status_storage`.
+    logical_status: []BasisStatus,
+    /// Internal basic column occupying each basis row.
+    basic_index: []u32,
 
     /// Deep-copy a validated `BasisView` into owning storage.
     pub fn initFromView(allocator: std.mem.Allocator, input_view: BasisView) BasisViewError!BasisSnapshot {

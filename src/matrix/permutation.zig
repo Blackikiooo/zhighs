@@ -12,6 +12,7 @@ const transform_buffers = @import("transform_buffers.zig");
 
 const CscTransformBuffers = transform_buffers.CscTransformBuffers;
 
+/// Validate row/column bijections and return an owning permuted matrix.
 pub fn permute(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -24,6 +25,7 @@ pub fn permute(
     return permuteAssumeValid(allocator, matrix, row_old_to_new, col_old_to_new);
 }
 
+/// Trusted owning permutation for canonical input and valid bijections.
 pub fn permuteAssumeValid(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -59,6 +61,7 @@ pub fn permuteAssumeValid(
     return result;
 }
 
+/// Validate permutations and write the permuted CSC into caller buffers.
 pub fn permuteInto(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -72,6 +75,7 @@ pub fn permuteInto(
     return permuteIntoAssumeValid(buffers, matrix, row_old_to_new, col_old_to_new);
 }
 
+/// Trusted allocation-free permutation using scratch for sortable positions.
 pub fn permuteIntoAssumeValid(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -105,6 +109,7 @@ pub fn permuteIntoAssumeValid(
     return buffers.viewAssumeValid(matrix.num_rows, matrix.num_cols, matrix.nnz());
 }
 
+/// Validate a bijection using temporary allocator-owned marker storage.
 fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_new: []const Id, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {
     if (old_to_new.len != dimension) return error.InvalidPermutation;
     const seen = try allocator.alloc(bool, dimension);
@@ -117,6 +122,7 @@ fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_n
     }
 }
 
+/// Validate a bijection using caller-provided generation/marker scratch.
 fn validatePermutationWithScratch(comptime Id: type, old_to_new: []const Id, dimension: usize, scratch: []usize) csc.MatrixError!void {
     if (old_to_new.len != dimension) return error.InvalidPermutation;
     if (scratch.len < dimension) return error.BufferTooSmall;
@@ -130,13 +136,17 @@ fn validatePermutationWithScratch(comptime Id: type, old_to_new: []const Id, dim
 }
 
 const EntrySortContext = struct {
+    /// Destination row IDs sorted in place.
     rows: []foundation.RowId,
+    /// Coefficients swapped in parallel with `rows`.
     values: []f64,
 
+    /// Compare temporary entry positions by destination row.
     pub fn lessThan(self: @This(), a: usize, b: usize) bool {
         return self.rows[a].toUsize() < self.rows[b].toUsize();
     }
 
+    /// Swap all parallel temporary streams at two positions.
     pub fn swap(self: @This(), a: usize, b: usize) void {
         std.mem.swap(foundation.RowId, &self.rows[a], &self.rows[b]);
         std.mem.swap(f64, &self.values[a], &self.values[b]);

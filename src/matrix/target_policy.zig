@@ -13,6 +13,7 @@ const builtin = @import("builtin");
 /// residual checks, and certificate validation structurally consistent.
 pub const model_coefficient_tolerance: f64 = 1e-9;
 
+/// Return whether a coefficient survives the shared model-dropping threshold.
 pub inline fn retainsModelCoefficient(value: f64) bool {
     return @abs(value) > model_coefficient_tolerance;
 }

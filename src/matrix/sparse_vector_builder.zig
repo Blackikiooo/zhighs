@@ -4,38 +4,48 @@ const std = @import("std");
 const Foundation = @import("foundation");
 const sparse = @import("sparse_vector.zig");
 
+/// Return a mutable unordered builder specialized for `RowId` or `ColId`.
 pub fn SparseVectorBuilder(comptime Id: type) type {
     // Instantiating the output type performs the RowId/ColId validation.
     const Vector = sparse.SparseVector(Id);
     const Entry = struct {
+        /// Row or column identifier of the pending coordinate.
         id: Id,
+        /// Finite pending value; duplicates and zero are allowed before freeze.
         value: f64,
     };
     const EntryList = std.MultiArrayList(Entry);
 
     return struct {
+        /// Logical output dimension.
         dimension: usize,
+        /// SoA collection of unordered pending entries.
         entries: EntryList = .empty,
 
         const Self = @This();
 
         const SortContext = struct {
+            /// Borrowed ID stream used to compare MultiArrayList positions.
             ids: []const Id,
 
+            /// Compare pending-entry positions by their raw matrix ID.
             fn lessThan(self: @This(), lhs: usize, rhs: usize) bool {
                 return self.ids[lhs].raw() < self.ids[rhs].raw();
             }
         };
 
+        /// Construct an empty builder for the requested logical dimension.
         pub fn init(dimension: usize) Self {
             return .{ .dimension = dimension };
         }
 
+        /// Release the pending-entry allocation.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.entries.deinit(allocator);
             self.* = undefined;
         }
 
+        /// Discard pending entries while retaining SoA capacity.
         pub fn clearRetainingCapacity(self: *Self) void {
             self.entries.clearRetainingCapacity();
         }

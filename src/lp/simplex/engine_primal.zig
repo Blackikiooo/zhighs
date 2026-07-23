@@ -36,6 +36,14 @@ pub fn chooseLeaving(self: *SimplexEngine) PrimalLeavingResult {
     return self.chooseLeavingWithPolicy(true);
 }
 
+/// Apply the primal ratio test to the current FTRAN direction.
+///
+/// For every basic row this converts the signed direction into a nonnegative
+/// limiting direction and the distance to the bound that would be hit. The
+/// active degeneracy policy then chooses Harris, rank-perturbed, or (when
+/// permitted) Bland ordering. `allow_bland` is disabled for the generalized
+/// bounded Phase-I problem, where the assumptions behind the standard-form
+/// Bland proof do not hold.
 pub fn chooseLeavingWithPolicy(self: *SimplexEngine, allow_bland: bool) PrimalLeavingResult {
     const basis = if (self.basis) |*value| value else return .{ .status = .numerical_failure };
     for (basis.basic_margin, basis.ratio_direction, basis.basic_value, basis.basic_lower, basis.basic_upper, basis.pivot_direction) |*margin, *ratio_direction, value, lower, upper, direction| {
@@ -72,6 +80,12 @@ pub fn chooseLeavingWithPolicy(self: *SimplexEngine, allow_bland: bool) PrimalLe
     return .{ .status = .optimal, .row = row, .step = choice.step, .bound = bound };
 }
 
+/// Choose the limiting basic variable with Bland-compatible tie breaking.
+///
+/// The minimum nonnegative step wins; ties within the configured perturbation
+/// tolerance are resolved by the global basic-column index rather than row
+/// position. A scale-aware pivot threshold excludes coefficients too small to
+/// support a numerically meaningful basis exchange.
 pub fn chooseLeavingBland(self: *SimplexEngine) PrimalLeavingResult {
     const basis = if (self.basis) |*value| value else return .{ .status = .numerical_failure };
     var best_row: ?u32 = null;
@@ -186,6 +200,14 @@ pub fn updatePrimalDevexFramework(
     return .optimal;
 }
 
+/// Run primal revised-simplex Phase II on the installed feasible basis.
+///
+/// The loop performs reduced-cost pricing, FTRAN, the primal ratio test,
+/// optional bound exchange, and basis pivots. It also owns Devex framework
+/// lifetime, degeneracy/taboo retries, exact-reprice cadence, and the fresh
+/// reinversion required before an apparent optimum can be certified.
+/// Terminal statuses therefore refer to the original objective and a
+/// numerically checked basis, not merely an incrementally updated work state.
 pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
@@ -350,6 +372,11 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
     return .iteration_limit;
 }
 
+/// Convert the user-space dual-feasibility tolerance to scaled model space.
+///
+/// Reduced costs include objective and column scaling, so pricing must use the
+/// smallest structural column scale to avoid rejecting a violation that would
+/// exceed tolerance after unscaling. Machine epsilon is the absolute floor.
 pub fn scaledDualTolerance(self: *const SimplexEngine, problem: problem_module.ProblemView) f64 {
     const basis = if (self.basis) |*value| value else return self.numerical.dual_tolerance;
     var minimum_column_scale: f64 = 1.0;
@@ -357,6 +384,12 @@ pub fn scaledDualTolerance(self: *const SimplexEngine, problem: problem_module.P
     return @max(std.math.floatEps(f64), self.numerical.dual_tolerance * self.objective_scale * minimum_column_scale);
 }
 
+/// Price primal entering candidates and charge the scan to pricing statistics.
+///
+/// This baseline dispatcher selects Bland, partial multiple pricing, or the
+/// configured weighted full scan. It also records reduced-cost density for
+/// later diagnostics. `column_count` restricts pricing to the active prefix,
+/// excluding Phase-I artificials during ordinary Phase II.
 pub fn choosePrimalEnteringTimed(self: *SimplexEngine, column_count: usize, tolerance: f64) ?pricing_module.EnteringChoice {
     const started = self.statisticsTimestamp();
     defer self.recordPricingElapsed(started);
@@ -386,6 +419,13 @@ pub fn choosePrimalEnteringTimed(self: *SimplexEngine, column_count: usize, tole
         );
 }
 
+/// Price an entering column under the active perturbation/taboo policy.
+///
+/// When degeneracy handling is active, stable column ranks break score ties
+/// and the optional taboo horizon suppresses recently rejected columns.
+/// Callers must retry with `respect_taboo == false` before treating an empty
+/// result as a feasibility certificate. Outside that mode this has the same
+/// weighted/partial dispatch semantics as `choosePrimalEnteringTimed`.
 pub fn choosePrimalEnteringWeightedTimed(
     self: *SimplexEngine,
     column_count: usize,
@@ -494,6 +534,14 @@ pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_m
     return .primal;
 }
 
+/// Minimize the sum of artificial variables to obtain primal feasibility.
+///
+/// Phase I uses its own objective, pricing selection, and reduced-cost refresh
+/// cadence while sharing the main pivot machinery. An apparent infeasibility
+/// or failed artificial cleanup reached through perturbed ordering is never
+/// published directly: the logical starting epoch is restored and rerun with
+/// the baseline policy first. Success leaves artificials fixed at zero and
+/// prepares the surviving original/logical basis for Phase II.
 pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
@@ -742,6 +790,13 @@ pub fn cleanupArtificialBasis(self: *SimplexEngine, problem: problem_module.Prob
     return self.recomputeBasicValues(problem);
 }
 
+/// Recompute exact reduced costs for the artificial Phase-I objective.
+///
+/// Basic costs are one only for artificial basics. Solving `B^-T c_B`
+/// produces the dual vector, after which structural columns are priced through
+/// the selected row- or column-oriented sparse representation. Logical and
+/// artificial reduced costs are written from their known singleton columns.
+/// A successful call resets the incremental reduced-cost update counter.
 pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const artificial_begin = problem.num_cols + problem.num_rows;
@@ -790,6 +845,12 @@ pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_modu
     return .optimal;
 }
 
+/// Reprice Phase I exactly and adapt the next refresh interval from drift.
+///
+/// The incrementally maintained reduced costs are snapshotted before the exact
+/// recomputation. Their maximum relative discrepancy is accumulated for
+/// diagnostics; large drift shortens the refresh period, while consistently
+/// small drift may relax it only up to the validated eight-pivot ceiling.
 pub fn recomputePhaseOneReducedCostsWithDrift(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = basis.reduced_cost.len;

@@ -63,6 +63,7 @@ pub fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
     return .optimal;
 }
 
+/// Cause for abandoning exact DSE recurrence in favor of dual Devex.
 const DualDseFallbackReason = enum { invalid, budget };
 
 /// Start a fresh DSE framework at a dual-phase boundary. Returning the
@@ -111,7 +112,6 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
     @memcpy(basis.residual_work, basis.dual_row);
     self.factorization.solve(basis.residual_work) catch return .numerical_failure;
-
     for (basis.row_edge_weight, basis.pivot_direction, basis.residual_work, 0..) |*weight, alpha, tau, row| {
         if (row == leaving_row) continue;
         const ratio = alpha / pivot;
@@ -162,6 +162,44 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
+}
+
+test "dual steepest-edge recurrence matches exact weights for a nontrivial basis" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.factorization.factorize(2, &[_]f64{ 2, 1, 1, 3 });
+    engine.pricing.rule = .steepest_edge;
+    engine.dual_edge_weights_valid = false;
+    try std.testing.expectEqual(SolveStatus.optimal, engine.ensureExactDualEdgeWeights());
+
+    @memset(engine.basis.?.dual_row, 0);
+    engine.basis.?.dual_row[0] = 1;
+    try engine.factorization.solveTranspose(engine.basis.?.dual_row);
+    engine.basis.?.pivot_direction[0] = 4;
+    engine.basis.?.pivot_direction[1] = -2;
+    try engine.factorization.solve(engine.basis.?.pivot_direction);
+    const pivot = engine.basis.?.pivot_direction[0];
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, pivot));
+    const updated_weights = [_]f64{
+        engine.basis.?.row_edge_weight[0],
+        engine.basis.?.row_edge_weight[1],
+    };
+    try engine.factorization.update(.{
+        .leaving_row = 0,
+        .entering_col = 0,
+        .direction = engine.basis.?.pivot_direction,
+        .column_scale = 1,
+    });
+
+    for (updated_weights, 0..) |updated, row| {
+        @memset(engine.basis.?.rhs_work, 0);
+        engine.basis.?.rhs_work[row] = 1;
+        try engine.factorization.solveTranspose(engine.basis.?.rhs_work);
+        var exact: f64 = 0;
+        for (engine.basis.?.rhs_work) |value| exact += value * value;
+        try std.testing.expectApproxEqAbs(exact, updated, 1e-12);
+    }
 }
 
 test "dual Devex updates every row from the hot FTRAN column" {

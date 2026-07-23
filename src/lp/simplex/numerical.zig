@@ -10,38 +10,60 @@ const std = @import("std");
 /// stability, refactorization triggers, and anti-cycling fallbacks.
 pub const NumericalState = struct {
     // --- Feasibility and pivot tolerances ---
-    primal_tolerance: f64 = 1e-7, // Max acceptable primal infeasibility
-    dual_tolerance: f64 = 1e-7, // Max acceptable dual infeasibility
-    pivot_tolerance: f64 = 1e-12, // Below this |pivot| is treated as zero
-    zero_tolerance: f64 = 1e-12, // Generic zero threshold for residual/scalar comparisons
-    perturbation: f64 = 0.0, // Active perturbation magnitude (0 when not perturbing)
+    /// Maximum accepted violation of a primal bound.
+    primal_tolerance: f64 = 1e-7,
+    /// Maximum accepted sign violation of a nonbasic reduced cost.
+    dual_tolerance: f64 = 1e-7,
+    /// Pivot magnitudes at or below this threshold are treated as singular.
+    pivot_tolerance: f64 = 1e-12,
+    /// Generic structural-zero threshold for residual and scalar comparisons.
+    zero_tolerance: f64 = 1e-12,
+    /// Active anti-degeneracy perturbation; zero outside fallback mode.
+    perturbation: f64 = 0.0,
 
     // --- Refactorization policy ---
-    max_update_count: usize = 100, // Forrest-Tomlin updates before forced refactor
-    max_refinement_steps: usize = 2, // Iterative refinement attempts per solve
+    /// Maximum Forrest–Tomlin updates allowed before reinversion.
+    max_update_count: usize = 100,
+    /// Maximum correction solves attempted by iterative refinement.
+    max_refinement_steps: usize = 2,
     /// Number of fresh-basis pivots required after a forward-accuracy warning
     /// before Forrest--Tomlin updates are tried again.
     fresh_factorization_recovery_pivots: usize = 32,
-    residual_tolerance: f64 = 1e-10, // Relative residual that triggers a refactor
+    /// Target relative residual used by solve validation.
+    residual_tolerance: f64 = 1e-10,
 
     // --- Live diagnostics (reset by `markRefactorized`) ---
-    update_count: usize = 0, // Updates applied since last refactor
-    numerical_warning: bool = false, // Latched flag: refactor required
+    /// Basis updates observed since the last successful factorization.
+    update_count: usize = 0,
+    /// Latched request for reinversion after an accuracy warning.
+    numerical_warning: bool = false,
+    /// Relative residual from the most recently observed generic solve.
     last_relative_residual: f64 = 0.0,
+    /// Largest generic relative residual observed during the solve.
     max_relative_residual: f64 = 0.0,
+    /// Total refinement correction steps performed during the solve.
     refinement_count: usize = 0,
+    /// Relative residual from the most recent entering-column FTRAN.
     last_ftran_relative_residual: f64 = 0.0,
+    /// Largest entering-column FTRAN residual observed during the solve.
     max_ftran_relative_residual: f64 = 0.0,
     /// A cheap pivot-spread warning indicator, not a formal condition number.
     pivot_condition_estimate: f64 = 1.0,
+    /// Relative error threshold for replacing a recurrence DSE weight by its exact value.
     dual_edge_weight_error_tolerance: f64 = 0.25,
+    /// Number of exact DSE weight corrections applied.
     dual_edge_weight_corrections: usize = 0,
 
     // --- Anti-cycling fallback ---
-    degenerate_pivot_limit: usize = 8, // Consecutive zero-step pivots before fallback
+    /// Consecutive zero-length steps required to activate anti-cycling.
+    degenerate_pivot_limit: usize = 8,
+    /// Current run length of degenerate steps.
     consecutive_degenerate_pivots: usize = 0,
+    /// Total degenerate pivots observed in the current solve.
     degenerate_pivot_count: usize = 0,
+    /// Number of times anti-cycling mode was entered.
     anti_cycling_activations: usize = 0,
+    /// Whether deterministic anti-cycling choices are currently required.
     anti_cycling_active: bool = false,
 
     /// Account for one pivot; flag a warning if it is non-finite or below tolerance.

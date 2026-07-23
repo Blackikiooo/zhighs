@@ -73,6 +73,7 @@ pub fn importBasis(self: *SimplexEngine, problem: problem_module.ProblemView, vi
     }
 }
 
+/// Borrow the current structural/logical basis if no artificial column is basic.
 pub fn exportBasisView(self: *const SimplexEngine, problem: problem_module.ProblemView) ?basis_snapshot_module.BasisView {
     const basis = if (self.basis) |*value| value else return null;
     const artificial_begin = problem.num_cols + problem.num_rows;
@@ -84,11 +85,15 @@ pub fn exportBasisView(self: *const SimplexEngine, problem: problem_module.Probl
     };
 }
 
+/// Deep-copy the exportable current basis into caller-owned storage.
 pub fn exportBasisSnapshot(self: *const SimplexEngine, allocator: std.mem.Allocator, problem: problem_module.ProblemView) BasisImportError!basis_snapshot_module.BasisSnapshot {
     const basis_view = self.exportBasisView(problem) orelse return error.NumericalFailure;
     return basis_snapshot_module.BasisSnapshot.initFromView(allocator, basis_view);
 }
 
+/// Test primal and dual feasibility of the current working solution.
+///
+/// This is a classification only; it does not reprice or recompute basic values.
 pub fn classifyFeasibility(self: *const SimplexEngine, problem: problem_module.ProblemView) struct { primal: bool, dual: bool } {
     const basis = if (self.basis) |*value| value else return .{ .primal = false, .dual = false };
     var primal = true;
@@ -165,6 +170,7 @@ pub fn repairRankDeficientBasis(self: *SimplexEngine, problem: problem_module.Pr
     };
 }
 
+/// Choose the deterministic nonbasic status compatible with a bound pair.
 pub fn nonbasicStatusForBounds(lower: f64, upper: f64) basis_module.BasisStatus {
     if (std.math.isFinite(lower) and std.math.isFinite(upper) and lower == upper) return .fixed;
     if (std.math.isFinite(lower)) return .at_lower;

@@ -23,6 +23,7 @@ const matrix = @import("matrix");
 const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
 
+/// Recompute, validate and publish an optimal terminal state.
 pub fn finishOptimal(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     if (self.recomputeBasicValues(problem) != .optimal) return .numerical_failure;
     if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
@@ -54,6 +55,7 @@ pub fn finishUnbounded(self: *SimplexEngine, problem: problem_module.ProblemView
     return .unbounded;
 }
 
+/// Validate a structural recession direction against bounds, rows and objective.
 pub fn validateUnboundedRay(self: *SimplexEngine, problem: problem_module.ProblemView, ray: []const f64) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (ray.len != problem.num_cols) return false;

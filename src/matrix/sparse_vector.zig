@@ -67,6 +67,7 @@ pub fn SparseVectorView(comptime Id: type) type {
             return self.indices.len;
         }
 
+        /// Return whether the vector has no stored nonzeros.
         pub inline fn isEmpty(self: Self) bool {
             return self.indices.len == 0;
         }
@@ -153,8 +154,11 @@ pub fn SparseVector(comptime Id: type) type {
     requireMatrixId(Id);
 
     return struct {
+        /// Logical dense dimension represented by this vector.
         dimension: usize,
+        /// Owned strictly increasing nonzero IDs.
         indices: []Id,
+        /// Owned finite nonzero coefficients parallel to `indices`.
         values: []f64,
         /// Optional single owning block for indices and values. A null value
         /// preserves compatibility with caller-owned/separately allocated data.
@@ -163,6 +167,7 @@ pub fn SparseVector(comptime Id: type) type {
         const Self = @This();
         pub const View = SparseVectorView(Id);
 
+        /// Construct an allocation-free empty vector of the given dimension.
         pub fn empty(dimension: usize) Self {
             return .{
                 .dimension = dimension,
@@ -195,6 +200,7 @@ pub fn SparseVector(comptime Id: type) type {
             return .{ .dimension = dimension, .indices = indices_ptr, .values = values_ptr, .storage = storage };
         }
 
+        /// Release packed or independent owned streams according to storage mode.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.storage) |storage| {
                 allocator.free(storage);
@@ -205,14 +211,17 @@ pub fn SparseVector(comptime Id: type) type {
             self.* = empty(0);
         }
 
+        /// Number of stored nonzero entries.
         pub inline fn nnz(self: *const Self) usize {
             return self.indices.len;
         }
 
+        /// Borrow a canonical immutable view valid while this vector is alive.
         pub inline fn view(self: *const Self) View {
             return View.initAssumeValid(self.dimension, self.indices, self.values);
         }
 
+        /// Validate owned storage through the common borrowed-view invariants.
         pub fn validate(self: *const Self) SparseVectorError!void {
             return self.view().validate();
         }

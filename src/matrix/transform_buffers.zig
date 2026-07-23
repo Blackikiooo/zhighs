@@ -10,11 +10,16 @@ const csc = @import("csc.zig");
 /// next operation writing these buffers or `deinit`. The buffers retain their
 /// high-water allocation across operations; callers choose when to release it.
 pub const CscTransformBuffers = struct {
+    /// Aligned reusable column-offset output storage.
     col_starts: []align(64) usize,
+    /// Aligned reusable row-ID output storage.
     row_indices: []align(64) foundation.RowId,
+    /// Aligned reusable coefficient output storage.
     values: []align(64) f64,
+    /// General-purpose index workspace used by selection/deletion transforms.
     index_scratch: []usize,
 
+    /// Allocate reusable capacities for allocation-free CSC transformations.
     pub fn initCapacity(
         allocator: std.mem.Allocator,
         num_cols_capacity: usize,
@@ -37,6 +42,7 @@ pub const CscTransformBuffers = struct {
         };
     }
 
+    /// Release all retained transformation buffers.
     pub fn deinit(self: *CscTransformBuffers, allocator: std.mem.Allocator) void {
         allocator.free(self.col_starts);
         allocator.free(self.row_indices);
@@ -45,6 +51,7 @@ pub const CscTransformBuffers = struct {
         self.* = undefined;
     }
 
+    /// Check that current capacities can serve the requested output shape.
     pub fn requireCapacity(self: CscTransformBuffers, num_cols: usize, nnz: usize, scratch: usize) csc.MatrixError!void {
         if (num_cols == std.math.maxInt(usize)) return error.DimensionTooLarge;
         if (self.col_starts.len < num_cols + 1 or
@@ -54,6 +61,7 @@ pub const CscTransformBuffers = struct {
             return error.BufferTooSmall;
     }
 
+    /// Borrow an immutable CSC view over the initialized output prefixes.
     pub fn viewAssumeValid(self: CscTransformBuffers, num_rows: usize, num_cols: usize, nnz: usize) csc.CscView {
         std.debug.assert(self.col_starts.len >= num_cols + 1);
         std.debug.assert(self.row_indices.len >= nnz);

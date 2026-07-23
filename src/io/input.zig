@@ -10,8 +10,11 @@ const std = @import("std");
 const types = @import("types.zig");
 
 pub const FileInput = union(enum) {
+    /// Zero-length file; owns no resource.
     empty,
+    /// Exact-size allocator-owned copy of the source bytes.
     buffered: []u8,
+    /// Read-only mapping object whose lifetime is tied to the open file/backend.
     memory_map: std.Io.File.MemoryMap,
 
     /// Load an already-open regular file according to `ReadOptions`.
@@ -48,6 +51,10 @@ pub const FileInput = union(enum) {
         };
     }
 
+    /// Release the active storage variant.
+    ///
+    /// `io` must be the backend used by `load`; `allocator` must match the
+    /// allocator supplied to `load`. The value is invalid after this call.
     pub fn deinit(self: *FileInput, io: std.Io, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .empty => {},
@@ -67,6 +74,7 @@ pub const FileInput = union(enum) {
     }
 };
 
+/// Read exactly `size` bytes into one allocation, polling cancellation between chunks.
 fn loadBuffered(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, size: usize, options: types.ReadOptions) types.IoError!FileInput {
     var buffer: [128 * 1024]u8 = undefined;
     var file_reader = file.reader(io, &buffer);
@@ -84,6 +92,7 @@ fn loadBuffered(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, siz
     return .{ .buffered = memory };
 }
 
+/// Collapse backend-specific metadata errors into the public I/O vocabulary.
 fn mapStatError(err: anyerror) types.IoError {
     return switch (err) {
         error.AccessDenied, error.PermissionDenied => error.PermissionDenied,
@@ -91,6 +100,7 @@ fn mapStatError(err: anyerror) types.IoError {
     };
 }
 
+/// Collapse platform mapping errors without leaking OS-specific error sets.
 fn mapMemoryMapError(err: anyerror) types.IoError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,

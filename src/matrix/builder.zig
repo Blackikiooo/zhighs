@@ -16,8 +16,11 @@ const RowId = foundation.RowId;
 const ColId = foundation.ColId;
 
 const Triplet = struct {
+    /// Row coordinate of the pending entry.
     row: RowId,
+    /// Column coordinate of the pending entry.
     col: ColId,
+    /// Finite coefficient supplied by the caller.
     value: f64,
     // Makes (col,row,sequence) a total order so unstable PDQ sorting still
     // preserves deterministic duplicate summation order.
@@ -27,7 +30,9 @@ const Triplet = struct {
 const TripletList = std.MultiArrayList(Triplet);
 
 pub const MatrixBuilder = struct {
+    /// Declared output row dimension.
     num_rows: usize,
+    /// Declared output column dimension.
     num_cols: usize,
 
     // Official Zig SoA container: row, column and value fields are contiguous,
@@ -36,20 +41,24 @@ pub const MatrixBuilder = struct {
 
     const Self = @This();
 
+    /// Construct an empty builder after validating representable dimensions.
     pub fn init(num_rows: usize, num_cols: usize) csc.MatrixError!Self {
         try csc.validateDimensions(num_rows, num_cols);
         return .{ .num_rows = num_rows, .num_cols = num_cols };
     }
 
+    /// Release the SoA triplet allocation.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);
         self.* = undefined;
     }
 
+    /// Number of pending triplets, including duplicates and explicit zeros.
     pub inline fn len(self: Self) usize {
         return self.entries.len;
     }
 
+    /// Discard all pending entries while retaining their allocation.
     pub fn clearRetainingCapacity(self: *Self) void {
         self.entries.clearRetainingCapacity();
     }
@@ -144,6 +153,7 @@ pub const MatrixBuilder = struct {
         return self.freezeInternal(allocator, zero_tolerance, false, false);
     }
 
+    /// Shared freeze implementation controlling sorting and compact-offset output.
     fn freezeInternal(self: *Self, allocator: std.mem.Allocator, zero_tolerance: f64, sort_entries: bool, comptime include_compact_starts: bool) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         if (!std.math.isFinite(zero_tolerance) or zero_tolerance < 0.0)
             return error.InvalidTolerance;
@@ -228,6 +238,7 @@ pub const MatrixBuilder = struct {
         return result;
     }
 
+    /// Check nondecreasing `(column,row)` order of pending triplets.
     fn isSorted(self: Self) bool {
         const fields = self.entries.slice();
         const rows = fields.items(.row);
@@ -242,6 +253,7 @@ pub const MatrixBuilder = struct {
     }
 };
 
+/// Return whether two row/column pairs identify the same coordinate.
 inline fn sameCoordinate(a_row: RowId, a_col: ColId, b_row: RowId, b_col: ColId) bool {
     return a_row.toUsize() == b_row.toUsize() and a_col.toUsize() == b_col.toUsize();
 }
@@ -249,8 +261,10 @@ inline fn sameCoordinate(a_row: RowId, a_col: ColId, b_row: RowId, b_col: ColId)
 /// Comparator reads only the coordinate streams. MultiArrayList moves all
 /// fields together internally during its stable sort.
 const SortContext = struct {
+    /// Borrowed SoA streams whose positions are compared.
     fields: TripletList.Slice,
 
+    /// Compare triplet positions by column, row, then append sequence.
     pub fn lessThan(self: @This(), a: usize, b: usize) bool {
         const cols = self.fields.items(.col);
         const a_col = cols[a].toUsize();
@@ -470,6 +484,7 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
     }
 }
 
+/// Merge sorted duplicate triplets directly into caller-owned CSC streams.
 fn mergeSortedArraysIntoAssumeValid(sorted_rows: []const RowId, sorted_cols: []const ColId, sorted_values: []const f64, zero_tolerance: f64, output_starts: []usize, output_rows: []RowId, output_values: []f64) void {
     @memset(output_starts, 0);
     var read: usize = 0;
@@ -546,6 +561,7 @@ pub fn freezeFromCanonicalArraysAssumeValid(allocator: std.mem.Allocator, num_ro
     }
 }
 
+/// Fill CSC offsets from a canonical nondecreasing column-ID stream.
 inline fn fillColumnStartsAssumeValid(starts: []usize, sorted_cols: []const ColId) void {
     @memset(starts, 0);
     for (sorted_cols) |col| starts[col.toUsize() + 1] += 1;
@@ -578,10 +594,14 @@ test "freezeFromCanonical handles tridiagonal with no duplicates" {
 /// place and return a `CscView` whose `row_indices` and `values` lengths
 /// reflect the actual nnz written.
 pub const CscBuildBuffers = struct {
+    /// Caller-owned CSC column offsets.
     col_starts: []usize,
+    /// Caller-owned row-ID output capacity.
     row_indices: []RowId,
+    /// Caller-owned coefficient output capacity.
     values: []f64,
 
+    /// Allocate exact column-offset capacity and at least `nnz_capacity` entries.
     pub fn initCapacity(allocator: std.mem.Allocator, num_cols: usize, nnz_capacity: usize) (std.mem.Allocator.Error || csc.MatrixError)!CscBuildBuffers {
         if (num_cols == std.math.maxInt(usize)) return error.DimensionTooLarge;
         const starts = try allocator.alloc(usize, num_cols + 1);
@@ -592,6 +612,7 @@ pub const CscBuildBuffers = struct {
         return .{ .col_starts = starts, .row_indices = indices, .values = vals };
     }
 
+    /// Release all three independently allocated output streams.
     pub fn deinit(self: *CscBuildBuffers, allocator: std.mem.Allocator) void {
         allocator.free(self.col_starts);
         allocator.free(self.row_indices);

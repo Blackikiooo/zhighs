@@ -11,14 +11,18 @@ const csc = @import("csc.zig");
 const edit = @import("edit.zig");
 
 const Entry = struct {
+    /// Structural column of an appended row entry.
     col: foundation.ColId,
+    /// Finite nonzero coefficient parallel to `col`.
     value: f64,
 };
 
 const EntryList = std.MultiArrayList(Entry);
 
 pub const DynamicRowMatrix = struct {
+    /// Fixed structural-column dimension shared by every appended row.
     num_cols: usize,
+    /// CSR-style offsets; length is the number of dynamic rows plus one.
     row_starts: std.ArrayList(usize) = .empty,
     // One allocation with independent contiguous field streams. Column IDs and
     // values can no longer grow to inconsistent lengths, while numerical code
@@ -28,10 +32,13 @@ pub const DynamicRowMatrix = struct {
     const Self = @This();
 
     pub const Checkpoint = struct {
+        /// Row count retained by a rollback to this checkpoint.
         num_rows: usize,
+        /// Entry count retained by a rollback to this checkpoint.
         nnz: usize,
     };
 
+    /// Construct an empty row store with the initial zero row offset.
     pub fn init(allocator: std.mem.Allocator, num_cols: usize) (std.mem.Allocator.Error || csc.MatrixError)!Self {
         try csc.validateDimensions(0, num_cols);
         var self: Self = .{ .num_cols = num_cols };
@@ -40,20 +47,24 @@ pub const DynamicRowMatrix = struct {
         return self;
     }
 
+    /// Release row offsets and the SoA entry allocation.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         self.row_starts.deinit(allocator);
         self.entries.deinit(allocator);
         self.* = undefined;
     }
 
+    /// Number of currently appended rows.
     pub inline fn numRows(self: Self) usize {
         return self.row_starts.items.len - 1;
     }
 
+    /// Number of stored dynamic-row entries.
     pub inline fn nnz(self: Self) usize {
         return self.entries.len;
     }
 
+    /// Capture an O(1) rollback marker for the current logical lengths.
     pub inline fn checkpoint(self: Self) Checkpoint {
         return .{ .num_rows = self.numRows(), .nnz = self.nnz() };
     }
@@ -91,12 +102,14 @@ pub const DynamicRowMatrix = struct {
         return row_id;
     }
 
+    /// Return a checked borrowed canonical view of one dynamic row.
     pub fn row(self: Self, row_id: foundation.RowId) csc.MatrixError!sparse_vector.SparseVectorView(foundation.ColId) {
         const index = row_id.toUsize();
         if (index >= self.numRows()) return error.IndexOutOfBounds;
         return self.rowAssumeValid(index);
     }
 
+    /// Trusted row access for an in-range local row index.
     pub inline fn rowAssumeValid(self: Self, index: usize) sparse_vector.SparseVectorView(foundation.ColId) {
         const begin = self.row_starts.items[index];
         const end = self.row_starts.items[index + 1];
@@ -112,6 +125,7 @@ pub const DynamicRowMatrix = struct {
         self.entries.shrinkRetainingCapacity(target.nnz);
     }
 
+    /// Remove every dynamic row while retaining both backing allocations.
     pub fn clearRetainingCapacity(self: *Self) void {
         self.row_starts.items.len = 1;
         self.row_starts.items[0] = 0;

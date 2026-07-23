@@ -9,19 +9,51 @@ pub const RatioRule = enum { standard, harris_two_pass, bound_flipping };
 
 /// Result of a primal ratio test: which row leaves and the primal step length.
 /// `row == null` means the problem is unbounded along the current direction.
-pub const LeavingChoice = struct { row: ?u32 = null, step: f64 = 0.0 };
+pub const LeavingChoice = struct {
+    /// Blocking basis row, or null when no finite blocker exists.
+    row: ?u32 = null,
+    /// Nonnegative primal step to the selected blocking bound.
+    step: f64 = 0.0,
+};
 
 /// Result of a dual ratio test: which column enters, the dual step `theta`,
 /// and how many boxed columns flip their bounds before the entering column fires.
 pub const DualEnteringChoice = struct {
+    /// Internal entering column, or null when no eligible pivot exists.
     column: ?u32 = null,
+    /// Signed primal movement of the entering nonbasic variable.
     direction: f64 = 0.0,
+    /// Dual step applied to the packed tableau row.
     theta: f64 = 0.0,
+    /// Whether HiGHS CHUZC selected the zero-theta shift-cost path.
+    zero_dual_step: bool = false,
+    /// Valid prefix length of the caller-owned BFRT flip array.
     flip_count: usize = 0,
 };
 
+/// Optional source-alignment controls for HiGHS CHUZC2 candidate filtering.
+pub const DualChuzcControl = struct {
+    /// Enable HiGHS update-count-dependent candidate pivot tolerances.
+    highs_choose_possible: bool = false,
+    /// Enable CHUZC3 relaxed large-step candidate reduction.
+    highs_large_step: bool = false,
+    /// Enable CHUZC4 breakpoint grouping and strict prior-group flips.
+    highs_breakpoint_groups: bool = false,
+    /// Emit detailed CHUZC diagnostics for differential testing.
+    trace_chuzc: bool = false,
+    /// Optional stable HiGHS random permutation used to break exact ties.
+    permutation: []const u32 = &.{},
+    /// Factor update count controlling CHUZC pivot tolerance.
+    update_count: usize = 0,
+    /// Dual feasibility tolerance used by relaxed breakpoint grouping.
+    dual_feasibility_tolerance: f64 = 0.0,
+};
+
+/// Configured primal/dual ratio-test policy.
 pub const RatioTest = struct {
+    /// Selection algorithm used by `chooseLeaving` and bound-flip eligibility.
     rule: RatioRule = .bound_flipping,
+    /// Pivot/step relaxation used by standard and Harris tests.
     tolerance: f64 = 1e-9,
 
     /// Dispatch to the configured primal ratio-test rule.
@@ -150,6 +182,7 @@ pub const RatioTest = struct {
         ratio_work: []f64,
         direction_work: []f64,
         candidate_work: []u32,
+        chuzc: DualChuzcControl,
     ) DualEnteringChoice {
         const count = tableau.len;
         if (reduced_cost.len < count or status.len < count or lower.len < count or upper.len < count or
@@ -169,13 +202,9 @@ pub const RatioTest = struct {
             const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
             if (status[column] == .basic) continue;
             if (status[column] == .fixed) continue;
-            // nonbasic_move provides an explicit direction override for
-            // dual Phase I. When explicit_move == 0 the column uses its
-            // standard status-derived direction even when a nonbasic_move
-            // array is present (the zero means "no override", not "skip").
-            const direction: f64 = if (explicit_move != 0)
-                @floatFromInt(explicit_move)
-            else switch (status[column]) {
+            // CHUZC0 gives only truly free variables a transient direction;
+            // every bound-active zero move remains ineligible.
+            const status_direction: f64 = switch (status[column]) {
                 .at_lower => 1.0,
                 .at_upper => -1.0,
                 .free, .superbasic => if (leaving_bound == .at_lower)
@@ -185,21 +214,35 @@ pub const RatioTest = struct {
                 .fixed => unreachable, // handled above
                 .basic => unreachable, // handled above
             };
-            const signed_alpha = alpha * direction;
-            const eligible = if (leaving_bound == .at_lower)
-                signed_alpha < -self.tolerance
+            const direction: f64 = if (nonbasic_move.len == 0)
+                status_direction
+            else if (explicit_move != 0)
+                @floatFromInt(explicit_move)
+            else if ((status[column] == .free or status[column] == .superbasic) and
+                !std.math.isFinite(lower[column]) and !std.math.isFinite(upper[column]))
+                status_direction
             else
-                signed_alpha > self.tolerance;
+                continue;
+            const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+            const effective_alpha = alpha * move_out * direction;
+            const alpha_tolerance: f64 = if (chuzc.highs_choose_possible)
+                if (chuzc.update_count < 10) 1e-9 else if (chuzc.update_count < 20) 3e-8 else 1e-6
+            else
+                self.tolerance;
+            const eligible = effective_alpha > alpha_tolerance;
             if (!eligible) continue;
 
             const rc = reduced_cost[column];
-            const ratio = switch (status[column]) {
+            const ratio = if (chuzc.highs_choose_possible)
+                (rc * direction + chuzc.dual_feasibility_tolerance) / effective_alpha
+            else switch (status[column]) {
                 .at_lower => @max(rc, 0.0) / @abs(alpha),
                 .at_upper => @max(-rc, 0.0) / @abs(alpha),
                 .free, .superbasic => @abs(rc) / @abs(alpha),
                 .fixed => unreachable,
                 else => unreachable,
             };
+            if (chuzc.highs_choose_possible and ratio <= 0.0) return .{};
             ratio_work[column] = ratio;
             direction_work[column] = direction;
             candidate_work[candidate_count] = @intCast(column);
@@ -207,8 +250,173 @@ pub const RatioTest = struct {
         }
         if (candidate_count == 0) return .{};
 
+        // HiGHS CHUZC3 grows a relaxed step until the selected subset has
+        // enough aggregate bound range to cover the leaving violation. Keep
+        // this stage separate from CHUZC4 grouping so it can be A/B tested.
+        if (chuzc.highs_large_step) {
+            const full_count = candidate_count;
+            var work_count: usize = 0;
+            var total_change: f64 = 0.0;
+            var work_theta = std.math.inf(f64);
+            for (candidate_work[0..full_count]) |column_u32|
+                work_theta = @min(work_theta, ratio_work[column_u32]);
+            var select_theta = 10.0 * work_theta + 1e-7;
+            while (true) {
+                var index = work_count;
+                while (index < full_count) {
+                    const column: usize = @intCast(candidate_work[index]);
+                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                    const effective_alpha = tableau[column] * move_out * direction_work[column];
+                    const tight = direction_work[column] * reduced_cost[column];
+                    if (effective_alpha * select_theta >= tight) {
+                        std.mem.swap(u32, &candidate_work[work_count], &candidate_work[index]);
+                        work_count += 1;
+                        total_change += (upper[column] - lower[column]) * effective_alpha;
+                    }
+                    index += 1;
+                }
+                select_theta *= 10.0;
+                if (total_change >= primal_infeasibility or work_count == full_count) break;
+            }
+            candidate_count = work_count;
+        }
+
+        if (chuzc.highs_breakpoint_groups) {
+            const full_count = candidate_count;
+            var work_theta = std.math.inf(f64);
+            for (candidate_work[0..full_count]) |column_u32|
+                work_theta = @min(work_theta, ratio_work[column_u32]);
+
+            var work_count: usize = 0;
+            var group_count: usize = 0;
+            var total_change: f64 = 1e-12;
+            var select_theta = work_theta;
+            var previous_work_count: usize = 0;
+            var previous_remain_theta: f64 = 1e100;
+            var previous_select_theta = select_theta;
+            while (select_theta < 1e18) {
+                var remain_theta: f64 = 1e100;
+                var index = work_count;
+                while (index < full_count) {
+                    const column: usize = @intCast(candidate_work[index]);
+                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                    const effective_alpha = tableau[column] * move_out * direction_work[column];
+                    const dual = direction_work[column] * reduced_cost[column];
+                    if (dual <= select_theta * effective_alpha) {
+                        std.mem.swap(u32, &candidate_work[work_count], &candidate_work[index]);
+                        const selected: usize = @intCast(candidate_work[work_count]);
+                        ratio_work[selected] = @floatFromInt(group_count);
+                        work_count += 1;
+                        total_change += effective_alpha * (upper[column] - lower[column]);
+                    } else if (dual + chuzc.dual_feasibility_tolerance < remain_theta * effective_alpha) {
+                        remain_theta = (dual + chuzc.dual_feasibility_tolerance) / effective_alpha;
+                    }
+                    index += 1;
+                }
+                group_count += 1;
+                select_theta = remain_theta;
+                if (work_count == previous_work_count and
+                    previous_select_theta == select_theta and
+                    previous_remain_theta == remain_theta) return .{};
+                previous_work_count = work_count;
+                previous_remain_theta = remain_theta;
+                previous_select_theta = select_theta;
+                if (total_change >= primal_infeasibility or work_count == full_count) break;
+            }
+            if (work_count == 0 or group_count == 0) return .{};
+            candidate_count = work_count;
+
+            var maximum_alpha: f64 = 0.0;
+            for (candidate_work[0..candidate_count]) |column_u32| {
+                const column: usize = @intCast(column_u32);
+                const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                maximum_alpha = @max(
+                    maximum_alpha,
+                    tableau[column] * move_out * direction_work[column],
+                );
+            }
+            const final_compare = @min(0.1 * maximum_alpha, 1.0);
+            var chosen_column: ?usize = null;
+            var chosen_group: usize = 0;
+            var reverse_group = group_count;
+            while (reverse_group > 0) {
+                reverse_group -= 1;
+                var group_maximum: f64 = 0.0;
+                var group_column: ?usize = null;
+                for (candidate_work[0..candidate_count]) |column_u32| {
+                    const column: usize = @intCast(column_u32);
+                    if (@as(usize, @intFromFloat(ratio_work[column])) != reverse_group) continue;
+                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                    const effective_alpha = tableau[column] * move_out * direction_work[column];
+                    const wins_tie = if (group_column) |incumbent|
+                        if (chuzc.permutation.len > @max(column, incumbent))
+                            chuzc.permutation[column] < chuzc.permutation[incumbent]
+                        else
+                            column < incumbent
+                    else
+                        true;
+                    if (effective_alpha > group_maximum or
+                        (effective_alpha == group_maximum and wins_tie))
+                    {
+                        group_maximum = effective_alpha;
+                        group_column = column;
+                    }
+                }
+                if (group_column != null and group_maximum > final_compare) {
+                    chosen_column = group_column;
+                    chosen_group = reverse_group;
+                    break;
+                }
+            }
+            const entering = chosen_column orelse return .{};
+            var flip_count: usize = 0;
+            if (reduced_cost[entering] * direction_work[entering] > 0.0) {
+                for (candidate_work[0..candidate_count]) |column_u32| {
+                    const column: usize = @intCast(column_u32);
+                    if (@as(usize, @intFromFloat(ratio_work[column])) >= chosen_group) continue;
+                    candidate_work[flip_count] = column_u32;
+                    flip_count += 1;
+                }
+            }
+            // HEkkDualRow::chooseFinal sorts the strict prior-group BFRT set
+            // by column before accumulating its FTRAN RHS.
+            std.mem.sort(u32, candidate_work[0..flip_count], {}, std.sort.asc(u32));
+            if (chuzc.trace_chuzc) {
+                std.debug.print(
+                    "chuzc4\tworkTheta={e:.17}\tgroups={d}\tbreakGroup={d}\tworkPivot={d}\tworkAlpha={e:.17}\tflipCount={d}\n",
+                    .{ work_theta, group_count, chosen_group, entering, tableau[entering], flip_count },
+                );
+                for (candidate_work[0..candidate_count]) |column_u32| {
+                    const column: usize = @intCast(column_u32);
+                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                    std.debug.print(
+                        "chuzc4_candidate\tcolumn={d}\tmove={e:.1}\tdual={e:.17}\talpha={e:.17}\trange={e:.17}\tgroup={d}\n",
+                        .{
+                            column,
+                            direction_work[column],
+                            reduced_cost[column],
+                            tableau[column] * move_out * direction_work[column],
+                            upper[column] - lower[column],
+                            @as(usize, @intFromFloat(ratio_work[column])),
+                        },
+                    );
+                }
+            }
+            return .{
+                .column = @intCast(entering),
+                .direction = direction_work[entering],
+                .theta = if (reduced_cost[entering] * direction_work[entering] > 0.0)
+                    reduced_cost[entering] / tableau[entering]
+                else
+                    0.0,
+                .zero_dual_step = reduced_cost[entering] * direction_work[entering] <= 0.0,
+                .flip_count = flip_count,
+            };
+        }
+
         // Sort candidates by ratio (ties broken by column index for determinism).
         std.sort.pdq(u32, candidate_work[0..candidate_count], ratio_work, struct {
+            /// Order candidate positions by breakpoint ratio for CHUZC grouping.
             fn lessThan(ratios: []f64, lhs: u32, rhs: u32) bool {
                 return ratios[lhs] < ratios[rhs] or (ratios[lhs] == ratios[rhs] and lhs < rhs);
             }
@@ -298,6 +506,7 @@ test "dual bound-flipping ratio test records boxed breakpoints" {
         &ratios,
         &directions,
         &candidates,
+        .{},
     );
     try std.testing.expectEqual(@as(usize, 1), choice.flip_count);
     try std.testing.expectEqual(@as(?u32, 1), choice.column);
@@ -321,6 +530,7 @@ test "dual BFRT keeps the violation-covering column as the pivot" {
         &ratios,
         &directions,
         &candidates,
+        .{},
     );
     try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
     try std.testing.expectEqual(@as(?u32, 0), choice.column);
@@ -344,6 +554,7 @@ test "dual ratio ties use the lowest column index" {
         &ratios,
         &directions,
         &candidates,
+        .{},
     );
     try std.testing.expectEqual(@as(?u32, 0), choice.column);
     try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
@@ -367,7 +578,123 @@ test "dual Phase-I explicit move overrides bound-status direction" {
         &ratios,
         &directions,
         &candidates,
+        .{},
     );
     try std.testing.expectEqual(@as(?u32, 0), choice.column);
     try std.testing.expectApproxEqAbs(@as(f64, -1), choice.direction, 0);
+}
+
+test "HiGHS CHUZC2 uses update-age alpha tolerance and expanded dual step" {
+    const test_rule = RatioTest{ .rule = .standard, .tolerance = 1e-9 };
+    var ratios: [2]f64 = undefined;
+    var directions: [2]f64 = undefined;
+    var candidates: [2]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &.{ -5e-7, -2e-6 },
+        &.{ 0, 1e-7 },
+        &.{ .at_lower, .at_lower },
+        &.{},
+        &.{ 0, 0 },
+        &.{ std.math.inf(f64), std.math.inf(f64) },
+        &.{ 0, 0 },
+        .at_lower,
+        1,
+        &ratios,
+        &directions,
+        &candidates,
+        .{
+            .highs_choose_possible = true,
+            .update_count = 20,
+            .dual_feasibility_tolerance = 1e-7,
+        },
+    );
+    try std.testing.expectEqual(@as(?u32, 1), choice.column);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1), ratios[1], 1e-12);
+}
+
+test "HiGHS CHUZC3 partitions multiple large-step candidates safely" {
+    const test_rule = RatioTest{ .rule = .bound_flipping, .tolerance = 1e-9 };
+    var ratios: [2]f64 = undefined;
+    var directions: [2]f64 = undefined;
+    var candidates: [2]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &.{ -1, -1 },
+        &.{ 0, 1e-4 },
+        &.{ .at_lower, .at_lower },
+        &.{},
+        &.{ 0, 0 },
+        &.{ 1, 1 },
+        &.{ 0, 0 },
+        .at_lower,
+        2,
+        &ratios,
+        &directions,
+        &candidates,
+        .{
+            .highs_choose_possible = true,
+            .highs_large_step = true,
+            .dual_feasibility_tolerance = 1e-7,
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 1), choice.flip_count);
+    try std.testing.expectEqual(@as(?u32, 1), choice.column);
+}
+
+test "HiGHS CHUZC4 flips only groups strictly before the break group" {
+    const test_rule = RatioTest{ .rule = .bound_flipping, .tolerance = 1e-9 };
+    var ratios: [3]f64 = undefined;
+    var directions: [3]f64 = undefined;
+    var candidates: [3]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &.{ -1, -10, -2 },
+        &.{ 0, 1e-5, 1 },
+        &.{ .at_lower, .at_lower, .at_lower },
+        &.{},
+        &.{ 0, 0, 0 },
+        &.{ 0.5, 0.05, 1 },
+        &.{ 0, 0, 0 },
+        .at_lower,
+        1.5,
+        &ratios,
+        &directions,
+        &candidates,
+        .{
+            .highs_choose_possible = true,
+            .highs_large_step = true,
+            .highs_breakpoint_groups = true,
+            .dual_feasibility_tolerance = 1e-7,
+        },
+    );
+    try std.testing.expectEqual(@as(?u32, 2), choice.column);
+    try std.testing.expectEqual(@as(usize, 2), choice.flip_count);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, candidates[0..choice.flip_count]);
+}
+
+test "HiGHS CHUZC4 large-alpha search can move to an earlier group" {
+    const test_rule = RatioTest{ .rule = .bound_flipping, .tolerance = 1e-9 };
+    var ratios: [2]f64 = undefined;
+    var directions: [2]f64 = undefined;
+    var candidates: [2]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        &.{ -10, -0.5 },
+        &.{ 0, 1 },
+        &.{ .at_lower, .at_lower },
+        &.{},
+        &.{ 0, 0 },
+        &.{ 0.01, 10 },
+        &.{ 0, 0 },
+        .at_lower,
+        1,
+        &ratios,
+        &directions,
+        &candidates,
+        .{
+            .highs_choose_possible = true,
+            .highs_large_step = true,
+            .highs_breakpoint_groups = true,
+            .dual_feasibility_tolerance = 1e-7,
+        },
+    );
+    try std.testing.expectEqual(@as(?u32, 0), choice.column);
+    try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
 }

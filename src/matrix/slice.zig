@@ -44,12 +44,14 @@ pub fn extractColumnRangeInto(buffers: *CscTransformBuffers, matrix: csc.CscMatr
     return buffers.viewAssumeValid(matrix.num_rows, output_cols, output_nnz);
 }
 
+/// Validate a selection and return an owning CSC matrix of those columns.
 pub fn extractColumns(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     try matrix.validate();
     try validateSelection(foundation.ColId, selected, matrix.num_cols);
     return extractColumnsAssumeValid(allocator, matrix, selected);
 }
 
+/// Trusted owning column extraction; selected IDs must be valid and ordered.
 pub fn extractColumnsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.ColId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     var output_nnz: usize = 0;
     for (selected) |source_col| {
@@ -77,12 +79,14 @@ pub fn extractColumnsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMa
     return result;
 }
 
+/// Validate and extract selected columns into retained caller buffers.
 pub fn extractColumnsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, selected: []const foundation.ColId) csc.MatrixError!csc.CscView {
     try matrix.validate();
     try validateSelection(foundation.ColId, selected, matrix.num_cols);
     return extractColumnsIntoAssumeValid(buffers, matrix, selected);
 }
 
+/// Trusted allocation-free selected-column extraction.
 pub fn extractColumnsIntoAssumeValid(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, selected: []const foundation.ColId) csc.MatrixError!csc.CscView {
     var output_nnz: usize = 0;
     for (selected) |source_col| {
@@ -106,12 +110,14 @@ pub fn extractColumnsIntoAssumeValid(buffers: *CscTransformBuffers, matrix: csc.
     return buffers.viewAssumeValid(matrix.num_rows, selected.len, output_nnz);
 }
 
+/// Validate a row selection and return an owning remapped CSC submatrix.
 pub fn extractRows(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.RowId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     try matrix.validate();
     try validateSelection(foundation.RowId, selected, matrix.num_rows);
     return extractRowsAssumeValid(allocator, matrix, selected);
 }
 
+/// Trusted owning row extraction; selected IDs must be valid and ordered.
 pub fn extractRowsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, selected: []const foundation.RowId) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
     const missing = std.math.maxInt(usize);
     const row_map = try allocator.alloc(usize, matrix.num_rows);
@@ -143,12 +149,14 @@ pub fn extractRowsAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatri
     return result;
 }
 
+/// Validate and extract selected rows into retained buffers.
 pub fn extractRowsInto(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, selected: []const foundation.RowId) csc.MatrixError!csc.CscView {
     try matrix.validate();
     try validateSelection(foundation.RowId, selected, matrix.num_rows);
     return extractRowsIntoAssumeValid(buffers, matrix, selected);
 }
 
+/// Trusted allocation-free selected-row extraction and row-ID remapping.
 pub fn extractRowsIntoAssumeValid(buffers: *CscTransformBuffers, matrix: csc.CscMatrix, selected: []const foundation.RowId) csc.MatrixError!csc.CscView {
     try buffers.requireCapacity(matrix.num_cols, 0, matrix.num_rows);
     const missing = std.math.maxInt(usize);
@@ -178,6 +186,7 @@ pub fn extractRowsIntoAssumeValid(buffers: *CscTransformBuffers, matrix: csc.Csc
     return buffers.viewAssumeValid(selected.len, matrix.num_cols, output_nnz);
 }
 
+/// Require a strictly increasing in-range row or column selection.
 fn validateSelection(comptime Id: type, selected: []const Id, dimension: usize) csc.MatrixError!void {
     var previous: ?usize = null;
     for (selected) |id| {

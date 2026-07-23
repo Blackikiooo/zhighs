@@ -169,6 +169,10 @@ pub fn installSparseCrashBasis(
     return false;
 }
 
+/// Refresh bounds and nonbasic values while preserving the current basis/scaling.
+///
+/// Returns false when model dimensions changed or a retained nonbasic status is
+/// incompatible with the new bounds, in which case the caller must cold-start.
 pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (basis.num_rows != problem.num_rows or basis.num_structural_cols != problem.num_cols) return false;
@@ -231,6 +235,7 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
     return true;
 }
 
+/// Initialize bounds, scaling and the logical basis using the selected policy.
 pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     return if (self.active_dual_initialization_strategy == .highs)
         initializeProblemStorageHighs(self, problem)
@@ -238,6 +243,7 @@ pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.Pr
         initializeProblemStorageBaseline(self, problem);
 }
 
+/// Baseline initialization with row normalization and conditional column scaling.
 fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     basis.initializeSlackBasis();
@@ -320,6 +326,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
     return .optimal;
 }
 
+/// HiGHS-compatible six-pass power-of-two equilibration and logical bounds.
 fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     basis.initializeSlackBasis();
@@ -414,17 +421,20 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
     return .optimal;
 }
 
+/// Return a bounded power-of-two scale that normalizes `maximum` near one.
 fn powerOfTwoScale(maximum: f64, exponent_limit: comptime_int) f64 {
     if (maximum == 0.0 or !std.math.isFinite(maximum)) return 1.0;
     return @exp2(std.math.clamp(@round(-@log2(maximum)), -@as(f64, exponent_limit), @as(f64, exponent_limit)));
 }
 
+/// Compute a power-of-two objective scale from the largest absolute cost.
 fn objectiveScale(cost: []const f64) f64 {
     var maximum: f64 = 0.0;
     for (cost) |value| maximum = @max(maximum, @abs(value));
     return powerOfTwoScale(maximum, 15);
 }
 
+/// Materialize a structural, logical or artificial internal column in scaled row space.
 pub fn fillInternalColumn(self: *SimplexEngine, problem: problem_module.ProblemView, column: usize, output: []f64) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memset(output, 0.0);

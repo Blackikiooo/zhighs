@@ -30,6 +30,9 @@ const SolveStatus = @import("engine.zig").SolveStatus;
 const SolveControl = @import("engine.zig").SolveControl;
 const SimplexStats = @import("engine.zig").SimplexStats;
 
+/// Check interruption, deterministic work and wall-clock limits.
+///
+/// Returns null when the solve may continue; this function does not charge work.
 pub fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus {
     if (control.interrupt_flag) |flag| {
         if (flag.load(.acquire)) return .interrupted;
@@ -48,6 +51,7 @@ pub fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus 
     return null;
 }
 
+/// Publish due callbacks/log events, then charge one attempted work unit.
 pub fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, phase: SolvePhase) ?SolveStatus {
     self.current_phase = phase;
     if (self.controlledStop(control)) |status| return status;
@@ -71,6 +75,7 @@ pub fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView,
     return null;
 }
 
+/// Build an allocation-free scalar progress snapshot from current engine state.
 pub fn progressEvent(self: *const SimplexEngine, problem: problem_module.ProblemView, phase: SolvePhase) ProgressEventView {
     var primal_infeasibility: f64 = 0.0;
     var dual_infeasibility: f64 = 0.0;
@@ -102,6 +107,7 @@ pub fn progressEvent(self: *const SimplexEngine, problem: problem_module.Problem
     };
 }
 
+/// Bind caller trace buffers and initialize the optional wall-clock deadline.
 pub fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
     self.active_pivot_trace = control.pivot_trace;
     self.pivot_trace_count = 0;
@@ -125,6 +131,7 @@ pub fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
     self.solve_start_ns = std.Io.Clock.awake.now(io).nanoseconds;
 }
 
+/// Reset per-solve statistics while preserving counters across recursive restarts.
 pub fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
     const saved_cold_restarts = .{
         self.stats.cold_restart_solves,
@@ -143,11 +150,13 @@ pub fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
     self.factorization.resetStatistics(self.statistics_io);
 }
 
+/// Read the optional statistics clock; null means timing collection is disabled.
 pub fn statisticsTimestamp(self: *const SimplexEngine) ?i96 {
     const io = self.statistics_io orelse return null;
     return std.Io.Clock.awake.now(io).nanoseconds;
 }
 
+/// Return saturated nonnegative nanoseconds since `started`, or zero when disabled.
 pub fn elapsedSince(self: *const SimplexEngine, started: ?i96) u64 {
     const begin = started orelse return 0;
     const io = self.statistics_io orelse return 0;
@@ -156,6 +165,7 @@ pub fn elapsedSince(self: *const SimplexEngine, started: ?i96) u64 {
     return @intCast(end - begin);
 }
 
+/// Accumulate elapsed time in the counter belonging to `phase`.
 pub fn recordPhaseElapsed(self: *SimplexEngine, phase: SolvePhase, started: ?i96) void {
     const elapsed = self.elapsedSince(started);
     const target = switch (phase) {
@@ -167,6 +177,7 @@ pub fn recordPhaseElapsed(self: *SimplexEngine, phase: SolvePhase, started: ?i96
     target.* = std.math.add(u64, target.*, elapsed) catch std.math.maxInt(u64);
 }
 
+/// Accumulate attempted iterations performed since phase entry.
 pub fn recordPhaseIterations(self: *SimplexEngine, phase: SolvePhase, started: usize) void {
     const count = self.iterations -| started;
     const target = switch (phase) {
@@ -178,12 +189,14 @@ pub fn recordPhaseIterations(self: *SimplexEngine, phase: SolvePhase, started: u
     target.* = std.math.add(usize, target.*, count) catch std.math.maxInt(usize);
 }
 
+/// Record one column-oriented pricing dispatch and its elapsed time.
 pub fn recordPricingElapsed(self: *SimplexEngine, started: ?i96) void {
     self.stats.pricing_calls += 1;
     self.stats.column_pricing_dispatches += 1;
     self.stats.pricing_ns = std.math.add(u64, self.stats.pricing_ns, self.elapsedSince(started)) catch std.math.maxInt(u64);
 }
 
+/// Record one row-oriented pricing dispatch and its elapsed time.
 pub fn recordRowPricingElapsed(self: *SimplexEngine, started: ?i96) void {
     self.stats.pricing_calls += 1;
     self.stats.row_pricing_dispatches += 1;
@@ -210,6 +223,7 @@ pub fn selectRowPricing(self: *const SimplexEngine, vector: []const f64) bool {
     return touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
 }
 
+/// Sample the density of an entering FTRAN result when statistics are enabled.
 pub fn observeAqDensity(self: *SimplexEngine, vector: []const f64) void {
     if (self.statistics_io == null) return;
     self.stats.aq_samples += 1;
@@ -218,6 +232,7 @@ pub fn observeAqDensity(self: *SimplexEngine, vector: []const f64) void {
     };
 }
 
+/// Sample the density of a pivotal BTRAN row when statistics are enabled.
 pub fn observeEpDensity(self: *SimplexEngine, vector: []const f64) void {
     if (self.statistics_io == null) return;
     self.stats.ep_samples += 1;
@@ -226,6 +241,7 @@ pub fn observeEpDensity(self: *SimplexEngine, vector: []const f64) void {
     };
 }
 
+/// Sample the density of a pricing vector when statistics are enabled.
 pub fn observePricingDensity(self: *SimplexEngine, vector: []const f64) void {
     if (self.statistics_io == null) return;
     self.stats.pricing_samples += 1;
@@ -260,6 +276,7 @@ test "iteration callback can stop without allocating callback state" {
         calls: usize = 0,
         last_work: u64 = 0,
 
+        /// Test callback recording its invocation before requesting interruption.
         fn callback(event: ProgressEventView, context_ptr: ?*anyopaque) CallbackAction {
             const self: *@This() = @ptrCast(@alignCast(context_ptr.?));
             self.calls += 1;
@@ -294,6 +311,7 @@ test "iteration callback can stop without allocating callback state" {
 test "structured iteration logging obeys its deterministic interval" {
     const Context = struct {
         calls: usize = 0,
+        /// Test logger counting deterministic interval publications.
         fn log(_: ProgressEventView, context_ptr: ?*anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(context_ptr.?));
             self.calls += 1;

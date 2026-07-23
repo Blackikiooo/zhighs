@@ -1,5 +1,6 @@
 //! Tokens produced by the zero-copy LP lexer.
 
+/// Lexical category emitted by the zero-copy LP lexer.
 pub const Tag = enum(u8) {
     // Payload tokens: `lexeme` contains the source spelling.
     identifier,
@@ -25,6 +26,7 @@ pub const Tag = enum(u8) {
     eof,
 };
 
+/// Position of a token's first byte in the original source buffer.
 pub const Location = struct {
     /// Zero-based byte offset in the complete source.
     byte_offset: usize,
@@ -34,7 +36,9 @@ pub const Location = struct {
     column: usize,
 };
 
+/// One lexer item; both spelling and location refer to the original source.
 pub const Token = struct {
+    /// Category used by the parser's grammar dispatch.
     tag: Tag,
     /// Borrowed directly from the lexer's input buffer.
     lexeme: []const u8,

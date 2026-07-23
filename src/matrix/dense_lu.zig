@@ -9,20 +9,32 @@ const std = @import("std");
 pub const DenseLuError = error{ DimensionMismatch, Singular, NumericalFailure, OutOfMemory };
 
 pub const DenseLU = struct {
+    /// Allocator owning factor, pivot, and solve-work buffers.
     allocator: std.mem.Allocator,
+    /// Dimension of the current square factorization.
     n: usize = 0,
+    /// Combined row-major unit-lower and upper triangular factors.
     lu: []f64 = &.{},
+    /// Row permutation produced by partial pivoting.
     pivots: []usize = &.{},
+    /// Reused dense temporary for forward/backward substitutions.
     work: []f64 = &.{},
+    /// Absolute pivot floor below which a matrix is treated as singular.
     pivot_tolerance: f64 = 1e-12,
+    /// Smallest accepted diagonal magnitude in the current factorization.
     min_abs_pivot: f64 = std.math.inf(f64),
+    /// Largest accepted diagonal magnitude in the current factorization.
     max_abs_pivot: f64 = 0.0,
 
+    const Self = @This();
+
+    /// Construct an empty factorization; storage is allocated on first use.
     pub fn init(allocator: std.mem.Allocator) DenseLU {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *DenseLU) void {
+    /// Release all retained factor and workspace storage.
+    pub fn deinit(self: *Self) void {
         self.allocator.free(self.lu);
         self.allocator.free(self.pivots);
         self.allocator.free(self.work);
@@ -30,70 +42,66 @@ pub const DenseLU = struct {
     }
 
     /// Factorize an n-by-n row-major matrix without modifying the input.
-    pub fn factorize(self: *DenseLU, n: usize, matrix: []const f64) DenseLuError!void {
+    pub fn factorize(
+        self: *Self,
+        n: usize,
+        matrix: []const f64,
+    ) DenseLuError!void {
         if (matrix.len != n * n) return error.DimensionMismatch;
-        const next_lu = self.allocator.alloc(f64, matrix.len) catch return error.OutOfMemory;
-        errdefer self.allocator.free(next_lu);
-        const next_pivots = self.allocator.alloc(usize, n) catch return error.OutOfMemory;
-        errdefer self.allocator.free(next_pivots);
-        const next_work = self.allocator.alloc(f64, n) catch return error.OutOfMemory;
-        errdefer self.allocator.free(next_work);
-        @memcpy(next_lu, matrix);
-        for (next_pivots, 0..) |*pivot, i| pivot.* = i;
 
-        var min_abs_pivot = std.math.inf(f64);
-        var max_abs_pivot: f64 = 0.0;
-        for (0..n) |column| {
-            var pivot_row = column;
-            var pivot_abs: f64 = 0.0;
-            for (column..n) |row| {
-                const value = @abs(next_lu[row * n + column]);
-                if (value > pivot_abs) {
-                    pivot_abs = value;
-                    pivot_row = row;
-                }
-            }
-            if (!std.math.isFinite(pivot_abs) or pivot_abs <= self.pivot_tolerance) return error.Singular;
-            if (pivot_row != column) {
-                for (0..n) |j| std.mem.swap(f64, &next_lu[column * n + j], &next_lu[pivot_row * n + j]);
-                std.mem.swap(usize, &next_pivots[column], &next_pivots[pivot_row]);
-            }
-            const diagonal = next_lu[column * n + column];
-            min_abs_pivot = @min(min_abs_pivot, @abs(diagonal));
-            max_abs_pivot = @max(max_abs_pivot, @abs(diagonal));
-            for (column + 1..n) |row| {
-                next_lu[row * n + column] /= diagonal;
-                const multiplier = next_lu[row * n + column];
-                for (column + 1..n) |j| next_lu[row * n + j] -= multiplier * next_lu[column * n + j];
-            }
-        }
-        self.allocator.free(self.lu);
-        self.allocator.free(self.pivots);
-        self.allocator.free(self.work);
-        self.lu = next_lu;
-        self.pivots = next_pivots;
-        self.work = next_work;
-        self.n = n;
-        self.min_abs_pivot = if (n == 0) 1.0 else min_abs_pivot;
-        self.max_abs_pivot = if (n == 0) 1.0 else max_abs_pivot;
+        const next_lu = self.allocator.alloc(f64, matrix.len) catch
+            return error.OutOfMemory;
+
+        @memcpy(next_lu, matrix);
+
+        // factorizeBuffer 接管 next_lu 的所有权：
+        // 成功后由 self 持有，失败时由 factorizeBuffer 释放。
+        return self.factorizeBuffer(n, next_lu);
     }
 
-    /// Zero-copy variant. Ownership of `matrix` is transferred to this LU
-    /// object; the caller must not free or reuse it after success. The buffer
-    /// is overwritten with LU data and released on failure.
-    pub fn factorizeOwned(self: *DenseLU, n: usize, matrix: []f64) DenseLuError!void {
-        if (matrix.len != n * n) return error.DimensionMismatch;
+    /// Ownership of `matrix` is transferred to this LU object.
+    /// The buffer is consumed whether factorization succeeds or fails.
+    pub fn factorizeOwned(
+        self: *Self,
+        n: usize,
+        matrix: []f64,
+    ) DenseLuError!void {
+        if (matrix.len != n * n) {
+            self.allocator.free(matrix);
+            return error.DimensionMismatch;
+        }
+
+        return self.factorizeBuffer(n, matrix);
+    }
+
+    /// Takes ownership of `matrix`.
+    /// On success, `self` owns it. On failure, it is released.
+    fn factorizeBuffer(
+        self: *Self,
+        n: usize,
+        matrix: []f64,
+    ) DenseLuError!void {
         errdefer self.allocator.free(matrix);
-        const next_pivots = self.allocator.alloc(usize, n) catch return error.OutOfMemory;
+
+        const next_pivots = self.allocator.alloc(usize, n) catch
+            return error.OutOfMemory;
         errdefer self.allocator.free(next_pivots);
-        const next_work = self.allocator.alloc(f64, n) catch return error.OutOfMemory;
+
+        const next_work = self.allocator.alloc(f64, n) catch
+            return error.OutOfMemory;
         errdefer self.allocator.free(next_work);
-        for (next_pivots, 0..) |*pivot, i| pivot.* = i;
+
+        for (next_pivots, 0..) |*pivot, i| {
+            pivot.* = i;
+        }
+
         var min_abs_pivot = std.math.inf(f64);
         var max_abs_pivot: f64 = 0.0;
+
         for (0..n) |column| {
             var pivot_row = column;
             var pivot_abs: f64 = 0.0;
+
             for (column..n) |row| {
                 const value = @abs(matrix[row * n + column]);
                 if (value > pivot_abs) {
@@ -101,34 +109,76 @@ pub const DenseLU = struct {
                     pivot_row = row;
                 }
             }
-            if (!std.math.isFinite(pivot_abs) or pivot_abs <= self.pivot_tolerance) return error.Singular;
-            if (pivot_row != column) {
-                for (0..n) |j| std.mem.swap(f64, &matrix[column * n + j], &matrix[pivot_row * n + j]);
-                std.mem.swap(usize, &next_pivots[column], &next_pivots[pivot_row]);
+
+            if (!std.math.isFinite(pivot_abs) or
+                pivot_abs <= self.pivot_tolerance)
+            {
+                return error.Singular;
             }
+
+            if (pivot_row != column) {
+                swapRows(matrix, n, column, pivot_row);
+                std.mem.swap(
+                    usize,
+                    &next_pivots[column],
+                    &next_pivots[pivot_row],
+                );
+            }
+
             const diagonal = matrix[column * n + column];
-            min_abs_pivot = @min(min_abs_pivot, @abs(diagonal));
-            max_abs_pivot = @max(max_abs_pivot, @abs(diagonal));
+            const abs_diagonal = @abs(diagonal);
+
+            min_abs_pivot = @min(min_abs_pivot, abs_diagonal);
+            max_abs_pivot = @max(max_abs_pivot, abs_diagonal);
+
             for (column + 1..n) |row| {
-                matrix[row * n + column] /= diagonal;
-                const multiplier = matrix[row * n + column];
-                for (column + 1..n) |j| matrix[row * n + j] -= multiplier * matrix[column * n + j];
+                const multiplier_index = row * n + column;
+
+                matrix[multiplier_index] /= diagonal;
+                const multiplier = matrix[multiplier_index];
+
+                for (column + 1..n) |j| {
+                    matrix[row * n + j] -=
+                        multiplier * matrix[column * n + j];
+                }
             }
         }
         self.allocator.free(self.lu);
         self.allocator.free(self.pivots);
         self.allocator.free(self.work);
+
         self.lu = matrix;
         self.pivots = next_pivots;
         self.work = next_work;
         self.n = n;
-        self.min_abs_pivot = if (n == 0) 1.0 else min_abs_pivot;
-        self.max_abs_pivot = if (n == 0) 1.0 else max_abs_pivot;
+
+        if (n == 0) {
+            self.min_abs_pivot = 1.0;
+            self.max_abs_pivot = 1.0;
+        } else {
+            self.min_abs_pivot = min_abs_pivot;
+            self.max_abs_pivot = max_abs_pivot;
+        }
+    }
+
+    /// Exchange two complete rows of a row-major square matrix in place.
+    inline fn swapRows(
+        matrix: []f64,
+        n: usize,
+        lhs_row: usize,
+        rhs_row: usize,
+    ) void {
+        const lhs = matrix[lhs_row * n ..][0..n];
+        const rhs = matrix[rhs_row * n ..][0..n];
+
+        for (lhs, rhs) |*lhs_value, *rhs_value| {
+            std.mem.swap(f64, lhs_value, rhs_value);
+        }
     }
 
     /// Re-factorize the existing `lu` buffer after the caller overwrites it
     /// with a new row-major matrix. No allocation is performed.
-    pub fn refactorizeInPlace(self: *DenseLU) DenseLuError!void {
+    pub fn refactorizeInPlace(self: *Self) DenseLuError!void {
         const n = self.n;
         if (self.lu.len != n * n or self.pivots.len != n or self.work.len != n) return error.DimensionMismatch;
         for (self.pivots, 0..) |*pivot, i| pivot.* = i;
@@ -164,12 +214,13 @@ pub const DenseLU = struct {
 
     /// Cheap stability signal used for refactorization policy. This is pivot
     /// spread, deliberately not presented as a rigorous matrix condition number.
-    pub fn pivotConditionEstimate(self: DenseLU) f64 {
+    pub fn pivotConditionEstimate(self: Self) f64 {
         if (self.min_abs_pivot <= 0.0) return std.math.inf(f64);
         return self.max_abs_pivot / self.min_abs_pivot;
     }
 
-    pub fn solve(self: *DenseLU, rhs: []f64) DenseLuError!void {
+    /// Solve `A*x = rhs` in place using the current `P*A = L*U` factors.
+    pub fn solve(self: *Self, rhs: []f64) DenseLuError!void {
         if (rhs.len != self.n) return error.DimensionMismatch;
         for (0..self.n) |i| {
             self.work[i] = rhs[self.pivots[i]];
@@ -184,7 +235,9 @@ pub const DenseLU = struct {
         @memcpy(rhs, self.work);
     }
 
-    pub fn solveTranspose(self: *DenseLU, rhs: []f64) DenseLuError!void {
+    /// Solve `A^T*x = rhs` in place, reversing the factor and permutation
+    /// order used by `solve`.
+    pub fn solveTranspose(self: *Self, rhs: []f64) DenseLuError!void {
         if (rhs.len != self.n) return error.DimensionMismatch;
         @memcpy(self.work, rhs);
 
@@ -291,6 +344,7 @@ fn solveTransposeGatherReference(lu: *const DenseLU, rhs: []f64, work: []f64) vo
     for (lu.pivots, 0..) |original, pivot_index| rhs[original] = work[pivot_index];
 }
 
+/// Test helper for scale-aware relative floating-point comparison.
 fn expectRelative(expected: f64, actual: f64, scale: f64) !void {
     const tolerance = scale * @max(1.0, @abs(expected));
     try std.testing.expectApproxEqAbs(expected, actual, tolerance);

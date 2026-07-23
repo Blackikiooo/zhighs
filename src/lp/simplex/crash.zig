@@ -11,7 +11,9 @@ const matrix = @import("matrix");
 /// Output of a crash plan: parallel arrays of (row, column) pairs that the
 /// engine should install as basic structural variables.
 pub const CrashPlanView = struct {
+    /// Basis row selected for each matched structural column.
     rows: []const u32,
+    /// Structural column paired with the row at the same index.
     columns: []const u32,
 };
 
@@ -21,17 +23,28 @@ pub const CrashPlanView = struct {
 pub const CrashScoring = enum { ltssf, bixby };
 
 pub const CrashWorkspace = struct {
+    /// Owner of all retained graph and output buffers.
     allocator: std.mem.Allocator,
-    row_starts: []usize = &.{}, // CSR row pointers (length = num_rows + 1)
-    row_columns: []u32 = &.{}, // Column index per retained nonzero
-    row_cursor: []usize = &.{}, // Scatter cursor used while building CSR
-    row_degree: []u32 = &.{}, // Live nonzero count per row
-    column_degree: []u32 = &.{}, // Live nonzero count per column
-    row_active: []bool = &.{}, // False once a row has been matched
-    column_active: []bool = &.{}, // False once a column has been matched
-    selected_rows: []u32 = &.{}, // Output: matched row for each selection
-    selected_columns: []u32 = &.{}, // Output: matched column for each selection
+    /// CSR row pointers for the temporary row-oriented incidence graph.
+    row_starts: []usize = &.{},
+    /// Structural column index for each retained matrix nonzero in CSR order.
+    row_columns: []u32 = &.{},
+    /// Per-row scatter cursor used only while constructing `row_columns`.
+    row_cursor: []usize = &.{},
+    /// Current unmatched retained-nonzero count for every row.
+    row_degree: []u32 = &.{},
+    /// Current unmatched retained-nonzero count for every structural column.
+    column_degree: []u32 = &.{},
+    /// Whether a row remains eligible for matching.
+    row_active: []bool = &.{},
+    /// Whether a structural column remains eligible for matching.
+    column_active: []bool = &.{},
+    /// Retained output buffer containing matched rows in selection order.
+    selected_rows: []u32 = &.{},
+    /// Retained output buffer containing columns paired with `selected_rows`.
+    selected_columns: []u32 = &.{},
 
+    /// Construct an empty, lazily allocated crash workspace.
     pub fn init(allocator: std.mem.Allocator) CrashWorkspace {
         return .{ .allocator = allocator };
     }
@@ -201,13 +214,20 @@ pub const CrashWorkspace = struct {
 
     /// A single (column, row) crash candidate with the data needed for ranking.
     const Candidate = struct {
+        /// Structural column proposed for the basis.
         column: usize,
+        /// Still-active row containing the candidate pivot.
         row: usize,
-        degree: u32, // Column degree at selection time
-        bound_penalty: u8, // 0 (free), 1 (boxed), 2 (fixed)
-        cost: f64, // Scaled |objective coefficient|
+        /// Live column degree at selection time.
+        degree: u32,
+        /// Bound classification: 0 one-sided/free, 1 boxed, 2 fixed.
+        bound_penalty: u8,
+        /// Absolute scaled objective coefficient.
+        cost: f64,
+        /// Live degree of the proposed pivot row.
         row_degree: u32,
-        pivot_magnitude: f64, // Scaled |coefficient|
+        /// Absolute scaled value of the proposed pivotal coefficient.
+        pivot_magnitude: f64,
 
         /// Return true if `self` should be selected before `other` under `scoring`.
         fn betterThan(self: Candidate, other: Candidate, scoring: CrashScoring) bool {

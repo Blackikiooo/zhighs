@@ -10,28 +10,46 @@ pub const PricingRule = enum { dantzig, devex, steepest_edge, partial, hyper_spa
 
 /// Result of a primal pricing scan: which column enters and the sign of the
 /// primal step that improves the objective.
-pub const EnteringChoice = struct { column: u32, direction: f64 };
+pub const EnteringChoice = struct {
+    /// Internal nonbasic column selected to enter.
+    column: u32,
+    /// Signed primal movement: +1 from lower, -1 from upper.
+    direction: f64,
+};
 
 /// Result of a dual pricing scan: which basic row leaves, which bound it
 /// violates, and by how much.
 pub const DualLeavingChoice = struct {
+    /// Basis row selected to leave.
     row: u32,
+    /// Lower or upper bound violated by the basic variable.
     bound: basis.BasisStatus,
+    /// Positive magnitude of the bound violation.
     violation: f64,
 };
 
+/// Mutable pricing policy and persistent partial-pricing counters.
 pub const Pricing = struct {
+    /// Active scoring/candidate selection rule.
     rule: PricingRule = .devex,
-    devex_reset_period: usize = 100, // Devex weights are reset after this many iterations
+    /// Pivots allowed before periodically resetting legacy Devex weights.
+    devex_reset_period: usize = 100,
+    /// Pricing operations performed by this policy instance.
     iterations: usize = 0,
     /// Persistent segmented-pricing cursor. A segment is selected once per
     /// pricing operation; only an all-segment miss can certify optimality.
-    partial_candidate_count: usize = 0, // Live entries in the candidate pool
-    partial_cached_searches: usize = 0, // Scans served from the pool since last refill
-    partial_refill_interval: usize = 1, // Max cached searches before a forced refill
-    partial_searches: usize = 0, // Total pricing calls (cached + full)
-    partial_scanned_entries: usize = 0, // Total nonzeros inspected across all scans
-    partial_full_scans: usize = 0, // Number of full refill scans performed
+    /// Live entries in caller-owned candidate storage.
+    partial_candidate_count: usize = 0,
+    /// Candidate-pool searches served since the last global refill.
+    partial_cached_searches: usize = 0,
+    /// Maximum cached searches allowed before a forced global refill.
+    partial_refill_interval: usize = 1,
+    /// Total partial-pricing calls, cached and global.
+    partial_searches: usize = 0,
+    /// Total columns/nonzeros inspected by partial pricing.
+    partial_scanned_entries: usize = 0,
+    /// Full candidate-pool refill scans performed.
+    partial_full_scans: usize = 0,
 
     /// Clear all partial-pricing statistics (called between solves).
     pub fn resetPartial(self: *Pricing) void {
@@ -354,12 +372,31 @@ pub const Pricing = struct {
     /// Weighted dual pricing. Score is the bound violation normalized by the
     /// row's edge weight; the largest score wins.
     pub fn chooseDualLeavingWeighted(self: *Pricing, value: []const f64, lower: []const f64, upper: []const f64, edge_weight: []const f64, tolerance: f64) ?DualLeavingChoice {
+        return self.chooseDualLeavingWeightedFrom(value, lower, upper, edge_weight, tolerance, 0);
+    }
+
+    /// HiGHS CHUZR dense scan. A strict merit comparison makes the cyclic
+    /// random start the deterministic tie-break without perturbing scores.
+    pub fn chooseDualLeavingWeightedFrom(
+        self: *Pricing,
+        value: []const f64,
+        lower: []const f64,
+        upper: []const f64,
+        edge_weight: []const f64,
+        tolerance: f64,
+        start: usize,
+    ) ?DualLeavingChoice {
         if (value.len != lower.len or value.len != upper.len) return null;
         if (edge_weight.len != 0 and edge_weight.len != value.len) return null;
+        if (value.len == 0) return null;
         self.iterations += 1;
         var best: ?DualLeavingChoice = null;
         var best_score = tolerance;
-        for (value, lower, upper, 0..) |basic_value, lb, ub, row| {
+        for (0..value.len) |offset| {
+            const row = (start + offset) % value.len;
+            const basic_value = value[row];
+            const lb = lower[row];
+            const ub = upper[row];
             const choice: ?DualLeavingChoice = if (basic_value < lb - tolerance)
                 .{ .row = @intCast(row), .bound = .at_lower, .violation = lb - basic_value }
             else if (basic_value > ub + tolerance)

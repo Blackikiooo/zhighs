@@ -66,6 +66,10 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
         }
     }
     self.observeAqDensity(basis.pivot_direction);
+    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+        basis.pivot_direction,
+        self.dual_work.changed_row_index,
+    );
     return .optimal;
 }
 
@@ -165,7 +169,16 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
     basis.primal[entering_col] = entering_value;
     basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
     basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
-    self.dual_phase_one.notePivot(entering_col, leaving_col, leaving_bound);
+    // A committed basis change invalidates rebuild-derived solution state.
+    // If the factor update below triggers reinversion, refactorizeBasis marks
+    // it fresh again and the dual controller completes the rebuild pipeline.
+    self.dual_control.has_fresh_rebuild = false;
+    self.dual_work.notePivot(entering_col, leaving_col, leaving_bound);
+    self.dual_work.updatePrimalInfeasibilityList(
+        basis,
+        self.dual_work.changed_row_index[0..self.dual_work.changed_row_count],
+        self.numerical.primal_tolerance,
+    );
     if (self.devex_reset_after_pivot) {
         self.initializePrimalDevexFramework();
         self.devex_reset_after_pivot = false;
@@ -205,17 +218,22 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
     return .optimal;
 }
 
+/// Recompute reduced costs from persistent dual `workCost + workShift`.
+///
+/// This is the exact reprice used by dual Phase I/II rebuilds; it overwrites
+/// the complete internal reduced-cost vector.
 pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
-    const costs = self.dual_phase_one.work_cost;
+    const costs = self.dual_work.work_cost;
+    const shifts = self.dual_work.work_shift;
     const original_count = problem.num_cols + problem.num_rows;
-    if (costs.len < original_count) return .numerical_failure;
-    for (basis.basic_index, 0..) |column, row| basis.dual[row] = if (column < original_count) costs[column] else 0.0;
+    if (costs.len < original_count or shifts.len < original_count) return .numerical_failure;
+    for (basis.basic_index, 0..) |column, row| basis.dual[row] = if (column < original_count) costs[column] + shifts[column] else 0.0;
     self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
     const pricing_started = self.statisticsTimestamp();
     defer self.recordPricingElapsed(pricing_started);
     for (0..problem.num_cols) |column| {
-        var reduced = costs[column];
+        var reduced = costs[column] + shifts[column];
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
@@ -225,7 +243,7 @@ pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_modu
         }
         basis.reduced_cost[column] = reduced;
     }
-    for (0..problem.num_rows) |row| basis.reduced_cost[problem.num_cols + row] = costs[problem.num_cols + row] - basis.dual[row];
+    for (0..problem.num_rows) |row| basis.reduced_cost[problem.num_cols + row] = costs[problem.num_cols + row] + shifts[problem.num_cols + row] - basis.dual[row];
     @memset(basis.reduced_cost[original_count..], 0.0);
     self.reduced_cost_update_count = 0;
     return .optimal;
@@ -329,6 +347,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
     return .optimal;
 }
 
+/// Recompute reduced costs exactly from the original scaled objective.
 pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const maximize = problem.objective_sense == .maximize;
@@ -373,7 +392,12 @@ pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.Probl
     return .optimal;
 }
 
+/// Rebuild the current basis factors and record the classified reason.
+///
+/// On success this also completes all factor-dependent state refresh performed
+/// by `finishRefactorization`.
 pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView, reason: RebuildReason) SolveStatus {
+    _ = self.dual_control.beginRebuild();
     const rebuild_started = self.statisticsTimestamp();
     defer {
         self.stats.rebuild_calls += 1;
@@ -396,9 +420,12 @@ pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemVie
         self.failure_site = .pivot_factorization;
         return .numerical_failure;
     };
-    return self.finishRefactorization();
+    const status = self.finishRefactorization();
+    if (status == .optimal) self.dual_control.finishRebuild();
+    return status;
 }
 
+/// Assemble and factorize the matrix columns named by the current basis head.
 pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: problem_module.ProblemView) factorization_module.FactorizationError!void {
     const basis = if (self.basis) |*value| value else return error.DimensionMismatch;
     return self.factorization.factorizeBasis(
@@ -410,6 +437,7 @@ pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: problem_module.Probl
     );
 }
 
+/// Reset update-dependent numerical state and rebuild exact edge weights.
 pub fn finishRefactorization(self: *SimplexEngine) SolveStatus {
     self.numerical.markRefactorized();
     self.observeFactorizationStability();
@@ -422,6 +450,7 @@ pub fn finishRefactorization(self: *SimplexEngine) SolveStatus {
     return .optimal;
 }
 
+/// Feed the current factor pivot spread into the numerical warning policy.
 pub fn observeFactorizationStability(self: *SimplexEngine) void {
     self.numerical.pivot_condition_estimate = self.factorization.pivotConditionEstimate();
     if (!std.math.isFinite(self.numerical.pivot_condition_estimate) or self.numerical.pivot_condition_estimate > 1e12)
@@ -435,10 +464,12 @@ pub fn recomputeBasicValues(self: *SimplexEngine, problem: problem_module.Proble
     return self.recomputeBasicValuesImpl(problem, true);
 }
 
+/// Recompute basic values without rejecting primal bound violations.
 pub fn recomputeBasicValuesUnchecked(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     return self.recomputeBasicValuesImpl(problem, false);
 }
 
+/// Reconstruct `B^-1 rhs`, optionally rejecting basic values outside bounds.
 pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.ProblemView, enforce_bounds: bool) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memcpy(basis.residual_work, basis.row_rhs);

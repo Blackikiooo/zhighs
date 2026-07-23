@@ -24,11 +24,15 @@ pub const Lexer = struct {
     index: usize = 0,
     /// Source locations are one-based for diagnostics and editor integration.
     line: usize = 1,
+    /// One-based byte column of the current cursor.
     column: usize = 1,
     /// Absolute byte offset of `input[0]`. It is zero for a whole-file lexer.
     base_offset: usize = 0,
+    /// Cursor at the first byte of the current physical line.
     line_start_index: usize = 0,
+    /// Maximum permitted bytes in one physical line.
     max_line_bytes: usize = std.math.maxInt(usize),
+    /// Maximum permitted bytes in one identifier or number token.
     max_token_bytes: usize = std.math.maxInt(usize),
 
     /// Start lexing a complete in-memory LP source.
@@ -36,6 +40,7 @@ pub const Lexer = struct {
         return .{ .input = input };
     }
 
+    /// Start whole-file lexing with explicit adversarial-input limits.
     pub fn initWithLimits(input: []const u8, max_line_bytes: usize, max_token_bytes: usize) Lexer {
         return .{ .input = input, .max_line_bytes = max_line_bytes, .max_token_bytes = max_token_bytes };
     }
@@ -88,21 +93,25 @@ pub const Lexer = struct {
         return checkpoint.next();
     }
 
+    /// Materialize the absolute source location at the current cursor.
     fn location(self: Lexer) Location {
         return .{ .byte_offset = self.base_offset + self.index, .line = self.line, .column = self.column };
     }
 
+    /// Advance one non-newline byte and its display column.
     fn advanceByte(self: *Lexer) void {
         self.index += 1;
         self.column += 1;
     }
 
+    /// Skip an LP backslash comment without consuming its terminating newline.
     fn skipComment(self: *Lexer) void {
         // In LP files a backslash starts a comment extending to end-of-line.
         // Do not consume '\n': it still carries grammar and location meaning.
         while (self.index < self.input.len and self.input[self.index] != '\n') self.advanceByte();
     }
 
+    /// Emit one single-byte punctuation token.
     fn single(self: *Lexer, tag: Tag) Token {
         const start = self.index;
         const source_location = self.location();
@@ -110,6 +119,7 @@ pub const Lexer = struct {
         return .{ .tag = tag, .lexeme = self.input[start..self.index], .location = source_location };
     }
 
+    /// Consume a required two-byte relational operator such as `<=`.
     fn relation(self: *Lexer, tag: Tag, expected: u8) Error!Token {
         const start = self.index;
         const source_location = self.location();
@@ -121,6 +131,7 @@ pub const Lexer = struct {
         return .{ .tag = tag, .lexeme = self.input[start..self.index], .location = source_location };
     }
 
+    /// Validate physical-line length, emit newline, and advance line state.
     fn newlineToken(self: *Lexer) Error!Token {
         if (self.index - self.line_start_index > self.max_line_bytes) return error.ResourceLimitExceeded;
         const start = self.index;
@@ -132,6 +143,7 @@ pub const Lexer = struct {
         return .{ .tag = .newline, .lexeme = self.input[start..self.index], .location = source_location };
     }
 
+    /// Scan a decimal/scientific number spelling without converting it.
     fn number(self: *Lexer) Error!Token {
         // Sign characters are separate tokens so the parser can distinguish a
         // unary sign from the operator between two linear terms.
@@ -164,6 +176,7 @@ pub const Lexer = struct {
         return .{ .tag = .number, .lexeme = self.input[start..self.index], .location = source_location };
     }
 
+    /// Scan an LP symbol until punctuation or whitespace delimiter.
     fn identifier(self: *Lexer) Error!Token {
         const start = self.index;
         const source_location = self.location();
@@ -173,6 +186,7 @@ pub const Lexer = struct {
         return .{ .tag = .identifier, .lexeme = self.input[start..self.index], .location = source_location };
     }
 
+    /// Return whether a byte terminates an identifier token.
     fn isDelimiter(char: u8) bool {
         // Keywords are intentionally returned as identifiers. Section and
         // context-specific keyword recognition belongs to the parser, keeping

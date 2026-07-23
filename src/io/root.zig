@@ -65,6 +65,7 @@ pub fn writeFile(io_context: std.Io, allocator: std.mem.Allocator, path: []const
     file_writer.interface.flush() catch return error.WriteFailed;
 }
 
+/// Translate platform-specific open failures to the stable public error set.
 fn mapOpenError(err: anyerror) IoError {
     return switch (err) {
         error.FileNotFound => error.FileNotFound,
@@ -73,6 +74,7 @@ fn mapOpenError(err: anyerror) IoError {
     };
 }
 
+/// Derive the model name from the basename after removing compression and format suffixes.
 fn modelName(path: []const u8, kind: FileKind) []const u8 {
     var base = std.fs.path.basename(path);
     if (kind.compression != .none) base = base[0 .. base.len - std.fs.path.extension(base).len];

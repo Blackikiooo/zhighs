@@ -3,11 +3,19 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+/// Owned, unique names used during deterministic serialization.
 pub const Names = struct {
+    /// Allocator owning both name tables and every string in them.
     allocator: std.mem.Allocator,
+    /// One owned printable name per structural column.
     columns: [][]u8,
+    /// One owned printable name per model row.
     rows: [][]u8,
 
+    /// Copy retained names or generate deterministic `xN`/`cN` fallbacks.
+    ///
+    /// Duplicate names are rejected because most interchange formats resolve
+    /// references by name and cannot represent an ambiguous symbol table.
     pub fn init(allocator: std.mem.Allocator, view: types.ModelView) types.IoError!Names {
         if ((view.col_names.len != 0 and view.col_names.len != view.numCols()) or
             (view.row_names.len != 0 and view.row_names.len != view.numRows())) return error.InvalidDimensions;
@@ -47,6 +55,7 @@ pub const Names = struct {
         return .{ .allocator = allocator, .columns = columns, .rows = rows };
     }
 
+    /// Free every owned string and both outer tables.
     pub fn deinit(self: *Names) void {
         for (self.columns) |name| self.allocator.free(name);
         for (self.rows) |name| self.allocator.free(name);
@@ -56,11 +65,16 @@ pub const Names = struct {
     }
 };
 
+/// Format values into `writer`, translating backend errors to `IoError`.
+///
+/// `allocator` is intentionally reserved for future writers that need a
+/// temporary formatting buffer; the current implementation does not allocate.
 pub fn print(writer: *std.Io.Writer, allocator: std.mem.Allocator, comptime format: []const u8, args: anytype) types.IoError!void {
     _ = allocator; // Kept in the signature for writer-policy evolution.
     writer.print(format, args) catch return error.WriteFailed;
 }
 
+/// Write `text` in full or return the stable public write failure.
 pub fn write(writer: *std.Io.Writer, text: []const u8) types.IoError!void {
     writer.writeAll(text) catch return error.WriteFailed;
 }

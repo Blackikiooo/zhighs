@@ -13,52 +13,93 @@ const ModelData = @import("model_data.zig").ModelData;
 const StringArena = @import("string_arena.zig").StringArena;
 
 pub const Column = struct {
+    /// Borrowed unique symbol used while resolving parser references.
     name: []const u8,
+    /// Linear objective coefficient.
     cost: f64 = 0.0,
+    /// Inclusive variable lower bound.
     lower: f64 = 0.0,
+    /// Inclusive variable upper bound.
     upper: f64 = std.math.inf(f64),
+    /// Variable domain/integrality classification.
     kind: types.VariableType = .continuous,
 };
 
 pub const Row = struct {
+    /// Optional borrowed row symbol.
     name: ?[]const u8,
+    /// Inclusive row-activity lower bound.
     lower: f64 = -std.math.inf(f64),
+    /// Inclusive row-activity upper bound.
     upper: f64 = std.math.inf(f64),
 };
 
 pub const Builder = struct {
+    /// Owner of all temporary semantic arrays.
     allocator: std.mem.Allocator,
+    /// Borrowed model name copied only during final publication.
     name: []const u8 = "",
+    /// Objective direction parsed from the source.
     objective_sense: types.ObjectiveSense = .minimize,
+    /// Constant objective term.
     objective_offset: f64 = 0.0,
+    /// Temporary structural-column metadata.
     columns: std.ArrayListUnmanaged(Column) = .empty,
+    /// Temporary row metadata.
     rows: std.ArrayListUnmanaged(Row) = .empty,
+    /// General unordered coordinate stream used by MPS and generic callers.
     terms: std.ArrayListUnmanaged(Term) = .empty,
+    /// LP-specific linked-node pool grouped by structural column.
     column_terms: std.ArrayListUnmanaged(ColumnTerm) = .empty,
+    /// Head/tail descriptor for each LP column chain.
     column_chains: std.ArrayListUnmanaged(ColumnChain) = .empty,
+    /// Whether terms must use the LP column-chain fast path.
     column_term_mode: bool = false,
+    /// Configured semantic row limit.
     max_rows: usize = std.math.maxInt(usize),
+    /// Configured semantic column limit.
     max_columns: usize = std.math.maxInt(usize),
+    /// Configured temporary coordinate/node limit.
     max_matrix_terms: usize = std.math.maxInt(usize),
+    /// Configured sum limit for retained unique name bytes.
     max_name_bytes: usize = std.math.maxInt(usize),
+    /// Name bytes accepted so far.
     name_bytes: usize = 0,
+    /// Cooperative cancellation poller for long finalization loops.
     control: types.ParseControl = types.ParseControl.init(.{}),
 
     /// Strong IDs make invalid dimensions fail at append time and keep each
     /// term at 16 bytes with the default 32-bit index configuration.
-    const Term = struct { row: foundation.RowId, col: foundation.ColId, value: f64 };
-    const no_term = std.math.maxInt(foundation.HUInt);
-    const ColumnTerm = struct {
+    const Term = struct {
+        /// Temporary row coordinate.
         row: foundation.RowId,
-        next: foundation.HUInt = no_term,
+        /// Temporary structural-column coordinate.
+        col: foundation.ColId,
+        /// Finite nonzero coefficient.
         value: f64,
     };
-    const ColumnChain = struct { head: foundation.HUInt = no_term, tail: foundation.HUInt = no_term };
+    const no_term = std.math.maxInt(foundation.HUInt);
+    const ColumnTerm = struct {
+        /// Row coordinate within this column's ordered chain.
+        row: foundation.RowId,
+        /// Next node index, or `no_term` at chain end.
+        next: foundation.HUInt = no_term,
+        /// Merged finite coefficient for this coordinate.
+        value: f64,
+    };
+    const ColumnChain = struct {
+        /// First node index, or `no_term` for an empty column.
+        head: foundation.HUInt = no_term,
+        /// Last node index, used for O(1) append and duplicate merging.
+        tail: foundation.HUInt = no_term,
+    };
 
+    /// Construct an empty semantic builder with unrestricted default limits.
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{ .allocator = allocator };
     }
 
+    /// Copy resource limits and cancellation policy from public read options.
     pub fn configureLimits(self: *Builder, options: types.ReadOptions) void {
         self.max_rows = options.max_rows;
         self.max_columns = options.max_columns;
@@ -67,6 +108,7 @@ pub const Builder = struct {
         self.control = types.ParseControl.init(options);
     }
 
+    /// Release every temporary semantic and term array.
     pub fn deinit(self: *Builder) void {
         self.columns.deinit(self.allocator);
         self.rows.deinit(self.allocator);
@@ -82,6 +124,7 @@ pub const Builder = struct {
         self.column_term_mode = true;
     }
 
+    /// Validate and append column metadata, returning its stable temporary index.
     pub fn addColumn(self: *Builder, column: Column) types.IoError!usize {
         if (column.lower > column.upper) return error.InvalidBounds;
         if (self.columns.items.len >= self.max_columns) return error.ResourceLimitExceeded;
@@ -96,6 +139,7 @@ pub const Builder = struct {
         return index;
     }
 
+    /// Append row metadata after enforcing row and name-byte limits.
     pub fn addRow(self: *Builder, row: Row) types.IoError!usize {
         if (self.rows.items.len >= self.max_rows) return error.ResourceLimitExceeded;
         const name_len = if (row.name) |name| name.len else 0;
@@ -107,6 +151,7 @@ pub const Builder = struct {
         return index;
     }
 
+    /// Append one checked generic matrix coordinate.
     pub fn addTerm(self: *Builder, row: usize, col: usize, value: f64) types.IoError!void {
         if (self.column_term_mode) return error.InvalidDimensions;
         if (row >= self.rows.items.len or col >= self.columns.items.len) return error.InvalidDimensions;
@@ -150,6 +195,7 @@ pub const Builder = struct {
         chain.tail = node_index;
     }
 
+    /// Canonicalize the active term representation and publish owned model data.
     pub fn finish(self: *Builder, options: types.ReadOptions) types.IoError!ModelData {
         if (self.column_term_mode) return self.finishColumnTerms(options);
         return self.finishTerms(options, false);
@@ -217,6 +263,7 @@ pub const Builder = struct {
         return self.finishTerms(options, true);
     }
 
+    /// Freeze the generic triplet stream, optionally trusting column/row order.
     fn finishTerms(self: *Builder, options: types.ReadOptions, already_ordered: bool) types.IoError!ModelData {
         if (!std.math.isFinite(options.zero_tolerance) or options.zero_tolerance < 0.0) return error.InvalidTolerance;
         try self.control.checkNow();
@@ -252,6 +299,7 @@ pub const Builder = struct {
         return self.finishWithMatrix(options, csc);
     }
 
+    /// Merge adjacent duplicate coordinates and discard final numerical zeros.
     fn mergeTermsInPlace(self: *Builder, zero_tolerance: f64) types.IoError!void {
         var read: usize = 0;
         var write: usize = 0;
@@ -272,6 +320,7 @@ pub const Builder = struct {
         self.terms.shrinkRetainingCapacity(write);
     }
 
+    /// Check nondecreasing column/row order while polling cancellation.
     fn termsAreOrdered(self: *Builder) types.IoError!bool {
         if (self.terms.items.len < 2) return true;
         for (self.terms.items[1..], self.terms.items[0 .. self.terms.items.len - 1]) |current, previous| {
@@ -284,6 +333,7 @@ pub const Builder = struct {
         return true;
     }
 
+    /// Transfer canonical CSC ownership and copy semantic/name arrays to ModelData.
     fn finishWithMatrix(self: *Builder, options: types.ReadOptions, csc: matrix.CscMatrix) types.IoError!ModelData {
         var owned_csc = csc;
         var owns_csc = true;
@@ -341,6 +391,7 @@ pub const Builder = struct {
     }
 };
 
+/// Order temporary coordinates by column then row.
 fn termLessThan(_: void, lhs: Builder.Term, rhs: Builder.Term) bool {
     const lhs_col = lhs.col.toUsize();
     const rhs_col = rhs.col.toUsize();
@@ -348,6 +399,7 @@ fn termLessThan(_: void, lhs: Builder.Term, rhs: Builder.Term) bool {
     return lhs.row.toUsize() < rhs.row.toUsize();
 }
 
+/// Return whether two temporary terms address the same matrix coordinate.
 fn sameCoordinate(lhs: Builder.Term, rhs: Builder.Term) bool {
     return lhs.col == rhs.col and lhs.row == rhs.row;
 }
@@ -558,6 +610,7 @@ test "packed storage supports an empty model" {
     try std.testing.expectEqual(@as(usize, 0), model.matrix.nnz());
 }
 
+/// Exercise generic-term finalization under the testing failing allocator.
 fn buildPackedForAllocationFailureTest(allocator: std.mem.Allocator) !void {
     var builder = Builder.init(allocator);
     defer builder.deinit();
@@ -575,6 +628,7 @@ test "packed storage cleans up every allocation failure point" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, buildPackedForAllocationFailureTest, .{});
 }
 
+/// Exercise LP column-chain finalization under the testing failing allocator.
 fn buildColumnTermsForAllocationFailureTest(allocator: std.mem.Allocator) !void {
     var builder = Builder.init(allocator);
     defer builder.deinit();
