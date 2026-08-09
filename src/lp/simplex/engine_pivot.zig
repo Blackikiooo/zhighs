@@ -507,13 +507,32 @@ pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: problem_module.Probl
 pub fn finishRefactorization(self: *SimplexEngine) SolveStatus {
     self.numerical.markRefactorized();
     self.observeFactorizationStability();
-    self.dual_edge_weights_valid = false;
+    // Reinversion does not change the basis, so the DSE recurrence remains
+    // valid in original-objective Phase II, matching HiGHS' weight lifecycle.
+    // Keep exact recomputation in auxiliary Phase I: its shifted costs and
+    // fallback transitions are more sensitive to accumulated weight drift.
+    if (self.dual_control.phase != .phase_two) self.dual_edge_weights_valid = false;
     self.dual_row_index = null;
     if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
         self.failure_site = .pivot_edge_weights;
         return .numerical_failure;
     }
     return .optimal;
+}
+
+test "reinversion preserves DSE validity only in original-objective Phase II" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    // Devex avoids requesting a basis in this lifecycle-only unit test.
+    engine.pricing.rule = .devex;
+    engine.dual_edge_weights_valid = true;
+    engine.dual_control.enterPhase(.phase_two);
+    try std.testing.expectEqual(SolveStatus.optimal, engine.finishRefactorization());
+    try std.testing.expect(engine.dual_edge_weights_valid);
+
+    engine.dual_control.enterPhase(.phase_one);
+    try std.testing.expectEqual(SolveStatus.optimal, engine.finishRefactorization());
+    try std.testing.expect(!engine.dual_edge_weights_valid);
 }
 
 /// Feed the current factor pivot spread into the numerical warning policy.
