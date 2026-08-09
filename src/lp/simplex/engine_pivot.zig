@@ -511,7 +511,12 @@ pub fn finishRefactorization(self: *SimplexEngine) SolveStatus {
     // valid in original-objective Phase II, matching HiGHS' weight lifecycle.
     // Keep exact recomputation in auxiliary Phase I: its shifted costs and
     // fallback transitions are more sensitive to accumulated weight drift.
-    if (self.dual_control.phase != .phase_two) self.dual_edge_weights_valid = false;
+    // A zero-pivot Phase I has not changed the logical basis or its exact unit
+    // weights, so its cleanup reinversion is safe to preserve as well.
+    const unchanged_phase_one = self.dual_control.phase == .phase_one and
+        self.dual_dse_updates_since_start == 0;
+    if (self.dual_control.phase != .phase_two and !unchanged_phase_one)
+        self.dual_edge_weights_valid = false;
     self.dual_row_index = null;
     if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
         self.failure_site = .pivot_edge_weights;
@@ -531,6 +536,10 @@ test "reinversion preserves DSE validity only in original-objective Phase II" {
     try std.testing.expect(engine.dual_edge_weights_valid);
 
     engine.dual_control.enterPhase(.phase_one);
+    try std.testing.expectEqual(SolveStatus.optimal, engine.finishRefactorization());
+    try std.testing.expect(engine.dual_edge_weights_valid);
+
+    engine.dual_dse_updates_since_start = 1;
     try std.testing.expectEqual(SolveStatus.optimal, engine.finishRefactorization());
     try std.testing.expect(!engine.dual_edge_weights_valid);
 }
