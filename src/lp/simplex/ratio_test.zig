@@ -65,6 +65,39 @@ pub const RatioTest = struct {
         };
     }
 
+    /// HiGHS primal CHUZR: use a factor-update-dependent pivot threshold in
+    /// pass one, relax bounds by the primal feasibility tolerance, then take
+    /// the largest pivot that lies strictly inside the relaxed step.
+    pub fn chooseLeavingHighs(
+        self: *const RatioTest,
+        direction: []const f64,
+        rhs: []const f64,
+        update_count: usize,
+        primal_feasibility_tolerance: f64,
+    ) LeavingChoice {
+        _ = self;
+        if (direction.len != rhs.len) return .{};
+        const alpha_tolerance: f64 = if (update_count < 10) 1e-9 else if (update_count < 20) 1e-8 else 1e-7;
+        var relaxed_step = std.math.inf(f64);
+        for (direction, rhs) |coefficient, margin| {
+            if (coefficient <= alpha_tolerance) continue;
+            relaxed_step = @min(relaxed_step, (@max(margin, 0.0) + primal_feasibility_tolerance) / coefficient);
+        }
+        if (!std.math.isFinite(relaxed_step)) return .{ .step = relaxed_step };
+
+        var choice = LeavingChoice{ .step = std.math.inf(f64) };
+        var best_pivot: f64 = 0.0;
+        for (direction, rhs, 0..) |coefficient, margin, row| {
+            if (coefficient <= alpha_tolerance) continue;
+            const exact_step = @max(margin / coefficient, 0.0);
+            if (exact_step < relaxed_step and coefficient > best_pivot) {
+                best_pivot = coefficient;
+                choice = .{ .row = @intCast(row), .step = exact_step };
+            }
+        }
+        return choice;
+    }
+
     /// Harris selection with deterministic bounded primal perturbations.
     /// Positive ranks provide a tiny virtual margin to zero-valued basics, so
     /// a degenerate face produces real lexicographic progress. The caller
@@ -475,6 +508,15 @@ test "Harris ratio test prefers stable pivot within relaxed bound" {
     const choice = test_rule.chooseLeaving(&[_]f64{ 1e-4, 1.0 }, &[_]f64{ 1e-4, 1.000001 });
     try std.testing.expectEqual(@as(?u32, 1), choice.row);
     try std.testing.expectApproxEqAbs(@as(f64, 1.000001), choice.step, 1e-12);
+}
+
+test "HiGHS primal CHUZR raises the pivot threshold along an FT chain" {
+    const test_rule = RatioTest{};
+    const early = test_rule.chooseLeavingHighs(&.{ 5e-8, 1.0 }, &.{ 0.0, 1.0 }, 0, 1e-7);
+    try std.testing.expectEqual(@as(?u32, 0), early.row);
+    const late = test_rule.chooseLeavingHighs(&.{ 5e-8, 1.0 }, &.{ 0.0, 1.0 }, 20, 1e-7);
+    try std.testing.expectEqual(@as(?u32, 1), late.row);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), late.step, 1e-12);
 }
 
 test "perturbed Harris gives a bounded positive step on a degenerate tie" {

@@ -73,7 +73,12 @@ pub fn chooseLeavingWithPolicy(self: *SimplexEngine, allow_bland: bool) PrimalLe
             self.numerical.primal_tolerance,
         )
     else
-        self.ratio_test.chooseLeaving(basis.ratio_direction, basis.basic_margin);
+        self.ratio_test.chooseLeavingHighs(
+            basis.ratio_direction,
+            basis.basic_margin,
+            self.factorization.update_count,
+            self.numerical.primal_tolerance,
+        );
     if (choice.row == null) return .{ .status = .unbounded };
     const row = choice.row.?;
     const bound: basis_module.BasisStatus = if (basis.pivot_direction[@intCast(row)] > 0) .at_lower else .at_upper;
