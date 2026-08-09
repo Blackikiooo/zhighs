@@ -963,6 +963,13 @@ pub const SimplexEngine = struct {
             .automatic => CrashStrategy.ltssf,
         };
         const crash_max_columns = if (control.crash_strategy == .automatic and
+            control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
+            // Compact bases are cheap to validate and refactor. Let LTSSF use
+            // every matched structural column instead of retaining the usual
+            // quarter of logical anchors; the denser starting basis can remove
+            // several dual Phase-I pivots without increasing numerical risk.
+            @as(?usize, problem.num_rows)
+        else if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 96 and problem.num_rows <= 128 and
             @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3)
             @as(?usize, 25)
