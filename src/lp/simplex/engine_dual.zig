@@ -1213,6 +1213,11 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             }
         }
     } else {
+        // Cache the row-scaled BTRAN vector once. Recomputing this product for
+        // every matrix entry made column pricing pay an avoidable multiply per
+        // nonzero; `rhs_work` is dead until the later BFRT/FTRAN stages.
+        for (basis.dual_row, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
+            scaled_dual.* = dual_value * scale;
         for (0..problem.num_cols) |column| {
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
@@ -1220,7 +1225,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
                 if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                 const row_index = matrix_row.toUsize();
-                alpha += basis.dual_row[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
+                alpha += basis.rhs_work[row_index] * coefficient * basis.column_scale[column];
             }
             basis.tableau[column] = alpha;
         }
