@@ -162,6 +162,9 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
         if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
         if (row == leaving_row) continue;
+        // HiGHS traverses the indexed pivotal column and therefore never
+        // evaluates the recurrence for exact structural zeros.
+        if (alpha == 0.0) continue;
         const ratio = alpha / pivot;
         const updated = weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
         if (!std.math.isFinite(updated)) return .numerical_failure;
