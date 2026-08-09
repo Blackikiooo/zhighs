@@ -457,6 +457,10 @@ pub const Factorization = struct {
         defer self.recordElapsed(&self.stats.ftran_ns, started);
         self.stats.ftran_calls += 1;
         self.stats.sparse_ftran_dispatches += 1;
+        if (input_indices.len * 8 < self.dimension)
+            self.stats.hyper_ftran_dispatches += 1
+        else
+            self.stats.dense_ftran_dispatches += 1;
         if (self.statistics_io != null) {
             self.stats.ftran_rhs_samples += 1;
             self.stats.ftran_rhs_nonzeros += input_indices.len;

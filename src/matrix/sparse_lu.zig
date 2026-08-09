@@ -389,6 +389,35 @@ pub const SparseLU = struct {
         try self.ensureFt();
         const n = self.dimension;
         if (rhs.len != n) return error.DimensionMismatch;
+        if (input_indices.len * 8 < n) {
+            // Match HiGHS ftranL's hyper-sparse path while retaining the
+            // post-L/FT spike consumed by the Forrest--Tomlin update. U is
+            // still solved through the mutable FT representation below.
+            self.ensureHyperViews();
+            self.clearActive();
+            for (input_indices) |row| {
+                if (row >= n) return error.DimensionMismatch;
+                const position = self.row_position[row];
+                if (!self.marked[position]) {
+                    self.marked[position] = true;
+                    self.active[self.active_count] = position;
+                    self.active_count += 1;
+                }
+                // Indexed column assembly publishes the final value at each
+                // row, so duplicate model entries retain dense-path semantics.
+                self.work[position] = rhs[row];
+            }
+            for (0..n) |k| if (self.marked[k]) {
+                const solved = self.work[k];
+                for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, value|
+                    self.accumulate(self.row_position[row], -value * solved);
+            };
+            @memset(rhs[0..n], 0.0);
+            for (self.active[0..self.active_count]) |position|
+                rhs[self.pivot_columns[position]] = self.work[position];
+            try self.ft.prepareFtran(rhs, true);
+            return self.ft.solveUpper(rhs);
+        }
         @memset(self.work[0..n], 0.0);
         for (input_indices) |row| {
             if (row >= n) return error.DimensionMismatch;
@@ -1024,6 +1053,45 @@ test "factor graph hyper sparse FTRAN BTRAN and adaptive dispatch match dense" {
     try lu.solve(&dense);
     try lu.solveAdaptive(&hyper, &[_]u32{0}, false);
     try std.testing.expectEqualSlices(f64, &dense, &hyper);
+}
+
+test "hyper sparse update FTRAN preserves the captured dense solution" {
+    const foundation = @import("foundation");
+    const n = 16;
+    var starts: [n + 1]foundation.HUInt = undefined;
+    var rows: [2 * n - 1]foundation.RowId = undefined;
+    var values: [2 * n - 1]f64 = undefined;
+    var entry: usize = 0;
+    for (0..n) |column| {
+        starts[column] = @intCast(entry);
+        rows[entry] = foundation.RowId.fromUsizeAssumeValid(column);
+        values[entry] = 2.0;
+        entry += 1;
+        if (column + 1 < n) {
+            rows[entry] = foundation.RowId.fromUsizeAssumeValid(column + 1);
+            values[entry] = 0.5;
+            entry += 1;
+        }
+    }
+    starts[n] = @intCast(entry);
+    const basis = sparse_basis.SparseBasisView{
+        .dimension = n,
+        .starts = &starts,
+        .rows = &rows,
+        .values = &values,
+    };
+    var lu = SparseLU.init(std.testing.allocator);
+    defer lu.deinit();
+    try lu.factorize(basis);
+
+    var dense_rhs = [_]f64{0.0} ** n;
+    dense_rhs[0] = 3.0;
+    try lu.solveForUpdate(&dense_rhs);
+    var indexed_rhs = [_]f64{-99.0} ** n;
+    indexed_rhs[0] = 3.0;
+    try lu.solveForUpdateSparse(&indexed_rhs, &.{0});
+    for (dense_rhs, indexed_rhs) |expected, actual|
+        try std.testing.expectApproxEqAbs(expected, actual, 1e-12);
 }
 
 test "sparse ordering backends can be forced without changing the public factors" {
