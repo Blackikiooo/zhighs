@@ -970,6 +970,14 @@ pub const SimplexEngine = struct {
             // several dual Phase-I pivots without increasing numerical risk.
             @as(?usize, problem.num_rows)
         else if (control.crash_strategy == .automatic and
+            control.crash_max_columns == null and problem.num_rows >= 65 and problem.num_rows <= 95 and
+            problem.num_cols >= problem.num_rows * 8)
+            // Ultrawide network-style models can provide a complete, very
+            // sparse structural matching. Validate that full basis: retaining
+            // even a few logical anchors discards the crash at the coverage
+            // gate and needlessly repeats the logical-basis pivot sequence.
+            @as(?usize, problem.num_rows)
+        else if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 96 and problem.num_rows <= 128 and
             @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3)
             @as(?usize, 25)
