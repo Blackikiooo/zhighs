@@ -1141,7 +1141,14 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
     if (row >= problem.num_rows) return .numerical_failure;
-    @memset(basis.dual_row, 0.0);
+    // The adaptive BTRAN publishes the exact positions materialized in this
+    // same workspace. Clear that producer-owned support instead of the whole
+    // row; fall back to a dense clear if a sparse FTRAN or dense BTRAN revoked
+    // ownership since the previous pivotal row.
+    const previous_dual_row = self.factorization.lastSparseSolveIndices();
+    if (previous_dual_row.len == 0)
+        @memset(basis.dual_row, 0.0)
+    else for (previous_dual_row) |index| basis.dual_row[index] = 0.0;
     basis.dual_row[row] = 1.0;
     // Unit-vector BTRAN for pivotal row: wire sparse-index dispatch.
     const ep_index = [_]u32{@intCast(row)};

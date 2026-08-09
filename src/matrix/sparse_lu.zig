@@ -98,6 +98,10 @@ pub const SparseLU = struct {
     /// Valid prefix of `hyper_output` produced by the last adaptive sparse
     /// solve. Callers can use it to clear/reduce only materialized entries.
     last_sparse_output_count: usize = 0,
+    /// Whether the published support belongs to a transpose solve. A sparse
+    /// forward solve reuses `hyper_output` and therefore revokes BTRAN support
+    /// ownership even though dense solves leave it intact.
+    last_sparse_output_transpose: bool = false,
     /// Reachability marks used by hyper-sparse triangular traversal.
     marked: []bool = &.{},
     /// U column-view offsets derived from packed U rows.
@@ -602,6 +606,7 @@ pub const SparseLU = struct {
     /// is always dense.
     pub fn solveAdaptive(self: *SparseLU, rhs: []f64, input_indices: []const u32, transpose: bool) SparseLuError!void {
         self.last_sparse_output_count = 0;
+        self.last_sparse_output_transpose = false;
         if (input_indices.len * 8 >= self.dimension) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         const count = if (transpose)
             try self.solveTransposeHyperSparse(rhs, input_indices, self.hyper_output)
@@ -615,10 +620,12 @@ pub const SparseLU = struct {
         @memset(rhs[0..self.dimension], 0.0);
         for (self.hyper_output[0..count]) |index| rhs[index] = self.work[index];
         self.last_sparse_output_count = count;
+        self.last_sparse_output_transpose = transpose;
     }
 
     /// Sparse support materialized by the most recent adaptive solve.
     pub fn lastSparseOutputIndices(self: *const SparseLU) []const u32 {
+        if (!self.last_sparse_output_transpose) return &.{};
         return self.hyper_output[0..self.last_sparse_output_count];
     }
 
