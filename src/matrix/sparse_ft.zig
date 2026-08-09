@@ -90,6 +90,11 @@ pub const SparseForrestTomlin = struct {
 
     /// Reusable dense solve workspace.
     work: []f64 = &.{},
+    /// Stable IDs written by the previous `captureEp` solve. Tracking the
+    /// producer-owned support permits sparse clearing without relying on a
+    /// caller-maintained zero complement.
+    ep_touched: []u32 = &.{},
+    ep_touched_count: usize = 0,
     /// Captured pre-upper-solve spike used to construct an update.
     captured_aq: []f64 = &.{},
     /// Whether `captured_aq` contains a valid pending spike.
@@ -120,6 +125,7 @@ pub const SparseForrestTomlin = struct {
         self.allocator.free(self.correction_indices);
         self.allocator.free(self.correction_values);
         self.allocator.free(self.work);
+        self.allocator.free(self.ep_touched);
         self.allocator.free(self.captured_aq);
         self.* = init(self.allocator);
     }
@@ -148,7 +154,9 @@ pub const SparseForrestTomlin = struct {
         self.free_head = none;
         self.update_count = 0;
         self.correction_count = 0;
+        self.ep_touched_count = 0;
         self.aq_ready = false;
+        @memset(self.work[0..n], 0.0);
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..self.logical_capacity], none);
         @memset(self.pivot_lookup[0..n], none);
@@ -208,6 +216,7 @@ pub const SparseForrestTomlin = struct {
         total += std.mem.sliceAsBytes(self.correction_indices).len;
         total += std.mem.sliceAsBytes(self.correction_values).len;
         total += std.mem.sliceAsBytes(self.work).len;
+        total += std.mem.sliceAsBytes(self.ep_touched).len;
         total += std.mem.sliceAsBytes(self.captured_aq).len;
         return total;
     }
@@ -291,9 +300,22 @@ pub const SparseForrestTomlin = struct {
         if (leaving_id >= self.dimension) return error.DimensionMismatch;
         const first_logical = self.pivot_lookup[leaving_id];
         if (first_logical == none) return error.Singular;
-        @memset(self.work[0..self.dimension], 0.0);
+        for (self.ep_touched[0..self.ep_touched_count]) |pivot| self.work[pivot] = 0.0;
+        self.ep_touched_count = 0;
         self.work[leaving_id] = 1.0;
-        try self.solveMutableUpperTransposeFrom(self.work[0..self.dimension], first_logical);
+        for (first_logical..self.logical_count) |logical| {
+            const pivot = self.pivot_ids[logical];
+            if (pivot == none) continue;
+            var value = self.work[pivot];
+            var entry = self.column_head[logical];
+            while (entry != none) : (entry = self.column_next[entry])
+                value -= self.work[self.entry_row[entry]] * self.entry_value[entry];
+            value /= self.pivot_values[logical];
+            if (!std.math.isFinite(value)) return error.NumericalFailure;
+            self.work[pivot] = value;
+            self.ep_touched[self.ep_touched_count] = pivot;
+            self.ep_touched_count += 1;
+        }
     }
 
     /// Delete the pivotal U row/column, append the captured FTRAN spike, and
@@ -400,6 +422,7 @@ pub const SparseForrestTomlin = struct {
         try self.resizeRetained(&self.pivot_lookup, capacity);
         try self.resizeRetained(&self.row_head, capacity);
         try self.resizeRetained(&self.work, capacity);
+        try self.resizeRetained(&self.ep_touched, capacity);
         try self.resizeRetained(&self.captured_aq, capacity);
     }
     /// Grow arrays addressed by mutable logical U column.
@@ -453,4 +476,23 @@ fn grow(current: usize, required: usize) error{Overflow}!usize {
     while (capacity < required) capacity = std.math.add(usize, capacity, capacity / 2 + 8) catch return error.Overflow;
     if (capacity > std.math.maxInt(u32)) return error.Overflow;
     return capacity;
+}
+
+test "captureEp clears retained workspace by its producer-owned support" {
+    var ft = SparseForrestTomlin.init(std.testing.allocator);
+    defer ft.deinit();
+    const pivots = [_]u32{ 0, 1, 2 };
+    const diagonal = [_]f64{ 2, 3, 4 };
+    const starts = [_]usize{ 0, 0, 0, 0 };
+    try ft.reset(&pivots, &diagonal, &starts, &.{}, &.{});
+
+    // A retained allocation may contain values from an older factorization.
+    @memset(ft.work[0..3], 99.0);
+    try ft.reset(&pivots, &diagonal, &starts, &.{}, &.{});
+    try ft.captureEp(1);
+    try std.testing.expectEqualSlices(f64, &[_]f64{ 0, 1.0 / 3.0, 0 }, ft.work[0..3]);
+
+    // The next capture clears exactly the IDs written by the previous suffix.
+    try ft.captureEp(0);
+    try std.testing.expectEqualSlices(f64, &[_]f64{ 0.5, 0, 0 }, ft.work[0..3]);
 }
