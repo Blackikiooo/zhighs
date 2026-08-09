@@ -186,15 +186,38 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
 }
 
 /// HiGHS `switchToDevex` density/frequency criterion. The explicit budget is
-/// a hard experimental cap; zero selects this automatic policy.
+/// a Phase-I safety cap: auxiliary costs can otherwise keep an inaccurate or
+/// unproductive DSE framework alive until the controller abandons the dual
+/// start. Original-objective Phase II follows HiGHS' cost/accuracy policy so
+/// useful exact weights are not discarded merely because a fixed number of
+/// pivots has elapsed. The unknown phase retains the hard-cap semantics for
+/// direct framework users and unit tests.
 pub fn shouldSwitchDualDseToDevex(self: *const SimplexEngine, total_columns: usize) bool {
-    if (self.active_dual_dse_update_budget != 0)
+    if (self.active_dual_dse_update_budget != 0 and self.dual_control.phase != .phase_two)
         return self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget;
     const costly = self.dual_dse_updates_since_start * 10 > total_columns and
         self.dual_dse_costly_iterations * 20 > self.dual_dse_updates_since_start;
     const inaccurate = self.dual_dse_average_log_low_error +
         self.dual_dse_average_log_high_error > 10.0;
     return costly or inaccurate;
+}
+
+test "dual DSE budget caps Phase I but not original-objective Phase II" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.active_dual_dse_update_budget = 64;
+    engine.dual_dse_updates_since_start = 64;
+
+    // Direct framework users retain the explicit hard-cap behavior.
+    try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
+    engine.dual_control.enterPhase(.phase_one);
+    try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
+
+    // Phase II only switches for measured DSE cost or weight inaccuracy.
+    engine.dual_control.enterPhase(.phase_two);
+    try std.testing.expect(!engine.shouldSwitchDualDseToDevex(1000));
+    engine.dual_dse_average_log_high_error = 10.01;
+    try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
 }
 
 test "exact dual steepest-edge weights use BTRAN row norms" {
