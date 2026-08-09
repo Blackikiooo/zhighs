@@ -963,6 +963,11 @@ pub const SimplexEngine = struct {
                 // least one sixth of its rows must remain logical, the
                 // symbolic crash is dominated by the identity start.
                 @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6);
+        const prefer_automatic_bixby = control.crash_strategy == .automatic and
+            control.crash_max_columns == null and
+            problem.num_rows >= 128 and problem.num_rows <= 160 and
+            @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
+            @as(u128, problem.matrix.values.len) >= @as(u128, problem.num_cols) * 8;
         const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
@@ -971,7 +976,12 @@ pub const SimplexEngine = struct {
             // structural-coverage and dual-workset gates below. Medium mildly
             // rectangular starts repeatedly reject that candidate and return
             // to the identical logical basis, so avoid the dead factorization.
-            .automatic => if (skip_automatic_crash) .logical else .ltssf,
+            .automatic => if (skip_automatic_crash)
+                .logical
+            else if (prefer_automatic_bixby)
+                .bixby
+            else
+                .ltssf,
         };
         const crash_max_columns = if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
@@ -1045,6 +1055,7 @@ pub const SimplexEngine = struct {
             const conditioned_workset = self.stats.crash_condition_estimate >= 4.0 and
                 maximum_basic_violation >= 1.0 and maximum_basic_violation <= 1.0e6;
             const low_risk_crash = problem.num_rows >= 16 and (compact_problem or
+                prefer_automatic_bixby or
                 (has_structural_coverage and dual_infeasible_count == 0) or
                 (problem.num_rows >= 512 and
                     @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
