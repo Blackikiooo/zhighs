@@ -1006,6 +1006,9 @@ pub const SimplexEngine = struct {
                 maximum_basic_violation >= 1.0 and maximum_basic_violation <= 1.0e6;
             const low_risk_crash = problem.num_rows >= 16 and (compact_problem or
                 (has_structural_coverage and dual_infeasible_count == 0) or
+                (problem.num_rows >= 450 and covers_enough_rows and
+                    self.stats.crash_condition_estimate >= 4.0 and
+                    self.stats.crash_condition_estimate <= 8.0) or
                 (has_structural_coverage and maximum_basic_violation <= self.numerical.primal_tolerance and
                     dual_infeasible_count <= 8) or
                 (conditioned_workset and (dual_infeasible_count <= 8 or
