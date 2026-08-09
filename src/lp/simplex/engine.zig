@@ -956,9 +956,13 @@ pub const SimplexEngine = struct {
         var crash_installed = false;
         const skip_automatic_crash = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
-            problem.num_rows >= 384 and problem.num_rows <= 416 and
-            problem.num_cols > problem.num_rows and
-            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
+            ((problem.num_rows >= 384 and problem.num_rows <= 416 and
+                problem.num_cols > problem.num_rows and
+                @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2) or
+                // A structural basis cannot cover a tall model. Once at
+                // least one sixth of its rows must remain logical, the
+                // symbolic crash is dominated by the identity start.
+                @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6);
         const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
