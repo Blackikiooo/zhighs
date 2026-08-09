@@ -954,16 +954,23 @@ pub const SimplexEngine = struct {
         const logical_numerical_state = self.numerical;
         const logical_pricing_state = self.pricing;
         var crash_installed = false;
-        const large_irregular_columns = if (problem.num_rows >= 450 and
+        const large_mildly_wide = problem.num_rows >= 450 and
             @as(u128, problem.num_cols) * 5 >= @as(u128, problem.num_rows) * 6 and
-            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2) blk: {
+            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
+        const large_low_degree_columns = if (large_mildly_wide) blk: {
             var low_degree_columns: usize = 0;
             for (0..problem.num_cols) |column| {
                 const degree = problem.matrix.col_starts[column + 1] - problem.matrix.col_starts[column];
                 low_degree_columns += @intFromBool(degree <= 2);
             }
-            break :blk @as(u128, low_degree_columns) * 4 < @as(u128, problem.num_cols) * 3;
+            break :blk @as(u128, low_degree_columns) * 4 >= @as(u128, problem.num_cols) * 3;
         } else false;
+        const large_irregular_columns = large_mildly_wide and !large_low_degree_columns;
+        const prefer_large_network_crash = control.crash_strategy == .automatic and
+            control.crash_max_columns == null and
+            problem.num_rows >= 512 and
+            @as(u128, problem.num_cols) * 5 >= @as(u128, problem.num_rows) * 9 and
+            large_low_degree_columns;
         const skip_automatic_crash = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
             ((problem.num_rows >= 384 and problem.num_rows <= 416 and
@@ -1029,6 +1036,12 @@ pub const SimplexEngine = struct {
             // pivot ranking fills the other fifteen sixteenths without the
             // instability of forcing a completely structural basis.
             @as(?usize, problem.num_rows * 15 / 16)
+        else if (prefer_large_network_crash)
+            // Large, mildly wide network matrices offer an almost complete
+            // low-degree matching. Fill 31/32 of the basis: this removes most
+            // Phase-I pivots while leaving enough logical anchors to avoid the
+            // rank-deficient tail of the symbolic matching.
+            @as(?usize, problem.num_rows * 31 / 32)
         else if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
             // Compact bases are cheap to validate and refactor. Let LTSSF use
@@ -1105,6 +1118,7 @@ pub const SimplexEngine = struct {
                 prefer_sparse_near_square_crash or
                 prefer_dense_medium_rectangular_crash or
                 prefer_compact_wide_crash or
+                prefer_large_network_crash or
                 (has_structural_coverage and dual_infeasible_count == 0) or
                 (problem.num_rows >= 512 and
                     @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
