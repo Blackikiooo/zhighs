@@ -56,7 +56,13 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
         self.failure_site = .direction_column;
         return .numerical_failure;
     }
-    if (!self.directionResidualAcceptable(problem, entering_col)) {
+    // HiGHS validates primal FTRAN through the pivotal row/column pair rather
+    // than forming B*x-a_q on every iteration. Keep the stronger whole-column
+    // guard periodically while the FT chain ages; a fresh factorization does
+    // not need an immediate residual reconstruction.
+    const check_full_residual = self.factorization.update_count != 0 and
+        self.factorization.update_count % 8 == 0;
+    if (check_full_residual and !self.directionResidualAcceptable(problem, entering_col)) {
         self.factorization.recordReinversion(.solve_residual);
         if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
             self.failure_site = .direction_refactor;
