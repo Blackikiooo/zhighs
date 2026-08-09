@@ -973,6 +973,11 @@ pub const SimplexEngine = struct {
                 // least one sixth of its rows must remain logical, the
                 // symbolic crash is dominated by the identity start.
                 @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6 or
+                // Medium-wide starts need the dense network structure used by
+                // the Bixby selector below; sparse counterparts reject LTSSF.
+                (problem.num_rows >= 128 and problem.num_rows <= 160 and
+                    @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
+                    @as(u128, problem.matrix.values.len) < @as(u128, problem.num_cols) * 8) or
                 // Large mildly wide models need a strong low-degree column
                 // population for crash matching to repay its factorizations.
                 large_irregular_columns);
