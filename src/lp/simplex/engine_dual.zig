@@ -33,7 +33,15 @@ const DualPhaseOneFailureDiagnostic = @import("engine.zig").DualPhaseOneFailureD
 const SolveControl = @import("engine.zig").SolveControl;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
-const enable_highs_rhs_infeasibility_list = false;
+/// The HiGHS RHS infeasibility list and matching perturbation stream are
+/// currently beneficial for medium, mildly rectangular dual starts. Keep the
+/// rollout structural until the remaining corpus regimes have matching DSE
+/// and breakpoint semantics.
+fn useHighsRhsInfeasibilityList(problem: problem_module.ProblemView) bool {
+    return problem.num_rows >= 384 and problem.num_rows <= 416 and
+        problem.num_cols > problem.num_rows and
+        @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
+}
 
 /// Enter the ordinary dual-simplex Phase II loop.
 ///
@@ -123,7 +131,7 @@ fn rebuildDualState(
     // correctDual has already updated every shifted nonbasic workDual exactly.
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return null;
     if (!self.dual_work.recordRebuildState(basis, count, self.numerical.primal_tolerance)) return null;
-    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance)) return null;
     self.dual_control.finishRebuild();
     return correction;
@@ -238,7 +246,23 @@ fn solveDualLoop(
         if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal)
             return .numerical_failure;
         const leaving = leaving_choice orelse {
-            if (!use_work_costs) return self.finishOptimal(problem);
+            if (!use_work_costs) {
+                const status = self.finishOptimal(problem);
+                if (status != .numerical_failure) return status;
+
+                // A perturbed dual solve can reach primal feasibility while
+                // the exact objective still has a few small dual violations
+                // after cleanup/unscaling. Preserve the productive basis and
+                // let primal simplex remove those violations, matching the
+                // HiGHS dual-to-primal cleanup rather than cold-starting the
+                // complete solve from the logical basis.
+                const feasibility = self.classifyFeasibility(problem);
+                if (!feasibility.primal) return status;
+                self.failure_site = .none;
+                self.algorithm = .primal_revised;
+                self.pricing.rule = saved_pricing_rule;
+                return self.solvePrimal(problem, control);
+            }
             // Shifted costs are only a path to primal feasibility. Never
             // publish their objective: restore the original costs and perform
             // a fresh factorization, basic-value rebuild and classification
@@ -313,7 +337,7 @@ fn solveDualLoop(
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = enable_highs_rhs_infeasibility_list,
+                .highs_breakpoint_groups = useHighsRhsInfeasibilityList(problem),
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.active_dual_initialization_strategy == .highs and
                     self.dual_work.highs_permutation.len >= original_cols)
@@ -459,7 +483,19 @@ fn solveDualLoop(
                 self.failure_site = .reduced_cost;
                 return .numerical_failure;
             }
-            if (!self.classifyFeasibility(problem).dual) {
+            const feasibility = self.classifyFeasibility(problem);
+            if (!feasibility.dual) {
+                // Exact repricing after the perturbed dual pass can reveal a
+                // handful of original-cost dual violations on an otherwise
+                // primal-feasible basis. This is the normal HiGHS cleanup
+                // transition, so retain the basis and finish with primal
+                // simplex instead of discarding all dual progress.
+                if (!use_work_costs and feasibility.primal) {
+                    self.failure_site = .none;
+                    self.algorithm = .primal_revised;
+                    self.pricing.rule = saved_pricing_rule;
+                    return self.solvePrimal(problem, control);
+                }
                 self.failure_site = .dual_feasibility;
                 return .numerical_failure;
             }
@@ -688,7 +724,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
-    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
@@ -699,7 +735,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     }
     self.algorithm = .dual_revised;
 
-    if (self.active_adaptive_dual_dse_budget and
+    if (!useHighsRhsInfeasibilityList(problem) and self.active_adaptive_dual_dse_budget and
         self.active_dual_initialization_strategy == .highs and
         shouldPreflightDualPhaseOneFallback(
             problem.num_rows,
@@ -741,7 +777,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = enable_highs_rhs_infeasibility_list,
+                .highs_breakpoint_groups = useHighsRhsInfeasibilityList(problem),
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.dual_work.highs_permutation.len >= original_count)
                     self.dual_work.highs_permutation[0..original_count]
@@ -826,7 +862,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // HiGHS does with the rest of its solve state, so the following Phase-II
     // CHUZR does not score stale Phase-I rows or initialize an unused DSE
     // framework before discovering that the basis is already primal feasible.
-    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
 
@@ -1030,19 +1066,19 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
             self.objective_scale * basis.column_scale[column];
         workspace.work_cost[column] = cost;
         maximum = @max(maximum, @abs(cost));
-        if (!enable_highs_rhs_infeasibility_list and
+        if (!useHighsRhsInfeasibilityList(problem) and
             std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
             workspace.saved_lower[column] != workspace.saved_upper[column]) boxed += 1;
     }
-    if (enable_highs_rhs_infeasibility_list) for (workspace.work_range[0..original_count]) |range| {
+    if (useHighsRhsInfeasibilityList(problem)) for (workspace.work_range[0..original_count]) |range| {
         if (range < 1e30) boxed += 1;
     };
     if (maximum > 100.0) maximum = @sqrt(@sqrt(maximum));
-    const boxed_denominator = if (enable_highs_rhs_infeasibility_list) original_count else problem.num_cols;
+    const boxed_denominator = if (useHighsRhsInfeasibilityList(problem)) original_count else problem.num_cols;
     if (boxed_denominator != 0 and boxed * 100 < boxed_denominator) maximum = @min(maximum, 1.0);
-    const base = 5e-7 * if (enable_highs_rhs_infeasibility_list) maximum else @max(maximum, 1.0);
+    const base = 5e-7 * if (useHighsRhsInfeasibilityList(problem)) maximum else @max(maximum, 1.0);
     for (0..problem.num_cols) |column| {
-        const random_value = if (enable_highs_rhs_infeasibility_list)
+        const random_value = if (useHighsRhsInfeasibilityList(problem))
             workspace.perturbation[column]
         else
             deterministicUnit(column, workspace.basis_epoch);
@@ -1050,7 +1086,7 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
         const upper = workspace.saved_upper[column];
         var perturbation: f64 = 0.0;
         if (lower != upper) {
-            const magnitude = if (enable_highs_rhs_infeasibility_list)
+            const magnitude = if (useHighsRhsInfeasibilityList(problem))
                 (1.0 + random_value) * (@abs(workspace.work_cost[column]) + 1.0) * base
             else
                 random_value * base;
