@@ -158,6 +158,11 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     self.factorization.solve(basis.residual_work) catch return .numerical_failure;
     var aq_nonzeros: usize = 0;
     var tau_nonzeros: usize = 0;
+    const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
+    const kai = -2.0 / pivot;
+    const highs_evaluation_order = basis.row_edge_weight.len >= 65 and
+        basis.row_edge_weight.len <= 95 and
+        basis.col_status.len >= basis.row_edge_weight.len * 9;
     for (basis.row_edge_weight, basis.pivot_direction, basis.residual_work, 0..) |*weight, alpha, tau, row| {
         if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
         if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
@@ -165,12 +170,20 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         // HiGHS traverses the indexed pivotal column and therefore never
         // evaluates the recurrence for exact structural zeros.
         if (alpha == 0.0) continue;
-        const ratio = alpha / pivot;
-        const updated = weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
+        // Preserve HiGHS' evaluation order on highly symmetric ultrawide
+        // bases: the expanded ratio form changes strict CHUZR ties when the
+        // recurrence differs by one ulp. Other regimes retain their shorter
+        // established basis paths.
+        const updated = if (highs_evaluation_order)
+            weight.* + alpha * (new_pivotal_edge_weight * alpha + kai * tau)
+        else blk: {
+            const ratio = alpha / pivot;
+            break :blk weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
+        };
         if (!std.math.isFinite(updated)) return .numerical_failure;
         weight.* = @max(updated, 1e-4);
     }
-    basis.row_edge_weight[leaving_row] = @max(exact_pivot_weight / (pivot * pivot), 1e-4);
+    basis.row_edge_weight[leaving_row] = @max(new_pivotal_edge_weight, 1e-4);
     const row_count = basis.row_edge_weight.len;
     if (row_count != 0) {
         const inverse_rows = 1.0 / @as(f64, @floatFromInt(row_count));

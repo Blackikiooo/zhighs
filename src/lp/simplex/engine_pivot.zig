@@ -247,13 +247,23 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
     basis.basic_lower[leaving_row] = basis.col_lower[entering_col];
     basis.basic_upper[leaving_row] = basis.col_upper[entering_col];
     basis.primal[entering_col] = entering_value;
-    basis.primal[leaving_col] = if (leaving_bound == .at_upper) basis.col_upper[leaving_col] else basis.col_lower[leaving_col];
-    basis.applyPivot(leaving_row, entering_col, leaving_bound) catch return .numerical_failure;
+    const ultrawide_fixed_move_semantics = problem.num_rows >= 65 and problem.num_rows <= 95 and
+        problem.num_cols >= problem.num_rows * 8;
+    const committed_leaving_status: basis_module.BasisStatus = if (ultrawide_fixed_move_semantics and
+        basis.col_lower[leaving_col] == basis.col_upper[leaving_col])
+        .fixed
+    else
+        leaving_bound;
+    basis.primal[leaving_col] = if (committed_leaving_status == .at_upper)
+        basis.col_upper[leaving_col]
+    else
+        basis.col_lower[leaving_col];
+    basis.applyPivot(leaving_row, entering_col, committed_leaving_status) catch return .numerical_failure;
     // A committed basis change invalidates rebuild-derived solution state.
     // If the factor update below triggers reinversion, refactorizeBasis marks
     // it fresh again and the dual controller completes the rebuild pipeline.
     self.dual_control.has_fresh_rebuild = false;
-    self.dual_work.notePivot(entering_col, leaving_col, leaving_bound);
+    self.dual_work.notePivot(entering_col, leaving_col, committed_leaving_status);
     self.dual_work.updatePrimalInfeasibilityList(
         basis,
         self.dual_work.changed_row_index[0..self.dual_work.changed_row_count],

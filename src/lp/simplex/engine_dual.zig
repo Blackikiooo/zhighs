@@ -43,6 +43,15 @@ fn useHighsRhsInfeasibilityList(problem: problem_module.ProblemView) bool {
         @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
 }
 
+fn useHighsUltrawideLifecycle(problem: problem_module.ProblemView) bool {
+    return problem.num_rows >= 65 and problem.num_rows <= 95 and
+        problem.num_cols >= problem.num_rows * 8;
+}
+
+fn useHighsBreakpointGroups(problem: problem_module.ProblemView) bool {
+    return useHighsRhsInfeasibilityList(problem) or useHighsUltrawideLifecycle(problem);
+}
+
 /// Enter the ordinary dual-simplex Phase II loop.
 ///
 /// The caller must already have installed and factorized a valid basis.
@@ -131,7 +140,7 @@ fn rebuildDualState(
     // correctDual has already updated every shifted nonbasic workDual exactly.
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return null;
     if (!self.dual_work.recordRebuildState(basis, count, self.numerical.primal_tolerance)) return null;
-    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
+    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance)) return null;
     self.dual_control.finishRebuild();
     return correction;
@@ -337,7 +346,7 @@ fn solveDualLoop(
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = useHighsRhsInfeasibilityList(problem),
+                .highs_breakpoint_groups = useHighsBreakpointGroups(problem),
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.active_dual_initialization_strategy == .highs and
                     self.dual_work.highs_permutation.len >= original_cols)
@@ -446,6 +455,15 @@ fn solveDualLoop(
         // fresh factorization is only the first half of dual rebuild: refresh
         // all work solution state before another CHUZR decision.
         if (self.dual_control.has_fresh_rebuild) {
+            if (use_work_costs and useHighsUltrawideLifecycle(problem)) {
+                if (self.recomputeBasicValuesUnchecked(problem) != .optimal)
+                    return .numerical_failure;
+                if (!self.dual_work.createPrimalInfeasibilityList(
+                    basis,
+                    problem.num_rows,
+                    self.numerical.primal_tolerance,
+                )) return .numerical_failure;
+            }
             const rebuild_dual = if (use_work_costs)
                 self.recomputeReducedCostsFromWork(problem)
             else
@@ -665,7 +683,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // recurrence drift change both Phase-I and Phase-II row ordering. Match
     // that lifecycle for the same structural regime; the fresher basis saves
     // substantially more pivots than the extra inversions cost.
-    if (useHighsRhsInfeasibilityList(problem))
+    if (useHighsBreakpointGroups(problem))
         self.active_max_update_count = @min(self.active_max_update_count, 50);
     self.dual_work.begin(basis, original_count) catch return .numerical_failure;
     defer if (self.dual_work.active)
@@ -677,6 +695,21 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     self.buildDualPhaseOneCosts(problem);
     self.dual_control.costs_perturbed = true;
     if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+    // A dual-feasible cold start does not need Phase-I bounds. HiGHS keeps
+    // the freshly perturbed objective and enters Phase II directly, using the
+    // perturbation to break CHUZC ties before exact-cost cleanup. Preserve
+    // that zero-pivot transition for the stable ultrawide/medium regimes.
+    if (useHighsBreakpointGroups(problem) and
+        self.dual_control.unperturbed_dual_infeasibility_count == 0)
+    {
+        if (!self.dual_work.createPrimalInfeasibilityList(
+            basis,
+            problem.num_rows,
+            self.numerical.primal_tolerance,
+        )) return .not_implemented;
+        self.dual_control.enterPhase(.phase_two);
+        return solveDualLoop(self, problem, control, true);
+    }
     // Compatibility path retained until the complete B2 phase-transition
     // lifecycle is enabled; the isolated source-equivalent no-flip/lower-side
     // experiment is recorded in todo.md.
@@ -731,7 +764,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
-    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
+    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
@@ -784,7 +817,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = useHighsRhsInfeasibilityList(problem),
+                .highs_breakpoint_groups = useHighsBreakpointGroups(problem),
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.dual_work.highs_permutation.len >= original_count)
                     self.dual_work.highs_permutation[0..original_count]
@@ -869,7 +902,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // HiGHS does with the rest of its solve state, so the following Phase-II
     // CHUZR does not score stale Phase-I rows or initialize an unused DSE
     // framework before discovering that the basis is already primal feasible.
-    if (useHighsRhsInfeasibilityList(problem) and self.active_dual_initialization_strategy == .highs and
+    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
 
@@ -1073,19 +1106,19 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
             self.objective_scale * basis.column_scale[column];
         workspace.work_cost[column] = cost;
         maximum = @max(maximum, @abs(cost));
-        if (!useHighsRhsInfeasibilityList(problem) and
+        if (!useHighsBreakpointGroups(problem) and
             std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
             workspace.saved_lower[column] != workspace.saved_upper[column]) boxed += 1;
     }
-    if (useHighsRhsInfeasibilityList(problem)) for (workspace.work_range[0..original_count]) |range| {
+    if (useHighsBreakpointGroups(problem)) for (workspace.work_range[0..original_count]) |range| {
         if (range < 1e30) boxed += 1;
     };
     if (maximum > 100.0) maximum = @sqrt(@sqrt(maximum));
-    const boxed_denominator = if (useHighsRhsInfeasibilityList(problem)) original_count else problem.num_cols;
+    const boxed_denominator = if (useHighsBreakpointGroups(problem)) original_count else problem.num_cols;
     if (boxed_denominator != 0 and boxed * 100 < boxed_denominator) maximum = @min(maximum, 1.0);
-    const base = 5e-7 * if (useHighsRhsInfeasibilityList(problem)) maximum else @max(maximum, 1.0);
+    const base = 5e-7 * if (useHighsBreakpointGroups(problem)) maximum else @max(maximum, 1.0);
     for (0..problem.num_cols) |column| {
-        const random_value = if (useHighsRhsInfeasibilityList(problem))
+        const random_value = if (useHighsBreakpointGroups(problem))
             workspace.perturbation[column]
         else
             deterministicUnit(column, workspace.basis_epoch);
@@ -1093,7 +1126,7 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
         const upper = workspace.saved_upper[column];
         var perturbation: f64 = 0.0;
         if (lower != upper) {
-            const magnitude = if (useHighsRhsInfeasibilityList(problem))
+            const magnitude = if (useHighsBreakpointGroups(problem))
                 (1.0 + random_value) * (@abs(workspace.work_cost[column]) + 1.0) * base
             else
                 random_value * base;
