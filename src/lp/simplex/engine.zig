@@ -978,7 +978,11 @@ pub const SimplexEngine = struct {
                 large_irregular_columns);
         const prefer_automatic_bixby = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
-            ((problem.num_rows >= 128 and problem.num_rows <= 160 and
+            ((problem.num_rows >= 40 and problem.num_rows <= 64 and
+                problem.num_cols <= problem.num_rows and
+                @as(u128, problem.num_cols) * 10 >= @as(u128, problem.num_rows) * 9 and
+                @as(u128, problem.matrix.values.len) <= @as(u128, problem.num_cols) * 3) or
+                (problem.num_rows >= 128 and problem.num_rows <= 160 and
                 @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
                 @as(u128, problem.matrix.values.len) >= @as(u128, problem.num_cols) * 8) or
                 (problem.num_rows >= 450 and problem.num_rows <= 510 and
