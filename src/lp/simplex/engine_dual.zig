@@ -747,6 +747,11 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                 self.active_dual_dse_update_budget = 8
             else if (problem.num_rows <= 64 and self.dual_phase_one_initial_flips >= 16)
                 self.active_dual_dse_update_budget = 16
+            else if (problem.num_rows >= 512 and
+                @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
+                self.stats.crash_structural_columns * 4 >= problem.num_rows and
+                self.dual_phase_one_initial_flips <= 32)
+                self.active_dual_dse_update_budget = 1
             else if (problem.num_rows >= 450 and self.dual_phase_one_initial_flips >= 125)
                 self.active_dual_dse_update_budget = 8
             else if (problem.num_rows >= 450 and self.dual_phase_one_initial_flips >= 64)
