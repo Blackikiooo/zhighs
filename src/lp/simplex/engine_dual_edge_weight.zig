@@ -139,11 +139,17 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     if (!self.dual_edge_weights_valid or leaving_row >= basis.row_edge_weight.len or
         @abs(pivot) <= self.numerical.pivot_tolerance)
         return .numerical_failure;
-    var exact_pivot_weight: f64 = 0.0;
-    var ep_nonzeros: usize = 0;
-    for (basis.dual_row) |entry| {
-        exact_pivot_weight += entry * entry;
-        if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+    var exact_pivot_weight = self.dual_row_exact_weight;
+    var ep_nonzeros = self.dual_row_nonzero_count;
+    if (self.dual_row_index != @as(u32, @intCast(leaving_row)) or
+        !std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
+    {
+        exact_pivot_weight = 0.0;
+        ep_nonzeros = 0;
+        for (basis.dual_row) |entry| {
+            exact_pivot_weight += entry * entry;
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+        }
     }
     if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
         return .numerical_failure;

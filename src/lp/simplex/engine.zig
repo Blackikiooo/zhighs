@@ -637,6 +637,9 @@ pub const SimplexEngine = struct {
     dual_edge_weights_valid: bool = false,
     /// Basis row whose `dual_row`/tableau workspace is currently valid.
     dual_row_index: ?u32 = null,
+    /// Exact squared norm and support size produced with `dual_row_index`.
+    dual_row_exact_weight: f64 = 0.0,
+    dual_row_nonzero_count: usize = 0,
     /// Active entries in the hyper-sparse dual leaving candidate list.
     dual_candidate_count: usize = 0,
     /// Score cutoff used to retain hyper-sparse dual candidates.

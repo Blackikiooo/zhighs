@@ -1154,11 +1154,25 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     const ep_index = [_]u32{@intCast(row)};
     self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
     self.observeEpDensity(basis.dual_row);
-    if (self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid) {
-        var exact_weight: f64 = 0.0;
-        for (basis.dual_row) |entry| exact_weight += entry * entry;
+    const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
+    var exact_weight: f64 = 0.0;
+    var ep_nonzeros: usize = 0;
+    if (needs_exact_weight) {
+        for (basis.dual_row) |entry| {
+            exact_weight += entry * entry;
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+        }
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
+    } else {
+        for (basis.dual_row) |entry|
+            if (@abs(entry) > self.numerical.zero_tolerance) {
+                ep_nonzeros += 1;
+            };
+    }
+    self.dual_row_exact_weight = exact_weight;
+    self.dual_row_nonzero_count = ep_nonzeros;
+    if (needs_exact_weight) {
         const updated_weight = basis.row_edge_weight[row];
         if (self.active_dual_initialization_strategy == .highs) {
             const safe_updated = @max(updated_weight, self.numerical.zero_tolerance);
@@ -1235,8 +1249,8 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     for (0..problem.num_rows) |logical_row| {
         const value = basis.dual_row[logical_row];
         basis.tableau[problem.num_cols + logical_row] = value;
-        if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
     }
+    nonzero_count += ep_nonzeros;
     // Row pricing accumulates structural entries, so their final density is
     // known only after the scatter. Column pricing counted each final alpha
     // at its producer and avoids this second structural scan.
