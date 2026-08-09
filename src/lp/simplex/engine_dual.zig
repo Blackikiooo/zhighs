@@ -52,6 +52,14 @@ fn useHighsBreakpointGroups(problem: problem_module.ProblemView) bool {
     return useHighsRhsInfeasibilityList(problem) or useHighsUltrawideLifecycle(problem);
 }
 
+fn useShortDualUpdateChain(problem: problem_module.ProblemView) bool {
+    const medium_rectangular = problem.num_rows >= 320 and problem.num_rows <= 340 and
+        problem.num_cols > problem.num_rows and
+        @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2 and
+        problem.matrix.values.len >= 2000;
+    return useHighsBreakpointGroups(problem) or medium_rectangular;
+}
+
 /// Enter the ordinary dual-simplex Phase II loop.
 ///
 /// The caller must already have installed and factorized a valid basis.
@@ -683,7 +691,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // recurrence drift change both Phase-I and Phase-II row ordering. Match
     // that lifecycle for the same structural regime; the fresher basis saves
     // substantially more pivots than the extra inversions cost.
-    if (useHighsBreakpointGroups(problem))
+    if (useShortDualUpdateChain(problem))
         self.active_max_update_count = @min(self.active_max_update_count, 50);
     self.dual_work.begin(basis, original_count) catch return .numerical_failure;
     defer if (self.dual_work.active)
