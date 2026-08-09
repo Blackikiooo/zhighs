@@ -1054,6 +1054,7 @@ pub const SimplexEngine = struct {
     pub const observeFactorizationStability = @import("engine_pivot.zig").observeFactorizationStability;
 
     pub const fillInternalColumn = @import("engine_setup.zig").fillInternalColumn;
+    pub const fillInternalColumnSparse = @import("engine_setup.zig").fillInternalColumnSparse;
 
     pub const recomputeBasicValues = @import("engine_pivot.zig").recomputeBasicValues;
     pub const recomputeBasicValuesUnchecked = @import("engine_pivot.zig").recomputeBasicValuesUnchecked;

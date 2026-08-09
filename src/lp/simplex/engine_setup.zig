@@ -455,3 +455,40 @@ pub fn fillInternalColumn(self: *SimplexEngine, problem: problem_module.ProblemV
     } else return .numerical_failure;
     return .optimal;
 }
+
+/// Publish an internal column and its exact RHS support without clearing the
+/// output complement. Intended for indexed SparseLU FTRAN only.
+pub fn fillInternalColumnSparse(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    column: usize,
+    output: []f64,
+    indices: []u32,
+) ?usize {
+    const basis = if (self.basis) |*value| value else return null;
+    if (output.len != problem.num_rows or indices.len < problem.num_rows) return null;
+    var count: usize = 0;
+    if (column < problem.num_cols) {
+        const column_scale = basis.column_scale[column];
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            const row_index = row.toUsize();
+            output[row_index] = coefficient * basis.row_scale[row_index] * column_scale;
+            indices[count] = @intCast(row_index);
+            count += 1;
+        }
+    } else if (column < problem.num_cols + problem.num_rows) {
+        const row = column - problem.num_cols;
+        output[row] = 1.0;
+        indices[0] = @intCast(row);
+        count = 1;
+    } else if (column < problem.num_cols + 2 * problem.num_rows) {
+        const row = column - problem.num_cols - problem.num_rows;
+        output[row] = basis.artificial_sign[row];
+        indices[0] = @intCast(row);
+        count = 1;
+    } else return null;
+    return count;
+}

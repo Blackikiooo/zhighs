@@ -26,27 +26,43 @@ const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
+fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    if (self.factorization.supportsSparseUpdateRhs()) {
+        const count = self.fillInternalColumnSparse(
+            problem,
+            entering_col,
+            basis.pivot_direction,
+            self.dual_work.changed_row_index,
+        ) orelse return .numerical_failure;
+        self.factorization.solveForUpdateSparse(
+            basis.pivot_direction,
+            self.dual_work.changed_row_index[0..count],
+        ) catch return .numerical_failure;
+    } else {
+        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal)
+            return .numerical_failure;
+        self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+    }
+    return .optimal;
+}
+
 /// Compute the revised-simplex entering direction `B^-1 A_j` into the
 /// engine-owned SoA workspace without allocating or copying model data.
 pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     self.direction_requires_reinversion = false;
-    if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
+    if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
         self.failure_site = .direction_column;
         return .numerical_failure;
     }
-    self.factorization.solveForUpdate(basis.pivot_direction) catch {
-        self.failure_site = .direction_solve;
-        return .numerical_failure;
-    };
     if (!self.directionResidualAcceptable(problem, entering_col)) {
         self.factorization.recordReinversion(.solve_residual);
         if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
             self.failure_site = .direction_refactor;
             return .numerical_failure;
         }
-        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) return .numerical_failure;
-        self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+        if (solveEnteringDirection(self, problem, entering_col) != .optimal) return .numerical_failure;
         var refinement_step: usize = 0;
         while (!self.directionResidualAcceptable(problem, entering_col)) : (refinement_step += 1) {
             if (refinement_step >= self.numerical.max_refinement_steps) {
@@ -96,14 +112,10 @@ pub fn computeDualDirection(
     const alpha_row = basis.tableau[entering_col];
     if (!std.math.isFinite(alpha_row)) return .numerical_failure;
 
-    if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
+    if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
         self.failure_site = .direction_column;
         return .numerical_failure;
     }
-    self.factorization.solveForUpdate(basis.pivot_direction) catch {
-        self.failure_site = .direction_solve;
-        return .numerical_failure;
-    };
 
     var alpha_col = basis.pivot_direction[leaving_row];
     const min_alpha = @min(@abs(alpha_col), @abs(alpha_row));
@@ -119,14 +131,10 @@ pub fn computeDualDirection(
             self.failure_site = .direction_refactor;
             return .numerical_failure;
         }
-        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
-            self.failure_site = .direction_column;
-            return .numerical_failure;
-        }
-        self.factorization.solveForUpdate(basis.pivot_direction) catch {
+        if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
             self.failure_site = .direction_solve;
             return .numerical_failure;
-        };
+        }
         alpha_col = basis.pivot_direction[leaving_row];
         if (!std.math.isFinite(alpha_col)) return .numerical_failure;
     }

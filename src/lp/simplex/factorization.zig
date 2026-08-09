@@ -445,6 +445,30 @@ pub const Factorization = struct {
         };
     }
 
+    /// Whether the active basis can consume an indexed entering-column RHS.
+    pub fn supportsSparseUpdateRhs(self: *const Factorization) bool {
+        return self.backend_kind == .sparse_lu;
+    }
+
+    /// Sparse-LU FTRAN with FT capture from caller-published RHS indices.
+    pub fn solveForUpdateSparse(self: *Factorization, rhs: []f64, input_indices: []const u32) FactorizationError!void {
+        if (self.backend_kind != .sparse_lu) return error.NotImplemented;
+        const started = self.statisticsTimestamp();
+        defer self.recordElapsed(&self.stats.ftran_ns, started);
+        self.stats.ftran_calls += 1;
+        self.stats.sparse_ftran_dispatches += 1;
+        if (self.statistics_io != null) {
+            self.stats.ftran_rhs_samples += 1;
+            self.stats.ftran_rhs_nonzeros += input_indices.len;
+        }
+        self.sparse_lu.solveForUpdateSparse(rhs, input_indices) catch |err| return switch (err) {
+            error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
+            error.Singular => error.Singular,
+            error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
+            error.OutOfMemory, error.CapacityOverflow => error.OutOfMemory,
+        };
+    }
+
     /// Materialize the sparse index component of the most recent FTRAN
     /// result without allocating. HiGHS carries this beside `HVector.array`
     /// and uses its order when extending the dual RHS infeasibility list.

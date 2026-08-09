@@ -383,6 +383,27 @@ pub const SparseLU = struct {
         return self.solveFt(rhs, true);
     }
 
+    /// FTRAN-with-capture from an indexed RHS. Positions outside
+    /// `input_indices` may contain stale values and are never read.
+    pub fn solveForUpdateSparse(self: *SparseLU, rhs: []f64, input_indices: []const u32) SparseLuError!void {
+        try self.ensureFt();
+        const n = self.dimension;
+        if (rhs.len != n) return error.DimensionMismatch;
+        @memset(self.work[0..n], 0.0);
+        for (input_indices) |row| {
+            if (row >= n) return error.DimensionMismatch;
+            self.work[self.row_position[row]] = rhs[row];
+        }
+        for (0..n) |k| {
+            const solved = self.work[k];
+            for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, value|
+                self.work[self.row_position[row]] -= value * solved;
+        }
+        for (0..n) |position| rhs[self.pivot_columns[position]] = self.work[position];
+        try self.ft.prepareFtran(rhs, true);
+        try self.ft.solveUpper(rhs);
+    }
+
     /// Solve through L, FT corrections, and mutable U, optionally capturing Aq.
     fn solveFt(self: *SparseLU, rhs: []f64, comptime capture: bool) SparseLuError!void {
         const n = self.dimension;
@@ -591,7 +612,7 @@ pub const SparseLU = struct {
             if (!self.marked[k]) continue;
             const solved = self.work[k];
             for (self.l_row_columns[self.l_row_starts[k]..self.l_row_starts[k + 1]], self.l_row_values[self.l_row_starts[k]..self.l_row_starts[k + 1]]) |column, value|
-                    self.accumulate(column, -value * solved);
+                self.accumulate(column, -value * solved);
         }
         // The active set retains the input and every triangular fill entry.
         // Clear the original column-space support before scattering the final
