@@ -106,6 +106,10 @@ pub fn installSparseCrashBasis(
     scoring: crash_module.CrashScoring,
 ) bool {
     const basis = if (self.basis) |*value| value else return false;
+    // Retain at least one quarter of the logical columns as stable anchors
+    // unless the caller selected a different validated prefix explicitly.
+    const anchored_limit = if (problem.num_rows == 0) 0 else @max(@as(usize, 1), problem.num_rows * 3 / 4);
+    const selection_limit = maximum_columns orelse anchored_limit;
     const average_column_degree = if (problem.num_cols == 0) 0 else (problem.matrix.values.len + problem.num_cols - 1) / problem.num_cols;
     const near_singleton_limit: u32 = @intCast(@min(@max(average_column_degree * 2, 4), 32));
     const plan_view = self.crash.plan(
@@ -118,6 +122,7 @@ pub fn installSparseCrashBasis(
         near_singleton_limit,
         self.numerical.pivot_tolerance,
         scoring,
+        selection_limit,
     ) catch return false;
     if (plan_view.rows.len == 0) return false;
     self.stats.crash_planned_columns = plan_view.rows.len;
@@ -125,10 +130,6 @@ pub fn installSparseCrashBasis(
     // A near-singleton symbolic matching can still be numerically rank
     // deficient. Validate the longest deterministic prefix first, then
     // halve it until a safe basis is found. No partial basis is published.
-    // Retain at least one quarter of the logical columns as stable anchors.
-    // A fully structural crash can be perfectly invertible yet leave the
-    // current dual Phase-I update path without a safe reinversion route.
-    const anchored_limit = if (problem.num_rows == 0) 0 else @max(@as(usize, 1), problem.num_rows * 3 / 4);
     var prefix_count = @min(plan_view.rows.len, maximum_columns orelse anchored_limit);
     while (prefix_count != 0) : (prefix_count /= 2) {
         if (self.initializeProblemStorage(problem) != .optimal) return false;

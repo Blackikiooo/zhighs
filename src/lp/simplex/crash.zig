@@ -76,6 +76,8 @@ pub const CrashWorkspace = struct {
         near_singleton_limit: u32, // Max acceptable column degree for crash eligibility
         pivot_tolerance: f64, // Minimum scaled pivot magnitude
         scoring: CrashScoring,
+        /// Stop after producing the requested deterministic prefix.
+        maximum_selections: ?usize,
     ) !CrashPlanView {
         if (cost.len != csc.num_cols or lower.len != csc.num_cols or upper.len != csc.num_cols or
             row_scale.len != csc.num_rows or column_scale.len != csc.num_cols)
@@ -121,8 +123,12 @@ pub const CrashWorkspace = struct {
 
         // Greedy matching loop: repeatedly pick the best eligible (column, row)
         // pair, mark both sides inactive, and decrement degrees of neighbors.
+        const selection_limit = @min(
+            @min(csc.num_rows, csc.num_cols),
+            maximum_selections orelse @min(csc.num_rows, csc.num_cols),
+        );
         var selected_count: usize = 0;
-        while (selected_count < @min(csc.num_rows, csc.num_cols)) {
+        while (selected_count < selection_limit) {
             var best: ?Candidate = null;
             for (0..csc.num_cols) |column| {
                 if (!column_active[column]) continue;
@@ -277,10 +283,13 @@ test "crash planner peels a triangular structural basis" {
     );
     var workspace = CrashWorkspace.init(std.testing.allocator);
     defer workspace.deinit();
-    const plan_view = try workspace.plan(view, &[_]f64{ 0, 0, 0 }, &[_]f64{ 0, 0, 0 }, &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 1, 1, 1 }, 2, 1e-12, .ltssf);
+    const plan_view = try workspace.plan(view, &[_]f64{ 0, 0, 0 }, &[_]f64{ 0, 0, 0 }, &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 1, 1, 1 }, 2, 1e-12, .ltssf, null);
     try std.testing.expectEqual(@as(usize, 3), plan_view.rows.len);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, plan_view.rows);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, plan_view.columns);
+    const prefix = try workspace.plan(view, &[_]f64{ 0, 0, 0 }, &[_]f64{ 0, 0, 0 }, &[_]f64{ std.math.inf(f64), std.math.inf(f64), std.math.inf(f64) }, &[_]f64{ 1, 1, 1 }, &[_]f64{ 1, 1, 1 }, 2, 1e-12, .ltssf, 2);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, prefix.rows);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, prefix.columns);
 }
 
 test "bixby scoring can prefer pivot quality over a singleton" {
@@ -299,9 +308,9 @@ test "bixby scoring can prefer pivot quality over a singleton" {
     const upper = [_]f64{ std.math.inf(f64), std.math.inf(f64) };
     const scales = [_]f64{ 1, 1 };
 
-    const ltssf = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .ltssf);
+    const ltssf = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .ltssf, null);
     try std.testing.expectEqual(@as(u32, 0), ltssf.columns[0]);
-    const bixby = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .bixby);
+    const bixby = try workspace.plan(view, &costs, &lower, &upper, &scales, &scales, 2, 1e-12, .bixby, null);
     try std.testing.expectEqual(@as(u32, 1), bixby.columns[0]);
     try std.testing.expectEqual(@as(u32, 1), bixby.rows[0]);
 }
