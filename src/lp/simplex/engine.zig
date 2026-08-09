@@ -968,6 +968,11 @@ pub const SimplexEngine = struct {
                 if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
             }
         }
+        // A retained structural crash on a large basis has already removed
+        // most logical columns. Its shorter Phase-I DSE framework reaches a
+        // stable Devex path earlier; explicit numeric budgets remain strict.
+        if (self.active_adaptive_dual_dse_budget and crash_installed and problem.num_rows >= 256)
+            self.active_dual_dse_update_budget = 32;
         const crash_feasibility = self.classifyFeasibility(problem);
         // An explicitly requested dual path must not silently become primal
         // simplex merely because the logical basis is primal feasible. HiGHS
