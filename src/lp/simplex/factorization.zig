@@ -455,19 +455,18 @@ pub const Factorization = struct {
         if (rhs.len != self.dimension or output.len < self.dimension) return 0;
         var count: usize = 0;
         if (self.backend_kind == .sparse_lu) {
-            var nonzero_count: usize = 0;
-            for (rhs) |value| if (value != 0.0) {
-                nonzero_count += 1;
-            };
+            // Build the dense/natural result during the density scan. Most
+            // entering columns exceed the 10% reindex threshold, so counting
+            // first and then rescanning paid two full row passes per pivot.
+            for (rhs, 0..) |value, row| {
+                if (value == 0.0) continue;
+                output[count] = @intCast(row);
+                count += 1;
+            }
             // HVector::reIndex replaces factor order by natural row order
             // whenever the result exceeds 10% density.
-            if (nonzero_count * 10 > self.dimension) {
-                for (rhs, 0..) |value, row| {
-                    if (value == 0.0) continue;
-                    output[count] = @intCast(row);
-                    count += 1;
-                }
-            } else {
+            if (count * 10 <= self.dimension) {
+                count = 0;
                 var position = self.dimension;
                 while (position > 0) {
                     position -= 1;
