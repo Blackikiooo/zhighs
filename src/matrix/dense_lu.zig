@@ -8,6 +8,19 @@ const std = @import("std");
 
 pub const DenseLuError = error{ DimensionMismatch, Singular, NumericalFailure, OutOfMemory };
 
+inline fn dotProduct4(left: []const f64, right: []const f64) f64 {
+    std.debug.assert(left.len == right.len);
+    var sum: f64 = 0.0;
+    var index: usize = 0;
+    while (index + 4 <= left.len) : (index += 4) {
+        const left_vector: @Vector(4, f64) = left[index..][0..4].*;
+        const right_vector: @Vector(4, f64) = right[index..][0..4].*;
+        sum += @reduce(.Add, left_vector * right_vector);
+    }
+    while (index < left.len) : (index += 1) sum += left[index] * right[index];
+    return sum;
+}
+
 pub const DenseLU = struct {
     /// Allocator owning factor, pivot, and solve-work buffers.
     allocator: std.mem.Allocator,
@@ -222,14 +235,25 @@ pub const DenseLU = struct {
     /// Solve `A*x = rhs` in place using the current `P*A = L*U` factors.
     pub fn solve(self: *Self, rhs: []f64) DenseLuError!void {
         if (rhs.len != self.n) return error.DimensionMismatch;
+        const vectorized_triangular_solve = self.n >= 48;
         for (0..self.n) |i| {
             self.work[i] = rhs[self.pivots[i]];
-            for (0..i) |j| self.work[i] -= self.lu[i * self.n + j] * self.work[j];
+            if (vectorized_triangular_solve) {
+                const factor_row = self.lu[i * self.n ..][0..i];
+                self.work[i] -= dotProduct4(factor_row, self.work[0..i]);
+            } else {
+                for (0..i) |j| self.work[i] -= self.lu[i * self.n + j] * self.work[j];
+            }
         }
         var row = self.n;
         while (row > 0) {
             row -= 1;
-            for (row + 1..self.n) |j| self.work[row] -= self.lu[row * self.n + j] * self.work[j];
+            if (vectorized_triangular_solve) {
+                const upper = self.lu[row * self.n + row + 1 ..][0 .. self.n - row - 1];
+                self.work[row] -= dotProduct4(upper, self.work[row + 1 ..]);
+            } else {
+                for (row + 1..self.n) |j| self.work[row] -= self.lu[row * self.n + j] * self.work[j];
+            }
             self.work[row] /= self.lu[row * self.n + row];
         }
         @memcpy(rhs, self.work);
