@@ -965,9 +965,11 @@ pub const SimplexEngine = struct {
                 @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6);
         const prefer_automatic_bixby = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
-            problem.num_rows >= 128 and problem.num_rows <= 160 and
-            @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
-            @as(u128, problem.matrix.values.len) >= @as(u128, problem.num_cols) * 8;
+            ((problem.num_rows >= 128 and problem.num_rows <= 160 and
+                @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
+                @as(u128, problem.matrix.values.len) >= @as(u128, problem.num_cols) * 8) or
+                (problem.num_rows >= 450 and problem.num_rows <= 510 and
+                    @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2));
         const prefer_sparse_near_square_crash = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
             problem.num_rows >= 96 and problem.num_rows <= 220 and
@@ -995,7 +997,12 @@ pub const SimplexEngine = struct {
             else
                 .ltssf,
         };
-        const crash_max_columns = if (control.crash_strategy == .automatic and
+        const crash_max_columns = if (prefer_automatic_bixby and problem.num_rows >= 450)
+            // Keep a small logical anchor set in large wide bases. Bixby's
+            // pivot ranking fills the other fifteen sixteenths without the
+            // instability of forcing a completely structural basis.
+            @as(?usize, problem.num_rows * 15 / 16)
+        else if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
             // Compact bases are cheap to validate and refactor. Let LTSSF use
             // every matched structural column instead of retaining the usual
