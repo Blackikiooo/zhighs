@@ -1203,6 +1203,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         self.recordRowPricingElapsed(pricing_started)
     else
         self.recordPricingElapsed(pricing_started);
+    var nonzero_count: usize = 0;
     if (row_pricing) {
         for (basis.dual_row, 0..) |dual_value, row_index| {
             if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
@@ -1228,14 +1229,21 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
                 alpha += basis.rhs_work[row_index] * coefficient * basis.column_scale[column];
             }
             basis.tableau[column] = alpha;
+            if (@abs(alpha) > self.numerical.zero_tolerance) nonzero_count += 1;
         }
     }
     for (0..problem.num_rows) |logical_row| {
-        basis.tableau[problem.num_cols + logical_row] = basis.dual_row[logical_row];
-    }
-    var nonzero_count: usize = 0;
-    for (basis.tableau[0 .. problem.num_cols + problem.num_rows]) |value| {
+        const value = basis.dual_row[logical_row];
+        basis.tableau[problem.num_cols + logical_row] = value;
         if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+    }
+    // Row pricing accumulates structural entries, so their final density is
+    // known only after the scatter. Column pricing counted each final alpha
+    // at its producer and avoids this second structural scan.
+    if (row_pricing) {
+        for (basis.tableau[0..problem.num_cols]) |value| {
+            if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+        }
     }
     const tableau_count = problem.num_cols + problem.num_rows;
     self.current_dual_tableau_density = if (tableau_count == 0)
