@@ -591,8 +591,13 @@ pub const SparseLU = struct {
             if (!self.marked[k]) continue;
             const solved = self.work[k];
             for (self.l_row_columns[self.l_row_starts[k]..self.l_row_starts[k + 1]], self.l_row_values[self.l_row_starts[k]..self.l_row_starts[k + 1]]) |column, value|
-                self.accumulate(column, -value * solved);
+                    self.accumulate(column, -value * solved);
         }
+        // The active set retains the input and every triangular fill entry.
+        // Clear the original column-space support before scattering the final
+        // row-space result so callers receive a fully materialized vector.
+        for (self.active[0..self.active_count]) |position|
+            rhs[self.pivot_columns[position]] = 0.0;
         var count: usize = 0;
         for (self.active[0..self.active_count]) |position| {
             const row = self.pivot_rows[position];
@@ -617,10 +622,16 @@ pub const SparseLU = struct {
             try self.solveTransposeHyperSparse(rhs, input_indices, self.hyper_output)
         else
             try self.solveHyperSparse(rhs, input_indices, self.hyper_output);
-        // Hyper methods leave only their output positions defined. Preserve the
-        // sparse result while materializing the conventional dense API. A
-        // full work clear plus full memcpy wrote 2*dimension entries; retain
-        // only the sparse values, clear the destination once, and scatter.
+        // Both BTRAN hyper kernels clear their intermediate column-space
+        // support before scattering row-space output, so transpose results
+        // already satisfy the conventional dense API.
+        if (transpose) {
+            self.last_sparse_output_count = count;
+            self.last_sparse_output_transpose = true;
+            return;
+        }
+        // FTRAN still leaves only its output positions defined. Preserve the
+        // sparse result while materializing the conventional dense API.
         for (self.hyper_output[0..count]) |index| self.work[index] = rhs[index];
         @memset(rhs[0..self.dimension], 0.0);
         for (self.hyper_output[0..count]) |index| rhs[index] = self.work[index];
@@ -985,6 +996,7 @@ test "factor graph hyper sparse FTRAN BTRAN and adaptive dispatch match dense" {
     rebuilt = .{0} ** 4;
     for (output[0..transpose_count]) |index| rebuilt[index] = hyper[index];
     try std.testing.expectEqualSlices(f64, &dense, &rebuilt);
+    try std.testing.expectEqualSlices(f64, &dense, &hyper);
 
     hyper = .{ 7, 0, 0, 0 };
     dense = hyper;
