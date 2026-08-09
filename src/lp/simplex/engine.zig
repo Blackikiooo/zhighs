@@ -837,15 +837,18 @@ pub const SimplexEngine = struct {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
-        if (self.active_dual_initialization_strategy == .automatic) {
-            self.active_dual_initialization_strategy = .highs;
-            for (problem.matrix.values) |coefficient| {
-                if (coefficient != 0.0 and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) {
-                    self.active_dual_initialization_strategy = .baseline;
-                    break;
-                }
+        var has_dropped_model_coefficient = false;
+        for (problem.matrix.values) |coefficient| {
+            if (coefficient != 0.0 and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) {
+                has_dropped_model_coefficient = true;
+                break;
             }
         }
+        if (self.active_dual_initialization_strategy == .automatic) {
+            self.active_dual_initialization_strategy = if (has_dropped_model_coefficient) .baseline else .highs;
+        }
+        if (self.active_degeneracy_strategy == .automatic)
+            self.active_degeneracy_strategy = if (has_dropped_model_coefficient) .baseline else .perturbation;
         if (self.active_pricing_kernel != .column)
             self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
         if (self.basis) |*old| old.deinit();
