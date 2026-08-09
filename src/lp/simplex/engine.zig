@@ -27,6 +27,24 @@ pub const Algorithm = enum { primal_revised, dual_revised };
 pub const PhaseOneStrategy = enum { primal, dual, automatic };
 /// Initial-basis construction policy.
 pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
+
+/// Decide whether a rejected LTSSF crash merits a second Bixby-ranked basis.
+/// The coverage bands correspond to the anchored prefix lengths emitted by
+/// the crash planner; condition separates useful pivot-strength ranking from
+/// cases where LTSSF's sparsity ordering is already the safer choice.
+fn shouldRetryAutomaticCrashWithBixby(rows: usize, structural: usize, condition: f64) bool {
+    if (rows == 0 or !std.math.isFinite(condition)) return false;
+    const scaled: u128 = @as(u128, structural) * 32;
+    const row_scale: u128 = rows;
+    const three_eighths = scaled >= row_scale * 10 and scaled <= row_scale * 14;
+    const three_sixteenths = scaled >= row_scale * 5 and scaled <= row_scale * 7;
+    const high_coverage = scaled >= row_scale * 23;
+    const ranked_three_eighths = three_eighths and
+        ((condition >= 8.0 and condition <= 16.0) or condition >= 100.0);
+    return ranked_three_eighths or
+        (three_sixteenths and rows >= 200) or
+        (high_coverage and condition >= 50.0 and condition <= 100.0);
+}
 /// Degeneracy and cycling mitigation policy.
 pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo, automatic };
 /// Pricing rule installed during primal Phase I.
@@ -959,6 +977,11 @@ pub const SimplexEngine = struct {
                 (conditioned_workset and (dual_infeasible_count <= 8 or
                     (covers_enough_rows and dual_infeasible_count <= 64))));
             if (!low_risk_crash) {
+                const retry_with_bixby = shouldRetryAutomaticCrashWithBixby(
+                    problem.num_rows,
+                    self.stats.crash_structural_columns,
+                    self.stats.crash_condition_estimate,
+                );
                 self.stats.crash_fallbacks += 1;
                 crash_installed = false;
                 if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
@@ -969,6 +992,21 @@ pub const SimplexEngine = struct {
                 self.observeFactorizationStability();
                 if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
                 if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                if (retry_with_bixby) {
+                    crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns, .bixby);
+                    if (crash_installed) {
+                        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    } else {
+                        if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
+                        self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                        self.numerical = logical_numerical_state;
+                        self.pricing = logical_pricing_state;
+                        self.dual_edge_weights_valid = true;
+                        self.observeFactorizationStability();
+                        if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+                        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    }
+                }
             }
         }
         // A retained structural crash on a large basis has already removed
@@ -1379,4 +1417,16 @@ test "engine rejects malformed borrowed problem dimensions" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     try std.testing.expectEqual(SolveStatus.numerical_failure, engine.solveProblem(problem, .{}));
+}
+
+test "automatic crash Bixby retry isolates rejected coverage bands" {
+    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(271, 101, 384));
+    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(220, 41, 13.3));
+    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(490, 367, 64));
+
+    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(197, 73, 4));
+    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(330, 123, 64));
+    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(174, 32, 16));
+    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(400, 300, 45));
+    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(497, 372, 128));
 }
