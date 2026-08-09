@@ -1020,6 +1020,12 @@ pub const SimplexEngine = struct {
         // stable Devex path earlier; explicit numeric budgets remain strict.
         if (self.active_adaptive_dual_dse_budget and crash_installed and problem.num_rows >= 256)
             self.active_dual_dse_update_budget = 32;
+        // On a compact but highly conditioned structural basis, exact DSE
+        // norms amplify basis geometry without improving the leaving-row
+        // ordering. Start directly with the Devex framework in this regime.
+        if (self.active_adaptive_dual_dse_budget and crash_installed and
+            problem.num_rows <= 64 and self.stats.crash_condition_estimate >= 1.0e3)
+            self.active_dual_edge_weight_strategy = .inherit;
         const crash_feasibility = self.classifyFeasibility(problem);
         // An explicitly requested dual path must not silently become primal
         // simplex merely because the logical basis is primal feasible. HiGHS
