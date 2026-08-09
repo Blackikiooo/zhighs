@@ -69,7 +69,12 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, text, "steepest-devex")) .steepest_devex else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
     else
         .steepest_devex;
-    const dual_dse_update_budget = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 64;
+    const dual_dse_budget_text = args.next() orelse "auto";
+    const adaptive_dual_dse_budget = std.mem.eql(u8, dual_dse_budget_text, "auto");
+    const dual_dse_update_budget = if (adaptive_dual_dse_budget)
+        64
+    else
+        try std.fmt.parseUnsigned(usize, dual_dse_budget_text, 10);
     const primal_pricing_strategy: zhighs.lp.simplex.engine.PrimalPricingStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "partial")) .partial else if (std.mem.eql(u8, text, "inherit")) .inherit else return error.InvalidArguments
     else
@@ -158,6 +163,7 @@ pub fn main(init: std.process.Init) !void {
         .devex_strategy = devex_strategy,
         .dual_edge_weight_strategy = dual_edge_weight_strategy,
         .dual_dse_update_budget = dual_dse_update_budget,
+        .adaptive_dual_dse_budget = adaptive_dual_dse_budget,
         .primal_pricing_strategy = primal_pricing_strategy,
         .dual_initialization_strategy = dual_initialization_strategy,
     });

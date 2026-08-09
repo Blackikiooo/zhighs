@@ -13,7 +13,7 @@ RUNS=${RUNS:-11}
 WARMUPS=${WARMUPS:-2}
 DUAL_EDGE_WEIGHT_STRATEGY=${DUAL_EDGE_WEIGHT_STRATEGY:-steepest-devex}
 PRICING_KERNEL=${PRICING_KERNEL:-column}
-DUAL_DSE_UPDATE_BUDGET=${DUAL_DSE_UPDATE_BUDGET:-64}
+DUAL_DSE_UPDATE_BUDGET=${DUAL_DSE_UPDATE_BUDGET:-auto}
 
 if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || ((RUNS % 2 == 0)); then
   echo "RUNS must be a positive odd integer" >&2

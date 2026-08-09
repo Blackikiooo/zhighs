@@ -348,6 +348,9 @@ pub const SolveControl = struct {
     /// Maximum successful DSE recurrence updates per dual phase before
     /// switching to dual Devex. Zero disables the budget-triggered switch.
     dual_dse_update_budget: usize = 64,
+    /// Let Phase I retain exact DSE on large, nearly dual-feasible starts.
+    /// Numeric budgets remain strict when this is false.
+    adaptive_dual_dse_budget: bool = true,
     /// Source-alignment track for HiGHS Phase-I coordinates and initialization.
     /// Automatic keeps HiGHS initialization except when model coefficients at
     /// the canonical drop tolerance require the robust baseline path.
@@ -721,6 +724,7 @@ pub const SimplexEngine = struct {
     active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
     /// Resolved DSE update budget before Devex fallback.
     active_dual_dse_update_budget: usize = 64,
+    active_adaptive_dual_dse_budget: bool = true,
     /// Resolved dual initialization formulas.
     active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
     /// Successful DSE recurrences since the current dual phase began.
@@ -821,6 +825,7 @@ pub const SimplexEngine = struct {
         self.active_primal_pricing_strategy = control.primal_pricing_strategy;
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
+        self.active_adaptive_dual_dse_budget = control.adaptive_dual_dse_budget;
         self.active_dual_initialization_strategy = control.dual_initialization_strategy;
         self.dual_dse_updates_since_start = 0;
         self.dual_dse_certificate_fallback_active = false;
@@ -1153,6 +1158,7 @@ pub const SimplexEngine = struct {
         self.active_primal_pricing_strategy = control.primal_pricing_strategy;
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
+        self.active_adaptive_dual_dse_budget = control.adaptive_dual_dse_budget;
         self.dual_dse_updates_since_start = 0;
         self.dual_dse_certificate_fallback_active = false;
         self.reduced_cost_refresh_period = 8;

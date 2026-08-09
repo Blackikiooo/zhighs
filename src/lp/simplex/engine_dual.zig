@@ -636,6 +636,9 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             original_count,
             self.numerical.dual_tolerance,
         );
+        if (self.active_adaptive_dual_dse_budget and problem.num_rows >= 256 and
+            self.dual_phase_one_initial_flips <= 4)
+            self.active_dual_dse_update_budget = 0;
         self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
