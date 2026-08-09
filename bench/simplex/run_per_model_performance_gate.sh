@@ -45,7 +45,7 @@ c++ -O3 -march=native -DNDEBUG -flto \
 
 readonly ZIG_RUNNER="$REPOSITORY_ROOT/zig-out/bin/simplex-end-to-end"
 readonly HIGHS_RUNNER="$REPOSITORY_ROOT/zig-out/bin/highs-end-to-end"
-readonly SOLVE_ARGS=(1000000 100 no-trace 8 2 64 no-stats 32 dual auto 0 baseline inherit fixed "$PRICING_KERNEL" framework "$DUAL_EDGE_WEIGHT_STRATEGY" "$DUAL_DSE_UPDATE_BUDGET" inherit highs)
+readonly SOLVE_ARGS=(1000000 100 no-trace 8 2 64 no-stats 32 dual auto 0 baseline inherit fixed "$PRICING_KERNEL" framework "$DUAL_EDGE_WEIGHT_STRATEGY" "$DUAL_DSE_UPDATE_BUDGET" inherit auto)
 samples=$(mktemp /tmp/zhighs-per-model-performance.XXXXXX.tsv)
 trap 'rm -f "$samples"' EXIT
 

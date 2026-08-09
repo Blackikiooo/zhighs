@@ -42,7 +42,7 @@ pub const PrimalPricingStrategy = enum { inherit, partial };
 /// full dual Devex when the recurrence is rejected or exceeds its work budget.
 pub const DualEdgeWeightStrategy = enum { inherit, steepest_devex };
 /// Dual initialization formulas used before Phase I/II selection.
-pub const DualInitializationStrategy = enum { baseline, highs };
+pub const DualInitializationStrategy = enum { baseline, highs, automatic };
 /// Public progress phase reported to callbacks and traces.
 pub const SolvePhase = enum { phase_one, dual_phase_one, dual_feasibility_repair, phase_two };
 /// Return value by which a progress callback requests continuation or stop.
@@ -349,9 +349,9 @@ pub const SolveControl = struct {
     /// switching to dual Devex. Zero disables the budget-triggered switch.
     dual_dse_update_budget: usize = 64,
     /// Source-alignment track for HiGHS Phase-I coordinates and initialization.
-    /// Baseline remains the production default until the complete dual corpus
-    /// clears the no-regression gate.
-    dual_initialization_strategy: DualInitializationStrategy = .baseline,
+    /// Automatic keeps HiGHS initialization except when model coefficients at
+    /// the canonical drop tolerance require the robust baseline path.
+    dual_initialization_strategy: DualInitializationStrategy = .automatic,
 };
 
 /// Optional counters and timings accumulated during one solve.
@@ -832,6 +832,15 @@ pub const SimplexEngine = struct {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
+        if (self.active_dual_initialization_strategy == .automatic) {
+            self.active_dual_initialization_strategy = .highs;
+            for (problem.matrix.values) |coefficient| {
+                if (coefficient != 0.0 and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) {
+                    self.active_dual_initialization_strategy = .baseline;
+                    break;
+                }
+            }
+        }
         if (self.active_pricing_kernel != .column)
             self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
         if (self.basis) |*old| old.deinit();

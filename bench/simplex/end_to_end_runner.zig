@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     else
         .inherit;
     const dual_initialization_strategy: zhighs.lp.simplex.engine.DualInitializationStrategy = if (args.next()) |text|
-        if (std.mem.eql(u8, text, "highs")) .highs else if (std.mem.eql(u8, text, "baseline")) .baseline else return error.InvalidArguments
+        if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "highs")) .highs else if (std.mem.eql(u8, text, "baseline")) .baseline else return error.InvalidArguments
     else
         .baseline;
     if (args.next() != null) return error.InvalidArguments;
