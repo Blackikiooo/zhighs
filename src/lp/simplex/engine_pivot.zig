@@ -144,12 +144,18 @@ pub fn computeDualDirection(
         alpha_col = basis.pivot_direction[leaving_row];
         if (!std.math.isFinite(alpha_col)) return .numerical_failure;
     }
-    for (basis.pivot_direction) |value|
+    var direction_nonzeros: usize = 0;
+    for (basis.pivot_direction, 0..) |value, row| {
         if (!std.math.isFinite(value)) return .numerical_failure;
+        if (value == 0.0) continue;
+        self.dual_work.changed_row_index[direction_nonzeros] = @intCast(row);
+        direction_nonzeros += 1;
+    }
     self.observeAqDensity(basis.pivot_direction);
-    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+    self.dual_work.changed_row_count = self.factorization.orderGatheredFtranIndices(
         basis.pivot_direction,
         self.dual_work.changed_row_index,
+        direction_nonzeros,
     );
     return .optimal;
 }

@@ -510,6 +510,23 @@ pub const Factorization = struct {
         return count;
     }
 
+    /// Apply HiGHS' sparse FTRAN ordering after a caller has already gathered
+    /// the natural-order support while validating the result.
+    pub fn orderGatheredFtranIndices(self: *const Factorization, rhs: []const f64, output: []u32, natural_count: usize) usize {
+        if (rhs.len != self.dimension or output.len < self.dimension or natural_count > self.dimension) return 0;
+        if (self.backend_kind != .sparse_lu or natural_count * 10 > self.dimension) return natural_count;
+        var count: usize = 0;
+        var position = self.dimension;
+        while (position > 0) {
+            position -= 1;
+            const row = self.sparse_lu.pivot_columns[position];
+            if (rhs[row] == 0.0) continue;
+            output[count] = row;
+            count += 1;
+        }
+        return count;
+    }
+
     /// Transpose solve `rhs = B^-T * rhs` in place. Eta updates are applied
     /// in reverse order before the backend transpose solve.
     pub fn solveTranspose(self: *Factorization, rhs: []f64) FactorizationError!void {
