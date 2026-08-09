@@ -978,6 +978,14 @@ pub const SimplexEngine = struct {
             // gate and needlessly repeats the logical-basis pivot sequence.
             @as(?usize, problem.num_rows)
         else if (control.crash_strategy == .automatic and
+            control.crash_max_columns == null and problem.num_rows >= 512 and
+            @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3)
+            // Large wide matrices can expose a long symbolic matching whose
+            // dense prefix is rank deficient. Starting with one third of the
+            // rows avoids repeated failed factorizations and retains enough
+            // structural coverage to shorten the subsequent dual solve.
+            @as(?usize, problem.num_rows / 3)
+        else if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 96 and problem.num_rows <= 128 and
             @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3)
             @as(?usize, 25)
