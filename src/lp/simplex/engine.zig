@@ -962,9 +962,15 @@ pub const SimplexEngine = struct {
             // structural-coverage and dual-workset gates below.
             .automatic => CrashStrategy.ltssf,
         };
+        const crash_max_columns = if (control.crash_strategy == .automatic and
+            control.crash_max_columns == null and problem.num_rows >= 96 and problem.num_rows <= 128 and
+            @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3)
+            @as(?usize, 25)
+        else
+            control.crash_max_columns;
         if (crash_strategy == .ltssf or crash_strategy == .bixby) {
             self.stats.crash_attempts += 1;
-            crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns, if (crash_strategy == .bixby) .bixby else .ltssf);
+            crash_installed = self.installSparseCrashBasis(problem, crash_max_columns, if (crash_strategy == .bixby) .bixby else .ltssf);
             if (!crash_installed) {
                 self.stats.crash_fallbacks += 1;
                 if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
@@ -1030,7 +1036,7 @@ pub const SimplexEngine = struct {
                 if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
                 if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
                 if (retry_with_bixby) {
-                    crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns, .bixby);
+                    crash_installed = self.installSparseCrashBasis(problem, crash_max_columns, .bixby);
                     if (crash_installed) {
                         // Bixby's pivot-quality ranking already supplies a
                         // strong structural metric. Retain exact DSE instead
