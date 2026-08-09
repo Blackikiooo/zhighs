@@ -49,6 +49,8 @@ pub const Workspace = struct {
     ever_active: bool = false,
     /// Next slot overwritten in the circular taboo history.
     taboo_cursor: usize = 0,
+    /// Whether `taboo_until` contains any nonzero expiration horizon.
+    has_taboo: bool = false,
 
     /// Construct an empty workspace; arrays are allocated lazily by `ensureCapacity`.
     pub fn init(allocator: std.mem.Allocator) Workspace {
@@ -72,7 +74,11 @@ pub const Workspace = struct {
         if (self.column_rank.len < columns) self.column_rank = try self.allocator.realloc(self.column_rank, columns);
         if (self.row_generation.len < rows) self.row_generation = try self.allocator.realloc(self.row_generation, rows);
         if (self.column_generation.len < columns) self.column_generation = try self.allocator.realloc(self.column_generation, columns);
-        if (self.taboo_until.len < columns) self.taboo_until = try self.allocator.realloc(self.taboo_until, columns);
+        if (self.taboo_until.len < columns) {
+            const previous_len = self.taboo_until.len;
+            self.taboo_until = try self.allocator.realloc(self.taboo_until, columns);
+            @memset(self.taboo_until[previous_len..], 0);
+        }
         if (self.reduced_cost_snapshot.len < columns)
             self.reduced_cost_snapshot = try self.allocator.realloc(self.reduced_cost_snapshot, columns);
     }
@@ -175,8 +181,10 @@ pub const Workspace = struct {
         };
         self.taboo_cursor = (self.taboo_cursor + 1) % self.taboo.len;
         const column: usize = @intCast(entering);
-        if (column < self.taboo_until.len)
+        if (column < self.taboo_until.len) {
             self.taboo_until[column] = std.math.add(usize, iteration, lifetime) catch std.math.maxInt(usize);
+            self.has_taboo = true;
+        }
     }
 
     /// Invalidate all taboo entries by bumping the generation counter and clearing expiration times.
@@ -184,7 +192,10 @@ pub const Workspace = struct {
         self.generation +%= 1;
         if (self.generation == 0) self.generation = 1;
         self.taboo_cursor = 0;
-        @memset(self.taboo_until, 0);
+        if (self.has_taboo) {
+            @memset(self.taboo_until, 0);
+            self.has_taboo = false;
+        }
     }
 
     /// Total bytes currently held by all dynamic buffers (used for memory budgeting).
@@ -240,4 +251,20 @@ test "perturbation ranks are deterministic and bounded" {
     workspace.basis_epoch -%= 1;
     try workspace.activate(&.{ 1.0, 0.5, 2.0 }, &.{ 1.0, 0.25, 2.0, 1.0 }, 1e-7, 2e-7, 1.0);
     try std.testing.expectEqual(first, workspace.row_rank[0]);
+}
+
+test "taboo invalidation clears only populated horizons" {
+    var workspace = Workspace.init(std.testing.allocator);
+    defer workspace.deinit();
+    try workspace.ensureCapacity(1, 4);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0, 0 }, workspace.taboo_until);
+    workspace.invalidateTaboo();
+    try std.testing.expect(!workspace.has_taboo);
+
+    workspace.recordTaboo(2, 1, 1.0, 5, 7);
+    try std.testing.expect(workspace.has_taboo);
+    try std.testing.expectEqual(@as(usize, 12), workspace.taboo_until[2]);
+    workspace.invalidateTaboo();
+    try std.testing.expect(!workspace.has_taboo);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0, 0 }, workspace.taboo_until);
 }
