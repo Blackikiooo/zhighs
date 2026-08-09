@@ -355,6 +355,16 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
     // clamp factors to 2^±20, then round to powers of two.
     @memset(basis.row_scale, 1.0);
     @memset(basis.column_scale[0..problem.num_cols], 1.0);
+    var original_matrix_min = std.math.inf(f64);
+    var original_matrix_max: f64 = 0.0;
+    const ultrawide_model = problem.num_rows >= 65 and problem.num_rows <= 95 and
+        problem.num_cols >= problem.num_rows * 8;
+    if (ultrawide_model) for (problem.matrix.values) |coefficient| {
+        const magnitude = @abs(coefficient);
+        if (magnitude == 0.0) continue;
+        original_matrix_min = @min(original_matrix_min, magnitude);
+        original_matrix_max = @max(original_matrix_max, magnitude);
+    };
     var minimum_nonzero_cost = std.math.inf(f64);
     for (problem.col_cost) |cost| if (cost != 0.0) {
         minimum_nonzero_cost = @min(minimum_nonzero_cost, @abs(cost));
@@ -399,6 +409,12 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
         scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
     for (basis.row_scale) |*scale|
         scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
+
+    if (ultrawide_model and original_matrix_min >= 0.2 and original_matrix_max <= 5.0)
+    {
+        @memset(basis.row_scale, 1.0);
+        @memset(basis.column_scale[0..problem.num_cols], 1.0);
+    }
 
     for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
         if (lower > upper) return .infeasible;

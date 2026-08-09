@@ -655,11 +655,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             self.numerical.dual_tolerance,
         );
         if (self.active_adaptive_dual_dse_budget) {
-            if (problem.num_rows >= 65 and problem.num_rows <= 95 and
-                problem.num_cols >= problem.num_rows * 8 and self.dual_phase_one_initial_flips == 0)
-            {
-                self.active_max_update_count = @min(self.active_max_update_count, 16);
-            } else if (problem.num_rows <= 32 and self.dual_phase_one_initial_flips >= 16)
+            if (problem.num_rows <= 32 and self.dual_phase_one_initial_flips >= 16)
                 self.active_dual_dse_update_budget = 4
             else if (problem.num_rows <= 54 and
                 self.dual_control.unperturbed_dual_infeasibility_count != 0 and
