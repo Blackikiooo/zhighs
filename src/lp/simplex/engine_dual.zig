@@ -203,6 +203,7 @@ fn solveDualLoop(
     const shifted_iteration_started = self.iterations;
     var shifted_iterations_recorded = false;
     var no_entering_recovery_used = false;
+    var no_entering_devex_recovery_used = false;
     var fresh_no_entering_basis = false;
     defer if (use_work_costs and !shifted_iterations_recorded) {
         self.stats.shifted_dual_iterations += self.iterations -| shifted_iteration_started;
@@ -311,6 +312,34 @@ fn solveDualLoop(
             return .numerical_failure;
         }
         const entering_col = entering.column orelse {
+            if (!use_work_costs) {
+                if (!no_entering_recovery_used) {
+                    no_entering_recovery_used = true;
+                    if (rebuildDualState(self, problem, false, .solve_residual, false) != null and
+                        self.classifyFeasibility(problem).dual)
+                    {
+                        fresh_no_entering_basis = true;
+                        continue;
+                    }
+                }
+                if (fresh_no_entering_basis and self.buildAndValidateInfeasibilityRay(problem, leaving))
+                    return .infeasible;
+                if (!no_entering_devex_recovery_used and
+                    self.active_dual_edge_weight_strategy == .steepest_devex and
+                    self.pricing.rule == .steepest_edge)
+                {
+                    no_entering_devex_recovery_used = true;
+                    self.dual_dse_certificate_fallback_active = true;
+                    self.switchDualDseToDevex(.invalid);
+                    fresh_no_entering_basis = false;
+                    continue;
+                }
+                // Never publish primal infeasibility from an updated/stale
+                // factor chain without a valid original-coordinate proof.
+                // The outer controller can still retry from its checkpoint.
+                self.failure_site = .ratio_test;
+                return .numerical_failure;
+            }
             if (use_work_costs) {
                 if (!no_entering_recovery_used) {
                     no_entering_recovery_used = true;
@@ -336,7 +365,8 @@ fn solveDualLoop(
         };
         const entering_index: usize = @intCast(entering_col);
         fresh_no_entering_basis = false;
-        if (self.computeDirection(problem, entering_index) != .optimal) return .numerical_failure;
+        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
+            return .numerical_failure;
         if (entering.direction < 0.0) {
             for (basis.pivot_direction) |*value| value.* = -value.*;
         }
@@ -391,8 +421,17 @@ fn solveDualLoop(
             false,
             entering.flip_count,
         );
+        // A basis rebuild already performs an exact reduced-cost reprice.
+        // Keep the fixed dual refresh boundary aligned with the maximum FT
+        // update age instead of paying for another full BTRAN+PRICE every
+        // eight pivots. Adaptive mode retains its deliberately shorter
+        // drift-driven period.
+        const dual_refresh_period = if (self.active_adaptive_reprice)
+            self.reduced_cost_refresh_period
+        else
+            @max(self.reduced_cost_refresh_period, self.numerical.max_update_count);
         if (self.fresh_factorization_pivots_remaining != 0 or
-            self.reduced_cost_update_count >= self.reduced_cost_refresh_period)
+            self.reduced_cost_update_count >= dual_refresh_period)
         {
             const refresh = if (use_work_costs)
                 self.recomputeReducedCostsFromWork(problem)
@@ -610,7 +649,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         );
     }
     self.algorithm = .dual_revised;
-    self.dual_edge_weights_valid = false;
 
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
@@ -676,7 +714,8 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         }
         const entering_col = entering.column orelse unreachable;
         const entering_index: usize = @intCast(entering_col);
-        if (self.computeDirection(problem, entering_index) != .optimal) return .not_implemented;
+        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
+            return .not_implemented;
         if (entering.direction < 0.0) {
             for (basis.pivot_direction) |*value| value.* = -value.*;
         }
@@ -723,6 +762,14 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     if (self.refactorizeBasis(problem, .cleanup) != .optimal) return .not_implemented;
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.recomputeReducedCosts(problem) != .optimal) return .not_implemented;
+    // Restoring Phase-II bounds invalidates the Phase-I RHS infeasibilities
+    // even though the basis itself is unchanged. Rebuild the list now, as
+    // HiGHS does with the rest of its solve state, so the following Phase-II
+    // CHUZR does not score stale Phase-I rows or initialize an unused DSE
+    // framework before discovering that the basis is already primal feasible.
+    if (enable_highs_rhs_infeasibility_list and self.active_dual_initialization_strategy == .highs and
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
+        return .not_implemented;
 
     var dual_infeasible: usize = 0;
     for (basis.reduced_cost[0..original_count], basis.col_status[0..original_count]) |reduced, status| {
@@ -1046,7 +1093,8 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
         const entering_col = entering.column orelse return .infeasible;
         const entering_index: usize = @intCast(entering_col);
-        if (self.computeDirection(problem, entering_index) != .optimal) return .numerical_failure;
+        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
+            return .numerical_failure;
         if (entering.direction < 0.0) {
             for (basis.pivot_direction) |*value| value.* = -value.*;
         }
@@ -1106,6 +1154,16 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             return .numerical_failure;
         const updated_weight = basis.row_edge_weight[row];
         if (self.active_dual_initialization_strategy == .highs) {
+            const safe_updated = @max(updated_weight, self.numerical.zero_tolerance);
+            if (updated_weight < exact_weight) {
+                self.dual_dse_average_log_low_error =
+                    0.99 * self.dual_dse_average_log_low_error +
+                    0.01 * @log(exact_weight / safe_updated);
+            } else {
+                self.dual_dse_average_log_high_error =
+                    0.99 * self.dual_dse_average_log_high_error +
+                    0.01 * @log(safe_updated / exact_weight);
+            }
             // HiGHS CHUZR always overwrites the selected row's recurrence
             // weight with the exact BTRAN norm. Candidate rejection is kept
             // in chooseDualLeavingWithExactDseValidation so the corrected
@@ -1126,8 +1184,13 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         }
     }
     self.dual_row_index = leaving_row;
-    @memset(basis.tableau, 0.0);
     const row_pricing = self.selectRowPricing(basis.dual_row);
+    // Row pricing scatters into structural entries and therefore needs a
+    // zeroed accumulation target. Column pricing overwrites every structural
+    // entry below, while the logical block is overwritten in both paths; do
+    // not clear the full tableau (including unused artificial columns) on
+    // every dual pivot.
+    if (row_pricing) @memset(basis.tableau[0..problem.num_cols], 0.0);
     const pricing_started = self.statisticsTimestamp();
     defer if (row_pricing)
         self.recordRowPricingElapsed(pricing_started)
@@ -1163,6 +1226,10 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
     }
     const tableau_count = problem.num_cols + problem.num_rows;
+    self.current_dual_tableau_density = if (tableau_count == 0)
+        0.0
+    else
+        @as(f64, @floatFromInt(nonzero_count)) / @as(f64, @floatFromInt(tableau_count));
     self.dual_hyper_sparse_active = tableau_count > 0 and nonzero_count * 10 < tableau_count;
     if (!self.dual_hyper_sparse_active) self.dual_candidate_count = 0;
     return .optimal;
@@ -1267,11 +1334,13 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
 /// Atomically apply the BFRT flip prefix selected by CHUZC.
 ///
 /// All column displacements are accumulated in equation space and transformed
-/// with one FTRAN. The solve is residual-checked and retried after reinversion
-/// when necessary. No status, primal value, or infeasibility-list entry is
-/// published until that aggregate solve succeeds, so numerical failure cannot
-/// leave a partially committed flip batch. `flip_count` addresses the prefix
-/// of `basis.flip_columns` produced by the ratio test.
+/// with one FTRAN, matching `HEkkDual::updateFtranBFRT`. No status, primal
+/// value, or infeasibility-list entry is published until that solve succeeds,
+/// so numerical failure cannot leave a partially committed flip batch.
+/// `flip_count` addresses the prefix of `basis.flip_columns` produced by the
+/// ratio test. The entering-column FTRAN immediately following BFRT owns the
+/// iteration's residual/reinversion guard; repeating a full basis product here
+/// made every accepted flip batch pay for a second validation absent in HiGHS.
 pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
     if (flip_count == 0) return .optimal;
     self.stats.bound_flips += flip_count;
@@ -1288,18 +1357,6 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     @memcpy(basis.rhs_work, basis.residual_work);
     self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
     for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
-    if (!self.boundFlipResidualAcceptable(problem)) {
-        self.factorization.recordReinversion(.solve_residual);
-        if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
-        // Reinversion and its validation reuse row workspaces, so rebuild
-        // the immutable aggregate before retrying the exact same batch.
-        if (self.accumulateBoundFlipRhs(problem, flip_count, basis.residual_work) != .optimal)
-            return .numerical_failure;
-        @memcpy(basis.rhs_work, basis.residual_work);
-        self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
-        for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
-        if (!self.boundFlipResidualAcceptable(problem)) return .numerical_failure;
-    }
     self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
         basis.rhs_work,
         self.dual_work.changed_row_index,

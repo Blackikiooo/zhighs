@@ -46,15 +46,33 @@ pub fn updateDualDevexWeights(self: *SimplexEngine, leaving_row: usize, pivot: f
 pub fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
     if (self.dual_edge_weights_valid) return .optimal;
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    @memset(basis.dual_row, 0.0);
     for (basis.row_edge_weight, 0..) |*weight, row| {
-        @memset(basis.dual_row, 0.0);
+        // The adaptive BTRAN publishes its sparse support. Clear only the
+        // previous result instead of the complete dense row for every unit
+        // RHS; fall back to a dense clear when the backend did not publish a
+        // support (the first iteration is already zeroed above).
+        if (row != 0) {
+            const previous_indices = self.factorization.lastSparseSolveIndices();
+            if (previous_indices.len == 0)
+                @memset(basis.dual_row, 0.0)
+            else for (previous_indices) |index| basis.dual_row[index] = 0.0;
+        }
         basis.dual_row[row] = 1.0;
         // Unit-vector BTRAN: pass the single nonzero index for
         // sparse-index adaptive dispatch (hyper-sparse L solve).
         const ep_index = [_]u32{@intCast(row)};
         self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
         var norm_squared: f64 = 0.0;
-        for (basis.dual_row) |entry| norm_squared += entry * entry;
+        const result_indices = self.factorization.lastSparseSolveIndices();
+        if (result_indices.len == 0) {
+            for (basis.dual_row) |entry| norm_squared += entry * entry;
+        } else {
+            for (result_indices) |index| {
+                const entry = basis.dual_row[index];
+                norm_squared += entry * entry;
+            }
+        }
         if (!std.math.isFinite(norm_squared)) return .numerical_failure;
         weight.* = @max(norm_squared, self.numerical.zero_tolerance);
     }
@@ -72,10 +90,26 @@ const DualDseFallbackReason = enum { invalid, budget };
 pub fn beginDualEdgeWeightPhase(self: *SimplexEngine) pricing_module.PricingRule {
     const saved = self.pricing.rule;
     if (self.active_dual_edge_weight_strategy == .steepest_devex) {
+        if (self.dual_dse_certificate_fallback_active) {
+            self.pricing.rule = .devex;
+            return saved;
+        }
         self.pricing.rule = .steepest_edge;
-        self.dual_edge_weights_valid = false;
+        // Preserve an exact framework across a phase boundary. In particular,
+        // the logical basis starts with exact unit DSE weights; invalidating
+        // them here made a no-pivot Phase-I probe and the following Phase II
+        // each perform num_rows redundant BTRAN solves. Basis import, primal
+        // pivots and Devex fallback explicitly clear this flag when the stored
+        // weights no longer describe the current basis.
         self.dual_row_index = null;
         self.dual_dse_updates_since_start = 0;
+        self.dual_dse_aq_density = 0.0;
+        self.dual_dse_ep_density = 0.0;
+        self.dual_dse_ap_density = 0.0;
+        self.dual_dse_tau_density = 0.0;
+        self.dual_dse_costly_iterations = 0;
+        self.dual_dse_average_log_low_error = 0.0;
+        self.dual_dse_average_log_high_error = 0.0;
     }
     return saved;
 }
@@ -106,13 +140,21 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         @abs(pivot) <= self.numerical.pivot_tolerance)
         return .numerical_failure;
     var exact_pivot_weight: f64 = 0.0;
-    for (basis.dual_row) |entry| exact_pivot_weight += entry * entry;
+    var ep_nonzeros: usize = 0;
+    for (basis.dual_row) |entry| {
+        exact_pivot_weight += entry * entry;
+        if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+    }
     if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
         return .numerical_failure;
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
     @memcpy(basis.residual_work, basis.dual_row);
     self.factorization.solve(basis.residual_work) catch return .numerical_failure;
+    var aq_nonzeros: usize = 0;
+    var tau_nonzeros: usize = 0;
     for (basis.row_edge_weight, basis.pivot_direction, basis.residual_work, 0..) |*weight, alpha, tau, row| {
+        if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
+        if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
         if (row == leaving_row) continue;
         const ratio = alpha / pivot;
         const updated = weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
@@ -120,7 +162,39 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         weight.* = @max(updated, 1e-4);
     }
     basis.row_edge_weight[leaving_row] = @max(exact_pivot_weight / (pivot * pivot), 1e-4);
+    const row_count = basis.row_edge_weight.len;
+    if (row_count != 0) {
+        const inverse_rows = 1.0 / @as(f64, @floatFromInt(row_count));
+        const multiplier = 0.05;
+        self.dual_dse_aq_density = (1.0 - multiplier) * self.dual_dse_aq_density +
+            multiplier * @as(f64, @floatFromInt(aq_nonzeros)) * inverse_rows;
+        self.dual_dse_ep_density = (1.0 - multiplier) * self.dual_dse_ep_density +
+            multiplier * @as(f64, @floatFromInt(ep_nonzeros)) * inverse_rows;
+        self.dual_dse_tau_density = (1.0 - multiplier) * self.dual_dse_tau_density +
+            multiplier * @as(f64, @floatFromInt(tau_nonzeros)) * inverse_rows;
+        self.dual_dse_ap_density = (1.0 - multiplier) * self.dual_dse_ap_density +
+            multiplier * self.current_dual_tableau_density;
+        const denominator = @max(
+            @max(self.dual_dse_ep_density, self.dual_dse_aq_density),
+            self.dual_dse_ap_density,
+        );
+        const relative_density = if (denominator > 0.0) self.dual_dse_tau_density / denominator else 0.0;
+        if (relative_density * relative_density > 1000.0 and self.dual_dse_tau_density > 0.01)
+            self.dual_dse_costly_iterations += 1;
+    }
     return .optimal;
+}
+
+/// HiGHS `switchToDevex` density/frequency criterion. The explicit budget is
+/// a hard experimental cap; zero selects this automatic policy.
+pub fn shouldSwitchDualDseToDevex(self: *const SimplexEngine, total_columns: usize) bool {
+    if (self.active_dual_dse_update_budget != 0)
+        return self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget;
+    const costly = self.dual_dse_updates_since_start * 10 > total_columns and
+        self.dual_dse_costly_iterations * 20 > self.dual_dse_updates_since_start;
+    const inaccurate = self.dual_dse_average_log_low_error +
+        self.dual_dse_average_log_high_error > 10.0;
+    return costly or inaccurate;
 }
 
 test "exact dual steepest-edge weights use BTRAN row norms" {

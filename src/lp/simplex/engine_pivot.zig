@@ -73,6 +73,73 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
     return .optimal;
 }
 
+/// Compute the dual entering column and validate its pivot against the
+/// independently priced pivotal row, matching `HEkkDual::updateVerify`.
+///
+/// Dual simplex already owns `alpha_row = e_p^T B^-1 a_q` in `tableau` before
+/// FTRAN. Comparing it with `alpha_col` from the entering solve detects update
+/// drift in O(1); a full `B*x-a_q` product on every pivot is both absent from
+/// HiGHS and disproportionately expensive on wide sparse models. Primal
+/// simplex retains `computeDirection` and its stronger whole-column residual.
+pub fn computeDualDirection(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    entering_col: usize,
+    leaving_row: usize,
+) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    if (entering_col >= problem.num_cols + problem.num_rows or
+        leaving_row >= problem.num_rows or
+        self.dual_row_index != @as(u32, @intCast(leaving_row)))
+        return .numerical_failure;
+    self.direction_requires_reinversion = false;
+    const alpha_row = basis.tableau[entering_col];
+    if (!std.math.isFinite(alpha_row)) return .numerical_failure;
+
+    if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
+        self.failure_site = .direction_column;
+        return .numerical_failure;
+    }
+    self.factorization.solveForUpdate(basis.pivot_direction) catch {
+        self.failure_site = .direction_solve;
+        return .numerical_failure;
+    };
+
+    var alpha_col = basis.pivot_direction[leaving_row];
+    const min_alpha = @min(@abs(alpha_col), @abs(alpha_row));
+    const relative_difference = if (min_alpha == 0.0)
+        (if (alpha_col == alpha_row) 0.0 else std.math.inf(f64))
+    else
+        @abs(@abs(alpha_col) - @abs(alpha_row)) / min_alpha;
+    if ((!std.math.isFinite(relative_difference) or relative_difference > 1e-7) and
+        self.factorization.update_count > 0)
+    {
+        self.factorization.recordReinversion(.solve_residual);
+        if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
+            self.failure_site = .direction_refactor;
+            return .numerical_failure;
+        }
+        if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal) {
+            self.failure_site = .direction_column;
+            return .numerical_failure;
+        }
+        self.factorization.solveForUpdate(basis.pivot_direction) catch {
+            self.failure_site = .direction_solve;
+            return .numerical_failure;
+        };
+        alpha_col = basis.pivot_direction[leaving_row];
+        if (!std.math.isFinite(alpha_col)) return .numerical_failure;
+    }
+    for (basis.pivot_direction) |value|
+        if (!std.math.isFinite(value)) return .numerical_failure;
+    self.observeAqDensity(basis.pivot_direction);
+    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+        basis.pivot_direction,
+        self.dual_work.changed_row_index,
+    );
+    return .optimal;
+}
+
 /// Validate an updated FTRAN before its direction reaches ratio testing.
 /// A drifting FT chain can otherwise select an invalid leaving row and
 /// permanently corrupt the basis before the periodic growth gate fires.
@@ -114,8 +181,7 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             self.stats.dual_dse_updates += 1;
             self.dual_dse_updates_since_start += 1;
             if (self.active_dual_edge_weight_strategy == .steepest_devex and
-                self.active_dual_dse_update_budget != 0 and
-                self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget)
+                self.shouldSwitchDualDseToDevex(problem.num_cols + problem.num_rows))
                 self.switchDualDseToDevex(.budget);
         } else if (self.active_dual_edge_weight_strategy == .steepest_devex) {
             self.switchDualDseToDevex(.invalid);

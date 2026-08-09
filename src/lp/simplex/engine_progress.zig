@@ -214,13 +214,19 @@ pub fn selectRowPricing(self: *const SimplexEngine, vector: []const f64) bool {
     }
     if (self.pricing_row_view.num_rows != vector.len or self.pricing_row_view.nonzeros == 0) return false;
     var touched_entries: usize = 0;
+    var support_count: usize = 0;
     for (vector, 0..) |value, row| {
         if (@abs(value) <= self.numerical.zero_tolerance) continue;
+        support_count += 1;
         touched_entries = std.math.add(usize, touched_entries, self.pricing_row_view.rowDegree(row)) catch return false;
     }
-    // Row traversal wins only with a useful work margin, absorbing scatter
-    // stores and the support scan that CSC dot products do not pay.
-    return touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
+    // Row traversal needs both sparse Ep support and a useful work margin:
+    // scatter stores have poorer locality than CSC dot products and a dense
+    // accumulation order amplified grow7's update growth. The support gate
+    // rejects that 64%-dense path while retaining gas11/seba (about 1%); the
+    // touched-entry gate then accounts for irregular high-degree rows.
+    return support_count * 4 <= vector.len and
+        touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
 }
 
 /// Sample the density of an entering FTRAN result when statistics are enabled.

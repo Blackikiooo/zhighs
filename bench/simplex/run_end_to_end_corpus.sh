@@ -7,7 +7,8 @@ readonly LOCK_FILE="$SCRIPT_DIR/end_to_end_corpus.lock.tsv"
 readonly TRACE_LOCK_FILE="$SCRIPT_DIR/end_to_end_trace.lock.tsv"
 readonly EXPECTED_HIGHS_COMMIT=de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d
 
-HIGHS_ROOT=${HIGHS_ROOT:-/home/godv/codefiles/cppfiles/HiGHS}
+HIGHS_ROOT=${HIGHS_ROOT:-/home/godv/documents/codefiles/cppfiles/HiGHS}
+HIGHS_BUILD=${HIGHS_BUILD:-$HIGHS_ROOT/cmake-build-release}
 PHASE_ONE_STRATEGY=${PHASE_ONE_STRATEGY:-primal}
 CRASH_STRATEGY=${CRASH_STRATEGY:-logical}
 CRASH_MAX_COLUMNS=${CRASH_MAX_COLUMNS:-0}
@@ -20,7 +21,7 @@ DUAL_EDGE_WEIGHT_STRATEGY=${DUAL_EDGE_WEIGHT_STRATEGY:-inherit}
 DUAL_DSE_UPDATE_BUDGET=${DUAL_DSE_UPDATE_BUDGET:-64}
 PRIMAL_PRICING_STRATEGY=${PRIMAL_PRICING_STRATEGY:-inherit}
 DUAL_INITIALIZATION_STRATEGY=${DUAL_INITIALIZATION_STRATEGY:-baseline}
-CORPUS_DIR=${1:-/home/godv/codefiles/cppfiles/scipoptsuite-10.0.2/soplex/check/instances}
+CORPUS_DIR=${1:-/home/godv/documents/codefiles/cppfiles/scipoptsuite-10.0.1/soplex/check/instances}
 if (($#)); then shift; fi
 
 if (($#)); then
@@ -58,10 +59,10 @@ done
 cd "$REPOSITORY_ROOT"
 zig build build-simplex-end-to-end -Doptimize=ReleaseFast
 c++ -O3 -march=native -DNDEBUG -flto \
-  -I"$HIGHS_ROOT/highs" -I"$HIGHS_ROOT/build" \
+  -I"$HIGHS_ROOT/highs" -I"$HIGHS_BUILD" \
   bench/simplex/highs_end_to_end_runner.cpp \
-  -L"$HIGHS_ROOT/build/lib" -lhighs \
-  -Wl,-rpath,"$HIGHS_ROOT/build/lib" -o zig-out/bin/highs-end-to-end
+  -L"$HIGHS_BUILD/lib" -lhighs \
+  -Wl,-rpath,"$HIGHS_BUILD/lib" -o zig-out/bin/highs-end-to-end
 
 result_file=$(mktemp /tmp/zhighs-end-to-end-results.XXXXXX.tsv)
 trap 'rm -f "$result_file"' EXIT

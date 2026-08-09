@@ -208,6 +208,14 @@ committed simplex iterations。稀疏矩阵、primal simplex 和 tasks/multi dua
 ### E. 单次迭代更新顺序
 
 - [ ] E1 BFRT collect/FTRAN 与 pivot-column FTRAN 同构。
+  2026-08-08 已对齐 `HEkkDual::updateFtranBFRT` 的 residual ownership：BFRT 仅聚合 RHS 并执行
+  一次 FTRAN，紧随其后的 entering-column FTRAN 统一负责本迭代的 residual/reinversion guard；删除
+  每个 flip batch 额外的完整基矩阵乘积。forced-dual 40-model correctness **40/40 PASS**，默认策略
+  40-model + 四条锁定 trace **40/40 PASS**，八个目标模型 committed iterations 完全不变。
+  31 次交错 ReleaseFast A/B 中，`etamacro`（229 个 BFRT batch）中位数
+  `39.93 → 39.34 ms`（-1.5%），`shell`（29 batch）`43.95 → 43.74 ms`（-0.5%）；
+  无 BFRT 的 `brandy/scorpion` 为噪声对照。E1 仍待把 flip value/status 的提交边界与后续
+  pivot-column FTRAN/rebuild reason 合并成完整原子 iteration，因此暂不整项勾选。
 - [ ] E2 row/column pivot verify 产生 rebuild reason，不在半更新状态直接退出。
 - [ ] E3 对齐 incremental dual shift/update、primal/BFRT update、DSE/Devex update。当前首要项：
   `theta_dual==0 → shiftCost` 和 `shiftBack(out)` 已接入持久 `workShift`；剩余源码差异是非零 theta

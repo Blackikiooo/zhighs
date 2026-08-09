@@ -338,34 +338,32 @@ pub const RatioTest = struct {
             const final_compare = @min(0.1 * maximum_alpha, 1.0);
             var chosen_column: ?usize = null;
             var chosen_group: usize = 0;
-            var reverse_group = group_count;
-            while (reverse_group > 0) {
-                reverse_group -= 1;
-                var group_maximum: f64 = 0.0;
-                var group_column: ?usize = null;
-                for (candidate_work[0..candidate_count]) |column_u32| {
-                    const column: usize = @intCast(column_u32);
-                    if (@as(usize, @intFromFloat(ratio_work[column])) != reverse_group) continue;
-                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-                    const effective_alpha = tableau[column] * move_out * direction_work[column];
-                    const wins_tie = if (group_column) |incumbent|
-                        if (chuzc.permutation.len > @max(column, incumbent))
-                            chuzc.permutation[column] < chuzc.permutation[incumbent]
-                        else
-                            column < incumbent
+            var chosen_alpha: f64 = 0.0;
+            // The former implementation scanned all candidates once for
+            // every group, although the result is simply the largest group
+            // containing an acceptable alpha and then the largest alpha in
+            // that group. Select the same lexicographic maximum in one pass.
+            for (candidate_work[0..candidate_count]) |column_u32| {
+                const column: usize = @intCast(column_u32);
+                const group: usize = @intFromFloat(ratio_work[column]);
+                const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                const effective_alpha = tableau[column] * move_out * direction_work[column];
+                if (effective_alpha <= final_compare) continue;
+                const wins_tie = if (chosen_column) |incumbent|
+                    if (chuzc.permutation.len > @max(column, incumbent))
+                        chuzc.permutation[column] < chuzc.permutation[incumbent]
                     else
-                        true;
-                    if (effective_alpha > group_maximum or
-                        (effective_alpha == group_maximum and wins_tie))
-                    {
-                        group_maximum = effective_alpha;
-                        group_column = column;
-                    }
-                }
-                if (group_column != null and group_maximum > final_compare) {
-                    chosen_column = group_column;
-                    chosen_group = reverse_group;
-                    break;
+                        column < incumbent
+                else
+                    true;
+                if (chosen_column == null or group > chosen_group or
+                    (group == chosen_group and
+                        (effective_alpha > chosen_alpha or
+                            (effective_alpha == chosen_alpha and wins_tie))))
+                {
+                    chosen_column = column;
+                    chosen_group = group;
+                    chosen_alpha = effective_alpha;
                 }
             }
             const entering = chosen_column orelse return .{};

@@ -722,6 +722,21 @@ pub const SimplexEngine = struct {
     active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
     /// Successful DSE recurrences since the current dual phase began.
     dual_dse_updates_since_start: usize = 0,
+    /// HiGHS-style running densities used for automatic DSE cost control.
+    dual_dse_aq_density: f64 = 0.0,
+    dual_dse_ep_density: f64 = 0.0,
+    dual_dse_ap_density: f64 = 0.0,
+    dual_dse_tau_density: f64 = 0.0,
+    /// DSE iterations classified as costly in the current framework.
+    dual_dse_costly_iterations: usize = 0,
+    /// Running log deviations of updated DSE weights from exact CHUZR values.
+    dual_dse_average_log_low_error: f64 = 0.0,
+    dual_dse_average_log_high_error: f64 = 0.0,
+    /// Density of the pivotal tableau row most recently priced.
+    current_dual_tableau_density: f64 = 0.0,
+    /// A fresh no-entering decision failed certificate validation; retain
+    /// Devex across subsequent helper phase boundaries for this solve only.
+    dual_dse_certificate_fallback_active: bool = false,
     /// Pivots performed in the current primal Devex reference framework.
     devex_framework_iterations: usize = 0,
     /// Invalid/nonpositive Devex weights observed in the current framework.
@@ -805,6 +820,7 @@ pub const SimplexEngine = struct {
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
         self.active_dual_initialization_strategy = control.dual_initialization_strategy;
         self.dual_dse_updates_since_start = 0;
+        self.dual_dse_certificate_fallback_active = false;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -1001,6 +1017,7 @@ pub const SimplexEngine = struct {
     pub const classifyFeasibility = @import("engine_basis.zig").classifyFeasibility;
 
     pub const computeDirection = @import("engine_pivot.zig").computeDirection;
+    pub const computeDualDirection = @import("engine_pivot.zig").computeDualDirection;
     pub const directionResidualAcceptable = @import("engine_pivot.zig").directionResidualAcceptable;
     pub const performPivot = @import("engine_pivot.zig").performPivot;
     pub const recomputeReducedCostsFromWork = @import("engine_pivot.zig").recomputeReducedCostsFromWork;
@@ -1076,6 +1093,7 @@ pub const SimplexEngine = struct {
         self.active_dual_edge_weight_strategy = control.dual_edge_weight_strategy;
         self.active_dual_dse_update_budget = control.dual_dse_update_budget;
         self.dual_dse_updates_since_start = 0;
+        self.dual_dse_certificate_fallback_active = false;
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
@@ -1164,6 +1182,7 @@ pub const SimplexEngine = struct {
     pub const ensureExactDualEdgeWeights = @import("engine_dual_edge_weight.zig").ensureExactDualEdgeWeights;
     pub const beginDualEdgeWeightPhase = @import("engine_dual_edge_weight.zig").beginDualEdgeWeightPhase;
     pub const switchDualDseToDevex = @import("engine_dual_edge_weight.zig").switchDualDseToDevex;
+    pub const shouldSwitchDualDseToDevex = @import("engine_dual_edge_weight.zig").shouldSwitchDualDseToDevex;
     pub const updateDualSteepestEdgeWeights = @import("engine_dual_edge_weight.zig").updateDualSteepestEdgeWeights;
 
     pub const repairWarmBasisWithDual = @import("engine_dual.zig").repairWarmBasisWithDual;

@@ -447,8 +447,8 @@ pub fn main(init: std.process.Init) !void {
 
     const dual_reprice_stats_line = try std.fmt.allocPrint(
         allocator,
-        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\tdual_dse_updates={d}\tdual_dse_weight_rejections={d}\tdual_devex_updates={d}\tdual_dse_invalid_fallbacks={d}\tdual_dse_budget_fallbacks={d}\n",
-        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices, simplex_stats.dual_dse_updates, simplex_stats.dual_dse_weight_rejections, simplex_stats.dual_devex_updates, simplex_stats.dual_dse_invalid_fallbacks, simplex_stats.dual_dse_budget_fallbacks },
+        "stats\t{s}\tdual_reduced_cost_updates={d}\tdual_exact_reprices={d}\tdual_dse_updates={d}\tdual_dse_weight_rejections={d}\tdual_devex_updates={d}\tdual_dse_invalid_fallbacks={d}\tdual_dse_budget_fallbacks={d}\tdse_aq_density={e:.6}\tdse_ep_density={e:.6}\tdse_ap_density={e:.6}\tdse_tau_density={e:.6}\tdse_costly_iterations={d}\tdse_log_low={e:.6}\tdse_log_high={e:.6}\n",
+        .{ path, simplex_stats.dual_reduced_cost_updates, simplex_stats.dual_exact_reprices, simplex_stats.dual_dse_updates, simplex_stats.dual_dse_weight_rejections, simplex_stats.dual_devex_updates, simplex_stats.dual_dse_invalid_fallbacks, simplex_stats.dual_dse_budget_fallbacks, engine.dual_dse_aq_density, engine.dual_dse_ep_density, engine.dual_dse_ap_density, engine.dual_dse_tau_density, engine.dual_dse_costly_iterations, engine.dual_dse_average_log_low_error, engine.dual_dse_average_log_high_error },
     );
     defer allocator.free(dual_reprice_stats_line);
     try std.Io.File.stdout().writeStreamingAll(io_context, dual_reprice_stats_line);

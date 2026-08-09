@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly REPOSITORY_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
-CORPUS_DIR=${CORPUS_DIR:-/home/godv/codefiles/cppfiles/scipoptsuite-10.0.2/soplex/check/instances}
+CORPUS_DIR=${CORPUS_DIR:-/home/godv/documents/codefiles/cppfiles/scipoptsuite-10.0.1/soplex/check/instances}
 RUNS=${RUNS:-7}
 WARMUPS=${WARMUPS:-2}
 PHASE_ONE_STRATEGY=${PHASE_ONE_STRATEGY:-primal}

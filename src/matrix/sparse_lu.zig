@@ -95,6 +95,9 @@ pub const SparseLU = struct {
     active: []u32 = &.{},
     /// Stable sparse output indices from the last solve.
     hyper_output: []u32 = &.{},
+    /// Valid prefix of `hyper_output` produced by the last adaptive sparse
+    /// solve. Callers can use it to clear/reduce only materialized entries.
+    last_sparse_output_count: usize = 0,
     /// Reachability marks used by hyper-sparse triangular traversal.
     marked: []bool = &.{},
     /// U column-view offsets derived from packed U rows.
@@ -598,16 +601,25 @@ pub const SparseLU = struct {
     /// only the active rows still saves work on sparse RHS. The returned RHS
     /// is always dense.
     pub fn solveAdaptive(self: *SparseLU, rhs: []f64, input_indices: []const u32, transpose: bool) SparseLuError!void {
+        self.last_sparse_output_count = 0;
         if (input_indices.len * 8 >= self.dimension) return if (transpose) self.solveTranspose(rhs) else self.solve(rhs);
         const count = if (transpose)
             try self.solveTransposeHyperSparse(rhs, input_indices, self.hyper_output)
         else
             try self.solveHyperSparse(rhs, input_indices, self.hyper_output);
         // Hyper methods leave only their output positions defined. Preserve the
-        // sparse result while materializing the conventional dense API.
-        @memset(self.work[0..self.dimension], 0.0);
+        // sparse result while materializing the conventional dense API. A
+        // full work clear plus full memcpy wrote 2*dimension entries; retain
+        // only the sparse values, clear the destination once, and scatter.
         for (self.hyper_output[0..count]) |index| self.work[index] = rhs[index];
-        @memcpy(rhs, self.work[0..self.dimension]);
+        @memset(rhs[0..self.dimension], 0.0);
+        for (self.hyper_output[0..count]) |index| rhs[index] = self.work[index];
+        self.last_sparse_output_count = count;
+    }
+
+    /// Sparse support materialized by the most recent adaptive solve.
+    pub fn lastSparseOutputIndices(self: *const SparseLU) []const u32 {
+        return self.hyper_output[0..self.last_sparse_output_count];
     }
 
     /// Total stored L and U off-diagonal entries plus the diagonal.

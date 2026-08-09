@@ -420,6 +420,13 @@ pub const Factorization = struct {
         }
     }
 
+    /// Support of the dense vector materialized by the most recent adaptive
+    /// sparse solve. Empty means that the last solve used a dense backend.
+    pub fn lastSparseSolveIndices(self: *const Factorization) []const u32 {
+        if (self.backend_kind != .sparse_lu) return &.{};
+        return self.sparse_lu.lastSparseOutputIndices();
+    }
+
     /// FTRAN used for an entering column. SparseLU retains the partial `aq`
     /// spike required by its next Forrest--Tomlin update; dense LU continues
     /// to use the product-form Eta path.
