@@ -280,7 +280,7 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
         };
         self.pivot_trace_count += 1;
     }
-    const reinversion_reason = self.factorization.reinversionReason(self.numerical.max_update_count);
+    const reinversion_reason = self.factorization.reinversionReason(self.active_max_update_count);
     if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
     if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor()) {
         const rebuild_reason = forced_rebuild_reason orelse if (reinversion_reason) |reason| switch (reason) {

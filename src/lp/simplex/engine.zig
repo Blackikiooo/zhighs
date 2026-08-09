@@ -742,6 +742,8 @@ pub const SimplexEngine = struct {
     reduced_cost_update_count: usize = 0,
     /// Fixed/adaptive maximum incremental updates between exact reprices.
     reduced_cost_refresh_period: usize = 8,
+    /// Per-solve FT update-chain limit resolved from start diagnostics.
+    active_max_update_count: usize = 100,
     /// Internal stage of the most recent unrecovered failure.
     failure_site: FailureSite = .none,
     /// Exit route taken by shifted-cost dual Phase II.
@@ -851,6 +853,7 @@ pub const SimplexEngine = struct {
         self.rank_repair_count = 0;
         self.fresh_factorization_pivots_remaining = 0;
         self.reduced_cost_update_count = 0;
+        self.active_max_update_count = self.numerical.max_update_count;
         self.failure_site = .none;
         self.shifted_dual_exit = .none;
         self.shifted_dual_failure_site = .none;

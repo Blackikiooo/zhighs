@@ -447,7 +447,7 @@ fn solveDualLoop(
         const dual_refresh_period = if (self.active_adaptive_reprice)
             self.reduced_cost_refresh_period
         else
-            @max(self.reduced_cost_refresh_period, self.numerical.max_update_count);
+            @max(self.reduced_cost_refresh_period, self.active_max_update_count);
         if (self.fresh_factorization_pivots_remaining != 0 or
             self.reduced_cost_update_count >= dual_refresh_period)
         {
@@ -678,7 +678,10 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                 self.active_dual_dse_update_budget = self.dual_phase_one_initial_flips
             else if (problem.num_rows >= 128 and problem.num_rows < 192 and
                 self.dual_phase_one_initial_flips <= 1)
-                self.active_dual_dse_update_budget = 20
+            {
+                self.active_dual_dse_update_budget = 20;
+                self.active_max_update_count = @min(self.active_max_update_count, 50);
+            }
             else if (problem.num_rows >= 256 and self.dual_phase_one_initial_flips <= 4)
                 self.active_dual_dse_update_budget = 0;
         }
