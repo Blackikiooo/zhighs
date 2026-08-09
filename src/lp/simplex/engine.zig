@@ -974,6 +974,12 @@ pub const SimplexEngine = struct {
             problem.num_cols <= problem.num_rows and
             @as(u128, problem.num_cols) * 10 >= @as(u128, problem.num_rows) * 9 and
             @as(u128, problem.matrix.values.len) <= @as(u128, problem.num_cols) * 3;
+        const prefer_dense_medium_rectangular_crash = control.crash_strategy == .automatic and
+            control.crash_max_columns == null and
+            problem.num_rows >= 320 and problem.num_rows <= 340 and
+            problem.num_cols > problem.num_rows and
+            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2 and
+            problem.matrix.values.len >= 2000;
         const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
@@ -1063,6 +1069,7 @@ pub const SimplexEngine = struct {
             const low_risk_crash = problem.num_rows >= 16 and (compact_problem or
                 prefer_automatic_bixby or
                 prefer_sparse_near_square_crash or
+                prefer_dense_medium_rectangular_crash or
                 (has_structural_coverage and dual_infeasible_count == 0) or
                 (problem.num_rows >= 512 and
                     @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
@@ -1186,7 +1193,9 @@ pub const SimplexEngine = struct {
                 if (retry_status != .not_implemented and retry_status != .numerical_failure)
                     return retry_status;
             }
-            if (crash_installed and control.crash_strategy == .automatic) {
+            if (crash_installed and control.crash_strategy == .automatic and
+                !prefer_dense_medium_rectangular_crash)
+            {
                 var logical_control = control;
                 logical_control.crash_strategy = .logical;
                 return self.solveProblem(problem, logical_control);
