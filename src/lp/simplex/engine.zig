@@ -995,6 +995,12 @@ pub const SimplexEngine = struct {
                 if (retry_with_bixby) {
                     crash_installed = self.installSparseCrashBasis(problem, control.crash_max_columns, .bixby);
                     if (crash_installed) {
+                        // Bixby's pivot-quality ranking already supplies a
+                        // strong structural metric. Retain exact DSE instead
+                        // of allowing Phase-I flip counts to replace it with
+                        // a short Devex budget later in the solve.
+                        self.active_adaptive_dual_dse_budget = false;
+                        self.active_dual_dse_update_budget = 0;
                         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
                     } else {
                         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
