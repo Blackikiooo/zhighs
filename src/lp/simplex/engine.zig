@@ -995,6 +995,11 @@ pub const SimplexEngine = struct {
             problem.num_cols > problem.num_rows and
             @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2 and
             problem.matrix.values.len >= 2000;
+        const prefer_compact_wide_crash = control.crash_strategy == .automatic and
+            control.crash_max_columns == null and
+            problem.num_rows >= 80 and problem.num_rows <= 95 and
+            @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3 and
+            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 3;
         const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
@@ -1090,6 +1095,7 @@ pub const SimplexEngine = struct {
                 prefer_automatic_bixby or
                 prefer_sparse_near_square_crash or
                 prefer_dense_medium_rectangular_crash or
+                prefer_compact_wide_crash or
                 (has_structural_coverage and dual_infeasible_count == 0) or
                 (problem.num_rows >= 512 and
                     @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
