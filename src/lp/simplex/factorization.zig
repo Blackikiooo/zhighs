@@ -744,9 +744,10 @@ pub const Factorization = struct {
         const row: usize = @intCast(self.eta_rows[update_index]);
         const eta = self.eta_values[update_index * self.dimension ..][0..self.dimension];
         const pivot_value = vector[row] / eta[row];
-        for (vector, eta, 0..) |*value, coefficient, i| {
-            if (i != row) value.* -= coefficient * pivot_value;
-        }
+        for (vector[0..row], eta[0..row]) |*value, coefficient|
+            value.* -= coefficient * pivot_value;
+        for (vector[row + 1 ..], eta[row + 1 ..]) |*value, coefficient|
+            value.* -= coefficient * pivot_value;
         vector[row] = pivot_value;
     }
 
