@@ -555,7 +555,12 @@ pub const SparseLU = struct {
                 for (self.l_row_columns[self.l_row_starts[k]..self.l_row_starts[k + 1]], self.l_row_values[self.l_row_starts[k]..self.l_row_starts[k + 1]]) |column, value|
                     self.accumulate(column, -value * solved);
             }
-            @memset(rhs[0..n], 0.0);
+            // Every position activated by U^-T stays active through L^-T, so
+            // this support is also a superset of the intermediate original-
+            // column entries that must be cleared before row-space scatter.
+            // Clearing those exact columns avoids a full-vector memset.
+            for (self.active[0..self.active_count]) |position|
+                rhs[self.pivot_columns[position]] = 0.0;
             var output_count: usize = 0;
             for (self.active[0..self.active_count]) |position| {
                 const row = self.pivot_rows[position];
