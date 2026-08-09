@@ -954,6 +954,16 @@ pub const SimplexEngine = struct {
         const logical_numerical_state = self.numerical;
         const logical_pricing_state = self.pricing;
         var crash_installed = false;
+        const large_irregular_columns = if (problem.num_rows >= 450 and
+            @as(u128, problem.num_cols) * 5 >= @as(u128, problem.num_rows) * 6 and
+            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2) blk: {
+            var low_degree_columns: usize = 0;
+            for (0..problem.num_cols) |column| {
+                const degree = problem.matrix.col_starts[column + 1] - problem.matrix.col_starts[column];
+                low_degree_columns += @intFromBool(degree <= 2);
+            }
+            break :blk @as(u128, low_degree_columns) * 4 < @as(u128, problem.num_cols) * 3;
+        } else false;
         const skip_automatic_crash = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
             ((problem.num_rows >= 384 and problem.num_rows <= 416 and
@@ -962,7 +972,10 @@ pub const SimplexEngine = struct {
                 // A structural basis cannot cover a tall model. Once at
                 // least one sixth of its rows must remain logical, the
                 // symbolic crash is dominated by the identity start.
-                @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6);
+                @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6 or
+                // Large mildly wide models need a strong low-degree column
+                // population for crash matching to repay its factorizations.
+                large_irregular_columns);
         const prefer_automatic_bixby = control.crash_strategy == .automatic and
             control.crash_max_columns == null and
             ((problem.num_rows >= 128 and problem.num_rows <= 160 and
