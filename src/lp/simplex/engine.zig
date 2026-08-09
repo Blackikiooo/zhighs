@@ -45,6 +45,36 @@ fn shouldRetryAutomaticCrashWithBixby(rows: usize, structural: usize, condition:
         (three_sixteenths and rows >= 200) or
         (high_coverage and condition >= 50.0 and condition <= 100.0);
 }
+
+/// Select the signed-row baseline coordinates for cold models whose shape or
+/// scaling makes the unscaled HiGHS coordinate start take a longer basis path.
+fn shouldUseBaselineDualInitialization(problem: problem_module.ProblemView) bool {
+    if (problem.num_rows >= 400 and problem.num_cols < (problem.num_rows + 1) / 2) return true;
+
+    var finite_lower_rows: usize = 0;
+    var finite_upper_rows: usize = 0;
+    var equality_rows: usize = 0;
+    var maximum_cost: f64 = 0.0;
+    var maximum_matrix: f64 = 0.0;
+    var minimum_matrix = std.math.inf(f64);
+    for (problem.row_lower, problem.row_upper) |lower, upper| {
+        finite_lower_rows += @intFromBool(std.math.isFinite(lower));
+        finite_upper_rows += @intFromBool(std.math.isFinite(upper));
+        equality_rows += @intFromBool(lower == upper);
+    }
+    for (problem.col_cost) |cost| maximum_cost = @max(maximum_cost, @abs(cost));
+    for (problem.matrix.values) |value| if (value != 0.0) {
+        maximum_matrix = @max(maximum_matrix, @abs(value));
+        minimum_matrix = @min(minimum_matrix, @abs(value));
+    };
+
+    const scaled_medium_equalities = problem.num_rows >= 200 and problem.num_rows <= 256 and
+        equality_rows * 4 >= problem.num_rows * 3 and maximum_cost <= 1.0 and
+        minimum_matrix < 1.0e-3 and maximum_matrix > 100.0;
+    const lower_only_zero_objective = problem.num_rows >= 16 and maximum_cost == 0.0 and
+        finite_lower_rows == problem.num_rows and finite_upper_rows == 0;
+    return scaled_medium_equalities or lower_only_zero_objective;
+}
 /// Degeneracy and cycling mitigation policy.
 pub const DegeneracyStrategy = enum { baseline, perturbation, perturbation_taboo, automatic };
 /// Pricing rule installed during primal Phase I.
@@ -863,7 +893,8 @@ pub const SimplexEngine = struct {
             }
         }
         if (self.active_dual_initialization_strategy == .automatic) {
-            self.active_dual_initialization_strategy = if (has_dropped_model_coefficient) .baseline else .highs;
+            self.active_dual_initialization_strategy = if (has_dropped_model_coefficient or
+                shouldUseBaselineDualInitialization(problem)) .baseline else .highs;
         }
         if (self.active_degeneracy_strategy == .automatic)
             self.active_degeneracy_strategy = if (has_dropped_model_coefficient) .baseline else .perturbation;
