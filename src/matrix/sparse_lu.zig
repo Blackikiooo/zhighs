@@ -556,15 +556,15 @@ pub const SparseLU = struct {
                     self.accumulate(column, -value * solved);
             }
             @memset(rhs[0..n], 0.0);
+            var output_count: usize = 0;
             for (self.active[0..self.active_count]) |position| {
                 const row = self.pivot_rows[position];
-                rhs[row] = self.work[position];
-            }
-            var output_count: usize = 0;
-            for (rhs, 0..) |value, index| if (value != 0.0) {
-                output_indices[output_count] = @intCast(index);
+                const value = self.work[position];
+                rhs[row] = value;
+                if (value == 0.0) continue;
+                output_indices[output_count] = row;
                 output_count += 1;
-            };
+            }
             return output_count;
         }
         self.ensureHyperViews();
