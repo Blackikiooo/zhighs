@@ -924,7 +924,16 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         };
         if (infeasible) dual_infeasible += 1;
     }
-    if (dual_infeasible == 0) return self.solveDual(problem, control);
+    if (dual_infeasible == 0) {
+        // If the medium rectangular auxiliary phase required no basis
+        // changes, a unit Devex framework reaches the infeasibility
+        // certificate faster than constructing exact DSE weights.
+        if (useHighsRhsInfeasibilityList(problem) and self.iterations == iteration_started) {
+            self.active_dual_edge_weight_strategy = .inherit;
+            self.pricing.rule = .devex;
+        }
+        return self.solveDual(problem, control);
+    }
 
     var primal_feasible = true;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
