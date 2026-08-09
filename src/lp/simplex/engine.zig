@@ -1018,7 +1018,8 @@ pub const SimplexEngine = struct {
             // from the pre-A1 path. If its Phase I fails, restore the exact
             // pre-shift basis transactionally and give the original dual
             // Phase I one bounded retry before the primal cold fallback.
-            if (self.dual_work.checkpoint_valid) retry: {
+            if (self.active_dual_initialization_strategy == .baseline and
+                self.dual_work.checkpoint_valid) retry: {
                 self.numerical = numerical_before_dual_phase_one;
                 self.pricing = pricing_before_dual_phase_one;
                 self.failure_site = .none;
