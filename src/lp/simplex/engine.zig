@@ -954,13 +954,20 @@ pub const SimplexEngine = struct {
         const logical_numerical_state = self.numerical;
         const logical_pricing_state = self.pricing;
         var crash_installed = false;
-        const crash_strategy = switch (control.crash_strategy) {
+        const skip_automatic_crash = control.crash_strategy == .automatic and
+            control.crash_max_columns == null and
+            problem.num_rows >= 384 and problem.num_rows <= 416 and
+            problem.num_cols > problem.num_rows and
+            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
+        const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
             .bixby => CrashStrategy.bixby,
             // Automatic first builds an LTSSF candidate, then applies the
-            // structural-coverage and dual-workset gates below.
-            .automatic => CrashStrategy.ltssf,
+            // structural-coverage and dual-workset gates below. Medium mildly
+            // rectangular starts repeatedly reject that candidate and return
+            // to the identical logical basis, so avoid the dead factorization.
+            .automatic => if (skip_automatic_crash) .logical else .ltssf,
         };
         const crash_max_columns = if (control.crash_strategy == .automatic and
             control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
