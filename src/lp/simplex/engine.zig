@@ -317,9 +317,9 @@ pub const SolveControl = struct {
     /// Cold-start Phase-I policy. `primal` remains the compatibility default
     /// until corpus A/B validation allows deterministic automatic selection.
     phase_one_strategy: PhaseOneStrategy = .primal,
-    /// Cold-start basis construction. Kept logical by default until the
-    /// explicit LTSSF path passes its performance gate.
-    crash_strategy: CrashStrategy = .logical,
+    /// Cold-start basis construction. Automatic admits LTSSF only when its
+    /// structural and numerical diagnostics clear the corpus-backed gate.
+    crash_strategy: CrashStrategy = .automatic,
     /// Optional structural-column cap for deterministic crash-prefix A/B.
     /// Null uses the longest numerically valid prefix within the logical-anchor limit.
     crash_max_columns: ?usize = null,
@@ -889,10 +889,9 @@ pub const SimplexEngine = struct {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
             .bixby => CrashStrategy.bixby,
-            // Corpus A/B rejects both sparse crash policies as a universal
-            // default: Bixby benefits scsd1 but still regresses brandy. Keep
-            // automatic pinned to logical until a broader policy clears it.
-            .automatic => CrashStrategy.logical,
+            // Automatic first builds an LTSSF candidate, then applies the
+            // structural-coverage and dual-workset gates below.
+            .automatic => CrashStrategy.ltssf,
         };
         if (crash_strategy == .ltssf or crash_strategy == .bixby) {
             self.stats.crash_attempts += 1;
@@ -911,6 +910,50 @@ pub const SimplexEngine = struct {
             if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
         }
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+        if (control.crash_strategy == .automatic and crash_installed) {
+            const basis = if (self.basis) |*value| value else return .numerical_failure;
+            const original_count = problem.num_cols + problem.num_rows;
+            var dual_infeasible_count: usize = 0;
+            for (basis.reduced_cost[0..original_count], basis.col_status[0..original_count]) |reduced, status| {
+                const infeasible = switch (status) {
+                    .at_lower => reduced < -self.numerical.dual_tolerance,
+                    .at_upper => reduced > self.numerical.dual_tolerance,
+                    .free, .superbasic => @abs(reduced) > self.numerical.dual_tolerance,
+                    .basic, .fixed => false,
+                };
+                dual_infeasible_count += @intFromBool(infeasible);
+            }
+            var maximum_basic_violation: f64 = 0.0;
+            for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+                maximum_basic_violation = @max(
+                    maximum_basic_violation,
+                    @max(lower - value, value - upper),
+                );
+            }
+            const compact_problem = problem.num_rows >= 16 and problem.num_rows <= 64;
+            const has_structural_coverage = self.stats.crash_structural_columns * 8 >= problem.num_rows;
+            const covers_enough_rows = self.stats.crash_structural_columns >= problem.num_rows * 3 / 4;
+            const conditioned_workset = self.stats.crash_condition_estimate >= 4.0 and
+                maximum_basic_violation >= 1.0 and maximum_basic_violation <= 1.0e6;
+            const low_risk_crash = problem.num_rows >= 16 and (compact_problem or
+                (has_structural_coverage and dual_infeasible_count == 0) or
+                (has_structural_coverage and maximum_basic_violation <= self.numerical.primal_tolerance and
+                    dual_infeasible_count <= 8) or
+                (conditioned_workset and (dual_infeasible_count <= 8 or
+                    (covers_enough_rows and dual_infeasible_count <= 64))));
+            if (!low_risk_crash) {
+                self.stats.crash_fallbacks += 1;
+                crash_installed = false;
+                if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
+                self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                self.numerical = logical_numerical_state;
+                self.pricing = logical_pricing_state;
+                self.dual_edge_weights_valid = true;
+                self.observeFactorizationStability();
+                if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
+                if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+            }
+        }
         const crash_feasibility = self.classifyFeasibility(problem);
         // An explicitly requested dual path must not silently become primal
         // simplex merely because the logical basis is primal feasible. HiGHS
@@ -971,6 +1014,11 @@ pub const SimplexEngine = struct {
                 const retry_status = self.solveDualPhaseOne(problem, control);
                 if (retry_status != .not_implemented and retry_status != .numerical_failure)
                     return retry_status;
+            }
+            if (crash_installed and control.crash_strategy == .automatic) {
+                var logical_control = control;
+                logical_control.crash_strategy = .logical;
+                return self.solveProblem(problem, logical_control);
             }
             if (crash_installed) self.stats.crash_fallbacks += 1;
             self.stats.dual_phase_one_fallbacks += 1;
