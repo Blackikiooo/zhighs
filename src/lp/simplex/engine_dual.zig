@@ -166,6 +166,24 @@ fn assessInitialDualState(self: *SimplexEngine, problem: problem_module.ProblemV
     return true;
 }
 
+/// Prefer the artificial primal fallback when a cold dual start has a sparse
+/// but broad correction front that historically spends pivots only to abandon
+/// Phase I. A light correction front remains useful to dual simplex, while a
+/// dense one has enough structure for DSE pricing to make progress. The two
+/// secondary tests distinguish low-mass cost noise from a small set of severe
+/// primal conflicts. This policy is active only with the adaptive DSE budget.
+fn shouldPreflightDualPhaseOneFallback(
+    num_rows: usize,
+    initial_flips: usize,
+    dual_infeasibility_sum: f64,
+    primal_infeasibility_count: usize,
+) bool {
+    if (num_rows < 128 or initial_flips < 20) return false;
+    if (initial_flips > num_rows / 7) return false;
+    return dual_infeasibility_sum <= @as(f64, @floatFromInt(initial_flips)) or
+        primal_infeasibility_count <= 8;
+}
+
 /// Run the serial revised dual-simplex Phase II state machine.
 ///
 /// Each iteration performs CHUZR (including exact DSE validation), BTRAN and
@@ -668,6 +686,16 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         );
     }
     self.algorithm = .dual_revised;
+
+    if (self.active_adaptive_dual_dse_budget and
+        self.active_dual_initialization_strategy == .highs and
+        shouldPreflightDualPhaseOneFallback(
+            problem.num_rows,
+            self.dual_phase_one_initial_flips,
+            self.dual_control.unperturbed_dual_infeasibility_sum,
+            self.dual_control.initial_primal_infeasibility_count,
+        ))
+        return .not_implemented;
 
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
@@ -1753,4 +1781,15 @@ test "Farkas validation ignores only sub-floor infinite-bound column mass" {
         @import("engine.zig").InfeasibilityCertificateFailure.infinite_column_bound,
         engine.infeasibility_certificate_failure,
     );
+}
+
+test "dual Phase I preflight isolates sparse broad correction fronts" {
+    try std.testing.expect(shouldPreflightDualPhaseOneFallback(400, 45, 29.562, 94));
+    try std.testing.expect(shouldPreflightDualPhaseOneFallback(174, 24, 1315.469, 8));
+
+    // Too small, too few corrections, and dense correction fronts all remain
+    // with dual Phase I. Refinery is the corpus boundary for the final case.
+    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(56, 31, 47_392, 14));
+    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(388, 6, 12.52, 50));
+    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(323, 46, 3_414, 152));
 }
