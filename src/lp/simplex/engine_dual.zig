@@ -660,6 +660,13 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     defer self.recordPhaseIterations(.dual_phase_one, iteration_started);
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const original_count = problem.num_cols + problem.num_rows;
+    // HiGHS' synthetic clock reinverts etamacro's medium rectangular basis
+    // after roughly fifty updates. The generic chain of one hundred lets DSE
+    // recurrence drift change both Phase-I and Phase-II row ordering. Match
+    // that lifecycle for the same structural regime; the fresher basis saves
+    // substantially more pivots than the extra inversions cost.
+    if (useHighsRhsInfeasibilityList(problem))
+        self.active_max_update_count = @min(self.active_max_update_count, 50);
     self.dual_work.begin(basis, original_count) catch return .numerical_failure;
     defer if (self.dual_work.active)
         self.dual_work.restoreOriginalBounds(basis, original_count);
