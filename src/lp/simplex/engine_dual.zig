@@ -1236,12 +1236,13 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         for (0..problem.num_cols) |column| {
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
-            var alpha: f64 = 0.0;
+            var unscaled_alpha: f64 = 0.0;
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
                 if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                 const row_index = matrix_row.toUsize();
-                alpha += basis.rhs_work[row_index] * coefficient * basis.column_scale[column];
+                unscaled_alpha += basis.rhs_work[row_index] * coefficient;
             }
+            const alpha = unscaled_alpha * basis.column_scale[column];
             basis.tableau[column] = alpha;
             if (@abs(alpha) > self.numerical.zero_tolerance) nonzero_count += 1;
         }
