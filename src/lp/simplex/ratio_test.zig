@@ -192,8 +192,6 @@ pub const RatioTest = struct {
         // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
         for (0..count) |column| {
-            ratio_work[column] = std.math.inf(f64);
-            direction_work[column] = 0.0;
             const alpha = tableau[column];
             if (@abs(alpha) <= self.tolerance) continue;
 
