@@ -121,7 +121,7 @@ ReleaseFast 全测与完整构建通过，forced-dual correctness **40/40 PASS**
 `bore3d 173` digest `c9af8318…`、`etamacro 484` digest `db4e80c0…`。这确认迁移同时保持了
 数值结果、迭代数和 pivot 顺序。
 
-### F0g — single-owner entering column and UPDATE（协议）
+### F0g — single-owner entering column and UPDATE（完成）
 
 将 dual entering direction 从 `BasisState.pivot_direction` 迁移到 workspace `col_aq`：collectAj 直接
 发布 RHS support，`nla.ftranForUpdate(col_aq)` 保留 SparseLU 的 partial-Aq capture，row/column
@@ -133,6 +133,17 @@ pivot verify、BFRT 后 primal update、DSE/Devex recurrence 和 changed-row gat
 comptime-free algorithm dispatch 绑定一次 direction slice，之后循环不得重复分支。验收为 NLA
 captured-Aq 单测、ReleaseFast 全测、F0f 三模型 trace digest 不变、forced-dual correctness 40/40
 和 aggregate pivots **6833**。
+
+dual iteration 现由 `fillInternalColumnSparse` 直接发布 `col_aq` RHS support，随后
+`nla.ftranForUpdate`、pivot verify、DSE/Devex、basic-value update 和 `nla.update` 始终消费同一
+vector；primal direction 继续由 `BasisState` 独立拥有。初版曾在共享 pivot 内依据可变
+`engine.algorithm` 选择方向，但 `scsd1` 的 primal cleanup 证明 phase kernel 与顶层算法标签并非
+同义（`77→88` pivots、反复 reinvert），因此已改为显式 `performDualPivot/performPivot` 入口，再
+汇合到一个 direction-bound transaction；修复后该负结果未保留。
+
+ReleaseFast 全测、runner 完整构建和 forced-dual correctness **40/40 PASS**，aggregate pivots
+恢复 **6833**；F0f 三模型的 counts/digests 全部不变（`105/15d11cf0…`、`173/c9af8318…`、
+`484/db4e80c0…`）。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

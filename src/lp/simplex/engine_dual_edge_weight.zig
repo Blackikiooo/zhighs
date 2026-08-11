@@ -29,11 +29,12 @@ const SolveStatus = @import("engine.zig").SolveStatus;
 /// free and requires no additional basis solve.
 pub fn updateDualDevexWeights(self: *SimplexEngine, leaving_row: usize, pivot: f64) void {
     const basis = if (self.basis) |*value| value else return;
+    const iteration = if (self.dual_iteration) |*value| value else return;
     if (leaving_row >= basis.row_edge_weight.len or @abs(pivot) <= self.numerical.pivot_tolerance) return;
     var pivotal_weight = basis.row_edge_weight[leaving_row] / (pivot * pivot);
     if (!std.math.isFinite(pivotal_weight)) pivotal_weight = 1.0;
     pivotal_weight = @max(1.0, pivotal_weight);
-    for (basis.row_edge_weight, basis.pivot_direction) |*weight, alpha| {
+    for (basis.row_edge_weight, iteration.col_aq.values) |*weight, alpha| {
         const candidate = pivotal_weight * alpha * alpha;
         if (std.math.isFinite(candidate)) weight.* = @max(weight.*, candidate);
     }
@@ -145,7 +146,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     const highs_evaluation_order = basis.row_edge_weight.len >= 65 and
         basis.row_edge_weight.len <= 95 and
         basis.col_status.len >= basis.row_edge_weight.len * 9;
-    for (basis.row_edge_weight, basis.pivot_direction, basis.residual_work, 0..) |*weight, alpha, tau, row| {
+    for (basis.row_edge_weight, iteration.col_aq.values, basis.residual_work, 0..) |*weight, alpha, tau, row| {
         if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
         if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
         if (row == leaving_row) continue;
@@ -260,8 +261,8 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     engine.dual_row_index = 0;
     engine.dual_iteration.?.row_ep.values[0] = 1.0;
     engine.dual_iteration.?.row_ep.values[1] = 0.0;
-    engine.basis.?.pivot_direction[0] = 2.0;
-    engine.basis.?.pivot_direction[1] = 1.0;
+    engine.dual_iteration.?.col_aq.values[0] = 2.0;
+    engine.dual_iteration.?.col_aq.values[1] = 1.0;
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
@@ -281,10 +282,10 @@ test "dual steepest-edge recurrence matches exact weights for a nontrivial basis
     engine.dual_iteration.?.row_ep.values[0] = 1;
     try engine.dual_iteration.?.row_ep.appendIndex(0);
     try engine.nla.btran(&engine.dual_iteration.?.row_ep);
-    engine.basis.?.pivot_direction[0] = 4;
-    engine.basis.?.pivot_direction[1] = -2;
-    try engine.nla.factorization.solve(engine.basis.?.pivot_direction);
-    const pivot = engine.basis.?.pivot_direction[0];
+    engine.dual_iteration.?.col_aq.values[0] = 4;
+    engine.dual_iteration.?.col_aq.values[1] = -2;
+    try engine.nla.factorization.solve(engine.dual_iteration.?.col_aq.values);
+    const pivot = engine.dual_iteration.?.col_aq.values[0];
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, pivot));
     const updated_weights = [_]f64{
         engine.basis.?.row_edge_weight[0],
@@ -293,7 +294,7 @@ test "dual steepest-edge recurrence matches exact weights for a nontrivial basis
     try engine.nla.factorization.update(.{
         .leaving_row = 0,
         .entering_col = 0,
-        .direction = engine.basis.?.pivot_direction,
+        .direction = engine.dual_iteration.?.col_aq.values,
         .column_scale = 1,
     });
 
@@ -311,10 +312,11 @@ test "dual Devex updates every row from the hot FTRAN column" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.ensureDualIterationWorkspace(2, 0);
     engine.basis.?.row_edge_weight[0] = 1;
     engine.basis.?.row_edge_weight[1] = 2;
-    engine.basis.?.pivot_direction[0] = 2;
-    engine.basis.?.pivot_direction[1] = 1;
+    engine.dual_iteration.?.col_aq.values[0] = 2;
+    engine.dual_iteration.?.col_aq.values[1] = 1;
 
     engine.updateDualDevexWeights(1, 1);
 

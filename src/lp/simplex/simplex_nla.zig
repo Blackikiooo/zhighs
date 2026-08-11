@@ -93,7 +93,7 @@ pub const SimplexNla = struct {
         leaving_row: u32,
         entering_col: u32,
         column_scale: f64,
-    ) NlaError!void {
+    ) factorization_module.FactorizationError!void {
         try self.factorization.update(.{
             .leaving_row = leaving_row,
             .entering_col = entering_col,

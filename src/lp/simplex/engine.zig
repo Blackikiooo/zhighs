@@ -1325,6 +1325,7 @@ pub const SimplexEngine = struct {
 
     pub const computeDirection = @import("engine_pivot.zig").computeDirection;
     pub const computeDualDirection = @import("engine_pivot.zig").computeDualDirection;
+    pub const performDualPivot = @import("engine_pivot.zig").performDualPivot;
     pub const directionResidualAcceptable = @import("engine_pivot.zig").directionResidualAcceptable;
     pub const performPivot = @import("engine_pivot.zig").performPivot;
     pub const recomputeReducedCostsFromWork = @import("engine_pivot.zig").recomputeReducedCostsFromWork;

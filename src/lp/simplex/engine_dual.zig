@@ -461,11 +461,11 @@ fn solveDualLoop(
         if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
             return .numerical_failure;
         if (entering.direction < 0.0) {
-            for (basis.pivot_direction) |*value| value.* = -value.*;
+            for (iteration.col_aq.values) |*value| value.* = -value.*;
         }
         const leaving_row: usize = @intCast(leaving.row);
         const target = if (leaving.bound == .at_lower) work.lower[basis.basic_index[leaving_row]] else work.upper[basis.basic_index[leaving_row]];
-        const pivot = basis.pivot_direction[leaving_row];
+        const pivot = iteration.col_aq.values[leaving_row];
         if (@abs(pivot) <= self.numerical.pivot_tolerance) {
             self.failure_site = .ratio_test;
             return .numerical_failure;
@@ -485,7 +485,7 @@ fn solveDualLoop(
             self.failure_site = .reduced_cost;
             return .numerical_failure;
         }
-        if (self.performPivot(
+        if (self.performDualPivot(
             problem,
             entering_index,
             entering.direction,
@@ -905,11 +905,11 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
             return .not_implemented;
         if (entering.direction < 0.0) {
-            for (basis.pivot_direction) |*value| value.* = -value.*;
+            for (iteration.col_aq.values) |*value| value.* = -value.*;
         }
         const leaving_row: usize = @intCast(leaving.row);
         const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
-        const pivot = basis.pivot_direction[leaving_row];
+        const pivot = iteration.col_aq.values[leaving_row];
         if (@abs(pivot) <= self.numerical.pivot_tolerance) return .not_implemented;
         const step = (basis.basic_value[leaving_row] - target) / pivot;
         if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .not_implemented;
@@ -920,7 +920,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             leaving.row,
             entering.zero_dual_step,
         ) != .optimal) return .not_implemented;
-        if (self.performPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
+        if (self.performDualPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
             return .not_implemented;
         if (self.dual_control.has_fresh_rebuild and self.recomputeReducedCostsFromWork(problem) != .optimal)
             return .not_implemented;
@@ -1296,16 +1296,16 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
         if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
             return .numerical_failure;
         if (entering.direction < 0.0) {
-            for (basis.pivot_direction) |*value| value.* = -value.*;
+            for (iteration.col_aq.values) |*value| value.* = -value.*;
         }
         const leaving_row: usize = @intCast(leaving.row);
         const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
-        const pivot = basis.pivot_direction[leaving_row];
+        const pivot = iteration.col_aq.values[leaving_row];
         if (@abs(pivot) <= self.numerical.pivot_tolerance) return .numerical_failure;
         const step = (basis.basic_value[leaving_row] - target) / pivot;
         if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .numerical_failure;
         const leaving_column = basis.basic_index[leaving_row];
-        if (self.performPivot(
+        if (self.performDualPivot(
             problem,
             entering_index,
             entering.direction,

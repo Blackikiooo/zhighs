@@ -17,6 +17,7 @@ const numerical_module = @import("numerical.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
 const crash_module = @import("crash.zig");
 const degeneracy_module = @import("degeneracy.zig");
+const simplex_nla_module = @import("simplex_nla.zig");
 const pricing_workspace_module = @import("pricing_workspace.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
@@ -44,6 +45,22 @@ fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemV
             return .numerical_failure;
         self.nla.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
     }
+    return .optimal;
+}
+
+/// Collect and FTRAN the dual entering column in the same vector later
+/// consumed by the Forrest--Tomlin update.
+fn solveDualEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
+    iteration.col_aq.clear();
+    const count = self.fillInternalColumnSparse(
+        problem,
+        entering_col,
+        iteration.col_aq.values,
+        iteration.col_aq.indices,
+    ) orelse return .numerical_failure;
+    iteration.col_aq.index_count = count;
+    self.nla.ftranForUpdate(&iteration.col_aq) catch return .numerical_failure;
     return .optimal;
 }
 
@@ -109,7 +126,7 @@ pub fn computeDualDirection(
     entering_col: usize,
     leaving_row: usize,
 ) SolveStatus {
-    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    if (self.basis == null) return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     if (entering_col >= problem.num_cols + problem.num_rows or
         leaving_row >= problem.num_rows or
@@ -119,12 +136,12 @@ pub fn computeDualDirection(
     const alpha_row = iteration.pivotalRow().at(entering_col);
     if (!std.math.isFinite(alpha_row)) return .numerical_failure;
 
-    if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
+    if (solveDualEnteringDirection(self, problem, entering_col) != .optimal) {
         self.failure_site = .direction_column;
         return .numerical_failure;
     }
 
-    var alpha_col = basis.pivot_direction[leaving_row];
+    var alpha_col = iteration.col_aq.values[leaving_row];
     const min_alpha = @min(@abs(alpha_col), @abs(alpha_row));
     const relative_difference = if (min_alpha == 0.0)
         (if (alpha_col == alpha_row) 0.0 else std.math.inf(f64))
@@ -138,23 +155,23 @@ pub fn computeDualDirection(
             self.failure_site = .direction_refactor;
             return .numerical_failure;
         }
-        if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
+        if (solveDualEnteringDirection(self, problem, entering_col) != .optimal) {
             self.failure_site = .direction_solve;
             return .numerical_failure;
         }
-        alpha_col = basis.pivot_direction[leaving_row];
+        alpha_col = iteration.col_aq.values[leaving_row];
         if (!std.math.isFinite(alpha_col)) return .numerical_failure;
     }
     var direction_nonzeros: usize = 0;
-    for (basis.pivot_direction, 0..) |value, row| {
+    for (iteration.col_aq.values, 0..) |value, row| {
         if (!std.math.isFinite(value)) return .numerical_failure;
         if (value == 0.0) continue;
         self.dual_work.changed_row_index[direction_nonzeros] = @intCast(row);
         direction_nonzeros += 1;
     }
-    self.observeAqDensity(basis.pivot_direction);
+    self.observeAqDensity(iteration.col_aq.values);
     self.dual_work.changed_row_count = self.nla.factorization.orderGatheredFtranIndices(
-        basis.pivot_direction,
+        iteration.col_aq.values,
         self.dual_work.changed_row_index,
         direction_nonzeros,
     );
@@ -189,14 +206,55 @@ pub fn directionResidualAcceptable(self: *SimplexEngine, problem: problem_module
     return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
 }
 
-/// Apply one primal pivot and rebuild the dense basis factorization in
-/// existing storage. This is allocation-free; update factorizations can
-/// replace the reinversion later without changing the state transition.
+/// Commit a primal pivot using the primal-owned direction vector.
 pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    return performPivotWithDirection(
+        self,
+        problem,
+        entering_col,
+        entering_direction,
+        leaving_row,
+        leaving_bound,
+        step,
+        basis.pivot_direction,
+        null,
+    );
+}
+
+/// Commit a dual pivot from the same captured `col_aq` produced by NLA.
+pub fn performDualPivot(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
+    return performPivotWithDirection(
+        self,
+        problem,
+        entering_col,
+        entering_direction,
+        leaving_row,
+        leaving_bound,
+        step,
+        iteration.col_aq.values,
+        &iteration.col_aq,
+    );
+}
+
+/// Shared allocation-free basis transaction after the algorithm-specific
+/// caller has bound the authoritative direction and factor-update capture.
+fn performPivotWithDirection(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+    entering_col: usize,
+    entering_direction: f64,
+    leaving_row: usize,
+    leaving_bound: basis_module.BasisStatus,
+    step: f64,
+    direction: []const f64,
+    dual_col_aq: ?*const simplex_nla_module.Vector,
+) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     if (entering_col >= basis.col_status.len or leaving_row >= problem.num_rows) return .numerical_failure;
     const leaving_col = basis.basic_index[leaving_row];
-    const pivot = basis.pivot_direction[leaving_row];
+    const pivot = direction[leaving_row];
     if (self.pricing.rule == .steepest_edge and self.dual_row_index == @as(u32, @intCast(leaving_row))) {
         if (self.updateDualSteepestEdgeWeights(leaving_row, pivot) == .optimal) {
             self.stats.dual_dse_updates += 1;
@@ -215,7 +273,7 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             self.active_dual_edge_weight_strategy == .steepest_devex)
             self.updateDualDevexWeights(leaving_row, pivot)
         else if (self.algorithm == .dual_revised or self.active_devex_strategy == .legacy)
-            self.updateLegacyDevexWeights(entering_col, leaving_row, pivot);
+            self.updateLegacyDevexWeights(entering_col, leaving_row, pivot, direction);
     }
     self.dual_row_index = null;
     var forced_rebuild_reason: ?RebuildReason = null;
@@ -228,12 +286,20 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             forced_rebuild_reason = .fresh_mode;
             break :blk false;
         }
-        self.nla.factorization.update(.{
-            .leaving_row = @intCast(leaving_row),
-            .entering_col = @intCast(entering_col),
-            .direction = basis.pivot_direction,
-            .column_scale = entering_direction,
-        }) catch |err| {
+        (if (dual_col_aq) |col_aq|
+            self.nla.update(
+                col_aq,
+                @intCast(leaving_row),
+                @intCast(entering_col),
+                entering_direction,
+            )
+        else
+            self.nla.factorization.update(.{
+                .leaving_row = @intCast(leaving_row),
+                .entering_col = @intCast(entering_col),
+                .direction = basis.pivot_direction,
+                .column_scale = entering_direction,
+            })) catch |err| {
             const failure_kind = self.nla.factorization.recordUpdateFailure(err);
             if (self.stats.first_update_failure_kind == null) {
                 self.stats.first_update_failure_kind = failure_kind;
@@ -248,7 +314,8 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
     };
     self.direction_requires_reinversion = false;
     self.numerical.observePivot(pivot);
-    for (basis.basic_value, basis.pivot_direction) |*value, direction| value.* -= step * direction;
+    for (basis.basic_value, direction) |*basic_value, direction_value|
+        basic_value.* -= step * direction_value;
     const entering_value = basis.primal[entering_col] + entering_direction * step;
     basis.basic_value[leaving_row] = entering_value;
     basis.basic_lower[leaving_row] = basis.col_lower[entering_col];

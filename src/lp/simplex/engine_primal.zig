@@ -133,11 +133,17 @@ pub fn pivotNeedsFreshFactorization(self: *const SimplexEngine, leaving_row: u32
 /// Lightweight Devex reference update. It deliberately uses the already
 /// hot FTRAN direction and does not allocate. Exact steepest-edge weights
 /// can replace this policy without changing basis storage or pivot code.
-pub fn updateLegacyDevexWeights(self: *SimplexEngine, entering_col: usize, leaving_row: usize, pivot: f64) void {
+pub fn updateLegacyDevexWeights(
+    self: *SimplexEngine,
+    entering_col: usize,
+    leaving_row: usize,
+    pivot: f64,
+    direction: []const f64,
+) void {
     const basis = if (self.basis) |*value| value else return;
     if (entering_col >= basis.col_edge_weight.len or leaving_row >= basis.row_edge_weight.len) return;
     var norm_squared: f64 = 1.0;
-    for (basis.pivot_direction) |value| norm_squared += value * value;
+    for (direction) |value| norm_squared += value * value;
     if (!std.math.isFinite(norm_squared)) norm_squared = 1.0;
     const entering_weight = @max(1.0, norm_squared);
     basis.col_edge_weight[entering_col] = entering_weight;
