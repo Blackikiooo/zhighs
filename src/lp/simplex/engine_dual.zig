@@ -179,7 +179,7 @@ fn rebuildDualState(
     // correctDual has already updated every shifted nonbasic workDual exactly.
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return null;
     if (!self.dual_work.recordRebuildState(basis, count, self.numerical.primal_tolerance)) return null;
-    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
+    if (self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance)) return null;
     self.dual_control.finishRebuild();
     return correction;
@@ -497,7 +497,7 @@ fn solveDualLoop(
         // fresh factorization is only the first half of dual rebuild: refresh
         // all work solution state before another CHUZR decision.
         if (self.dual_control.has_fresh_rebuild) {
-            if (use_work_costs and useHighsUltrawideLifecycle(problem)) {
+            if (self.active_dual_initialization_strategy == .highs) {
                 if (self.recomputeBasicValuesUnchecked(problem) != .optimal)
                     return .numerical_failure;
                 if (!self.dual_work.createPrimalInfeasibilityList(
@@ -814,7 +814,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
-    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
+    if (self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
@@ -922,8 +922,19 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         ) != .optimal) return .not_implemented;
         if (self.performDualPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
             return .not_implemented;
-        if (self.dual_control.has_fresh_rebuild and self.recomputeReducedCostsFromWork(problem) != .optimal)
-            return .not_implemented;
+        if (self.dual_control.has_fresh_rebuild) {
+            if (self.recomputeReducedCostsFromWork(problem) != .optimal)
+                return .not_implemented;
+            if (self.active_dual_initialization_strategy == .highs) {
+                if (self.recomputeBasicValuesUnchecked(problem) != .optimal)
+                    return .not_implemented;
+                if (!self.dual_work.createPrimalInfeasibilityList(
+                    basis,
+                    problem.num_rows,
+                    self.numerical.primal_tolerance,
+                )) return .not_implemented;
+            }
+        }
         self.observeIterationStep(
             @max(step, 0.0),
             entering_index,
@@ -955,7 +966,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // HiGHS does with the rest of its solve state, so the following Phase-II
     // CHUZR does not score stale Phase-I rows or initialize an unused DSE
     // framework before discovering that the basis is already primal feasible.
-    if (useHighsBreakpointGroups(problem) and self.active_dual_initialization_strategy == .highs and
+    if (self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
 

@@ -209,7 +209,7 @@ memory accounting 单测、ReleaseFast 全测、F0j 三模型 trace digest 不�
 字段。ReleaseFast 全测和 runner build 通过，forced-dual correctness **40/40 PASS**、aggregate
 pivots **6833**；三模型 trace 保持 `105/15d11cf0…`、`173/c9af8318…`、`484/db4e80c0…`。
 
-### F0l — model-independent HEkkDualRHS lifecycle（协议）
+### F0l — model-independent HEkkDualRHS lifecycle（完成）
 
 删除 `useHighsRhsInfeasibilityList/useHighsBreakpointGroups` 对 CHUZR 状态生命周期的模型行列范围
 门控。只要选择 `.highs` 初始化，cold rebuild、Phase-I bounds 安装、reinversion 和 Phase-II bounds
@@ -219,6 +219,14 @@ pivots **6833**；三模型 trace 保持 `105/15d11cf0…`、`173/c9af8318…`�
 本阶段不同时启用 CHUZC4 grouping、改变 update limit 或删除 fallback。验收首先要求 ReleaseFast
 全测和 forced-dual correctness 40/40；随后逐模型记录 committed pivot 变化并定位首次分叉。若发生
 正确性退化，不恢复模型尺寸门控，而是补齐 `HEkkDualRHS` 缺失的通用 cutoff/rebuild 语义。
+
+`.highs` 路径现在在 cold/phase/reinversion/restore 四类边界无条件创建或重建 RHS list；旧 selector
+只作为非 HiGHS 初始化的兼容路径存在。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。
+aggregate pivots `6833→8261`，仍低于 HiGHS 的 `8774`，但个别模型暴露出后续未对齐：`refinery
+341→1117`、`blend 105→173`（dual trace）。本地 debug HiGHS 的逐 pivot 检查证明 refinery 新路径
+前 7 个 `(entering,row_out)` 与 HiGHS 完全一致，旧路径从第 0 个就分叉；新路径首次分叉在第 8 个：
+HiGHS `(9,60)`，Zig `(100,118)`。因此保留通用生命周期，下一步从 incremental primal/DSE update
+定位该分叉，不允许恢复尺寸门控。
 
 ## 1. HiGHS serial dual simplex 算法路径
 
