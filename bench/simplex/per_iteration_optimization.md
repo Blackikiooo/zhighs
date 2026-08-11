@@ -200,3 +200,13 @@ to `103.033 ms` (`+0.40%`), including `gas11 +0.96%` and `scfxm1 +1.67%`.
 Entering columns are short enough that the predictable retention branch is
 cheaper than the extra helper dispatch and code footprint.  The experiment
 was removed while the accepted PRICE specialization remains isolated.
+
+### H2d — fuse DSE norm into logical tableau packing (rejected)
+
+The exact DSE norm and row-density pass was fused into the later natural-order
+logical-tableau packing pass, preserving arithmetic order and all thresholds.
+Despite deleting one dense row read, the 10-model 31-run gate regressed from
+`103.310` to `104.038 ms` (`+0.70%`), led by `scfxm1 +2.63%`, `scorpion
++1.70%`, and `capri +1.26%`.  Moving the substantial DSE validation block into
+the PRICE/CHUZC tail harmed hot-code layout enough to dominate the saved read.
+The original phase ordering was restored.
