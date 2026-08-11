@@ -749,7 +749,8 @@ pub const SimplexEngine = struct {
     dual_dse_average_log_low_error: f64 = 0.0,
     dual_dse_average_log_high_error: f64 = 0.0,
     /// Density of the pivotal tableau row most recently priced.
-    current_dual_tableau_density: f64 = 0.0,
+    /// Running-average input for HiGHS' structural `row_ap.count / num_col`.
+    current_dual_row_ap_density: f64 = 0.0,
     /// A fresh no-entering decision failed certificate validation; retain
     /// Devex across subsequent helper phase boundaries for this solve only.
     dual_dse_certificate_fallback_active: bool = false,

@@ -37,14 +37,19 @@ const RebuildReason = @import("engine.zig").RebuildReason;
 /// Column PRICE specialized by the solve-entry coefficient audit.  Normal
 /// models take the branch-free kernel; models containing coefficients at the
 /// canonical drop threshold retain the exact filtered behavior.
+const PriceDensityCounts = struct {
+    simplex_nonzeros: usize = 0,
+    highs_nonzeros: usize = 0,
+};
+
 fn priceStructuralColumns(
     comptime filter_small_coefficients: bool,
     problem: problem_module.ProblemView,
     basis: *basis_module.BasisState,
     row_ap: *simplex_nla_module.Vector,
     zero_tolerance: f64,
-) usize {
-    var nonzero_count: usize = 0;
+) PriceDensityCounts {
+    var counts: PriceDensityCounts = .{};
     for (0..problem.num_cols) |column| {
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
@@ -55,13 +60,14 @@ fn priceStructuralColumns(
         }
         const alpha = unscaled_alpha * basis.column_scale[column];
         row_ap.values[column] = alpha;
-        if (@abs(alpha) > zero_tolerance) nonzero_count += 1;
+        if (@abs(alpha) > zero_tolerance) counts.simplex_nonzeros += 1;
+        if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.highs_nonzeros += 1;
         if (alpha != 0.0) {
             row_ap.indices[row_ap.index_count] = @intCast(column);
             row_ap.index_count += 1;
         }
     }
-    return nonzero_count;
+    return counts;
 }
 
 /// Enter the ordinary dual-simplex Phase II loop.
@@ -1259,14 +1265,16 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
     const row_pricing = self.selectRowPricing(iteration.row_ep.values);
     var exact_weight: f64 = 0.0;
-    var ep_nonzeros: usize = 0;
+    var ep_simplex_nonzeros: usize = 0;
+    var ep_highs_nonzeros: usize = 0;
     if (needs_exact_weight and !row_pricing) {
         // Column PRICE consumes the scaled BTRAN row immediately below. Fuse
         // that materialization with the mandatory exact DSE scan so the row
         // is read only once while preserving the norm accumulation order.
         for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |entry, scale, *scaled_entry| {
             exact_weight += entry * entry;
-            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
+            if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
             scaled_entry.* = entry * scale;
         }
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
@@ -1274,18 +1282,19 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     } else if (needs_exact_weight) {
         for (iteration.row_ep.values) |entry| {
             exact_weight += entry * entry;
-            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
+            if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
         }
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
     } else {
-        for (iteration.row_ep.values) |entry|
-            if (@abs(entry) > self.numerical.zero_tolerance) {
-                ep_nonzeros += 1;
-            };
+        for (iteration.row_ep.values) |entry| {
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
+            if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
+        }
     }
     self.dual_row_exact_weight = exact_weight;
-    self.dual_row_nonzero_count = ep_nonzeros;
+    self.dual_row_nonzero_count = ep_highs_nonzeros;
     if (needs_exact_weight) {
         const updated_weight = basis.row_edge_weight[row];
         if (self.active_dual_initialization_strategy == .highs) {
@@ -1324,7 +1333,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         self.recordRowPricingElapsed(pricing_started)
     else
         self.recordPricingElapsed(pricing_started);
-    var nonzero_count: usize = 0;
+    var structural_counts: PriceDensityCounts = .{};
     if (row_pricing) {
         for (iteration.row_ep.values, 0..) |dual_value, row_index| {
             if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
@@ -1342,7 +1351,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
                 scaled_dual.* = dual_value * scale;
         }
-        nonzero_count = if (self.has_dropped_model_coefficient)
+        structural_counts = if (self.has_dropped_model_coefficient)
             priceStructuralColumns(true, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance)
         else
             priceStructuralColumns(false, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance);
@@ -1353,7 +1362,8 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     // hence its deterministic CHUZC tie-breaking.
     if (row_pricing) {
         for (iteration.row_ap.values, 0..) |value, column| {
-            if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+            if (@abs(value) > self.numerical.zero_tolerance) structural_counts.simplex_nonzeros += 1;
+            if (@abs(value) >= simplex_nla_module.Vector.highs_tiny) structural_counts.highs_nonzeros += 1;
             if (value != 0.0) {
                 iteration.row_ap.indices[iteration.row_ap.index_count] = @intCast(column);
                 iteration.row_ap.index_count += 1;
@@ -1361,12 +1371,13 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         }
     }
     iteration.buildPivotalRowPack() catch return .numerical_failure;
-    nonzero_count += ep_nonzeros;
+    const nonzero_count = structural_counts.simplex_nonzeros + ep_simplex_nonzeros;
     const tableau_count = problem.num_cols + problem.num_rows;
-    self.current_dual_tableau_density = if (tableau_count == 0)
+    self.current_dual_row_ap_density = if (problem.num_cols == 0)
         0.0
     else
-        @as(f64, @floatFromInt(nonzero_count)) / @as(f64, @floatFromInt(tableau_count));
+        @as(f64, @floatFromInt(structural_counts.highs_nonzeros)) /
+            @as(f64, @floatFromInt(problem.num_cols));
     self.dual_hyper_sparse_active = tableau_count > 0 and nonzero_count * 10 < tableau_count;
     if (!self.dual_hyper_sparse_active) self.dual_candidate_count = 0;
     return .optimal;

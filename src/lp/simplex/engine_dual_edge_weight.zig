@@ -17,6 +17,7 @@ const dual_phase_one_module = @import("dual_phase_one.zig");
 const crash_module = @import("crash.zig");
 const degeneracy_module = @import("degeneracy.zig");
 const pricing_workspace_module = @import("pricing_workspace.zig");
+const simplex_nla_module = @import("simplex_nla.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
 const foundation = @import("foundation");
@@ -131,7 +132,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         ep_nonzeros = 0;
         for (iteration.row_ep.values) |entry| {
             exact_pivot_weight += entry * entry;
-            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+            if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_nonzeros += 1;
         }
     }
     if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
@@ -144,8 +145,8 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
     const kai = -2.0 / pivot;
     for (basis.row_edge_weight, iteration.col_aq.values, iteration.col_dse.values, 0..) |*weight, alpha, tau, row| {
-        if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
-        if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
+        if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) aq_nonzeros += 1;
+        if (@abs(tau) >= simplex_nla_module.Vector.highs_tiny) tau_nonzeros += 1;
         if (row == leaving_row) continue;
         // HiGHS traverses the indexed pivotal column and therefore never
         // evaluates the recurrence for exact structural zeros.
@@ -168,7 +169,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         self.dual_dse_tau_density = (1.0 - multiplier) * self.dual_dse_tau_density +
             multiplier * @as(f64, @floatFromInt(tau_nonzeros)) * inverse_rows;
         self.dual_dse_ap_density = (1.0 - multiplier) * self.dual_dse_ap_density +
-            multiplier * self.current_dual_tableau_density;
+            multiplier * self.current_dual_row_ap_density;
         const denominator = @max(
             @max(self.dual_dse_ep_density, self.dual_dse_aq_density),
             self.dual_dse_ap_density,
@@ -191,7 +192,15 @@ pub fn shouldSwitchDualDseToDevex(self: *const SimplexEngine, total_columns: usi
     if (!self.active_adaptive_dual_dse_budget and
         self.active_dual_dse_update_budget != 0 and self.dual_control.phase != .phase_two)
         return self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget;
-    const costly = self.dual_dse_updates_since_start * 10 > total_columns and
+    const denominator = @max(
+        @max(self.dual_dse_ep_density, self.dual_dse_aq_density),
+        self.dual_dse_ap_density,
+    );
+    const relative_density = if (denominator > 0.0) self.dual_dse_tau_density / denominator else 0.0;
+    const current_iteration_costly = relative_density * relative_density > 1000.0 and
+        self.dual_dse_tau_density > 0.01;
+    const costly = current_iteration_costly and
+        self.dual_dse_updates_since_start * 10 > total_columns and
         self.dual_dse_costly_iterations * 20 > self.dual_dse_updates_since_start;
     const inaccurate = self.dual_dse_average_log_low_error +
         self.dual_dse_average_log_high_error > 10.0;
@@ -217,6 +226,19 @@ test "dual DSE budget caps Phase I but not original-objective Phase II" {
     // Phase II only switches for measured DSE cost or weight inaccuracy.
     engine.dual_control.enterPhase(.phase_two);
     try std.testing.expect(!engine.shouldSwitchDualDseToDevex(1000));
+
+    // Cost switching requires both the HiGHS 10%/5% history and a costly
+    // current iteration; stale history alone must not trigger a transition.
+    engine.dual_dse_updates_since_start = 101;
+    engine.dual_dse_costly_iterations = 6;
+    engine.dual_dse_ep_density = 0.001;
+    engine.dual_dse_aq_density = 0.001;
+    engine.dual_dse_ap_density = 0.001;
+    engine.dual_dse_tau_density = 0.1;
+    try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
+    engine.dual_dse_tau_density = 0.01;
+    try std.testing.expect(!engine.shouldSwitchDualDseToDevex(1000));
+
     engine.dual_dse_average_log_high_error = 10.01;
     try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
 }
