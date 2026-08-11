@@ -408,6 +408,18 @@ producer 撤销 support 时用 HiGHS `1e-14` 计数；`row_ap` 只除以结构�
 了 DSE 切换作为 grow7 长路径根因，同时保留了正确的通用控制框架；下一步转向 basis update/reinvert
 lifecycle，其 18 次 update-growth reinversion 明显偏离 HiGHS。
 
+### F0v — remove foreign growth-tier reinversion（协议）
+
+HiGHS 的正常 update lifecycle 只有显式 `simplex_update_limit`、solve/pivot numerical trouble 与 factor
+synthetic clock；它不按 `max(abs(FTRAN column))/abs(pivot)` 的 `1e2/1e4/1e7/1e10` 四档缩短 update
+chain。Zig 这套档位是早期稳定性补丁：grow7 的 `max_update_growth=1.10e7` 将 100-update chain 强制缩到
+16，产生 18 次非源码 reinversion，并改变 rebuild 后的定价路径。
+
+删除 growth-tier 对 reinversion decision 的影响，但保留 maximum growth 作为只读诊断；稀疏 FT 依
+显式 update limit，dense Eta 依 retained capacity，residual/pivot warning 仍可提前 rebuild。后续单独实现
+producer synthetic tick，不能把 growth ratio 冒充 tick。先验收 ReleaseFast、grow7 correctness/pivots/
+reinversion，再跑 40-model corpus；若失败只能修 factor update/residual，不能恢复尺寸或模型阈值。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
