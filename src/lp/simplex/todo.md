@@ -162,6 +162,16 @@ gather 和 infeasibility update 消费同一 vector，原先两次 row-sized mat
 aggregate pivots **6833**，三模型 trace counts/digests 继续保持 `105/15d11cf0…`、
 `173/c9af8318…`、`484/db4e80c0…`。
 
+### F0i — complete serial workspace with col_DSE（协议）
+
+修正 F0b 的初始范围遗漏：本地 `HEkkDual::initialiseInstance` 除 `row_ep/row_ap/col_aq/col_BFRT`
+外还显式 setup `col_DSE`。在 `DualIterationWorkspace(Real)` 增加同维 vector；DSE recurrence 由
+`col_dse.copyFrom(row_ep) → nla.ftran(col_dse)` 产生 tau，禁止继续借用 `BasisState.residual_work`。
+copy 必须保留 row_ep producer support 和 synthetic metadata，dense backend 由 NLA 显式降级。
+
+验收为 workspace clear/bytes 与 DSE recurrence 单测、ReleaseFast 全测、F0h 三模型 trace digest
+不变、forced-dual correctness 40/40 和 aggregate pivots **6833**。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
