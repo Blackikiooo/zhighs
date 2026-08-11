@@ -145,7 +145,7 @@ ReleaseFast 全测、runner 完整构建和 forced-dual correctness **40/40 PASS
 恢复 **6833**；F0f 三模型的 counts/digests 全部不变（`105/15d11cf0…`、`173/c9af8318…`、
 `484/db4e80c0…`）。
 
-### F0h — workspace-native BFRT vector（协议）
+### F0h — workspace-native BFRT vector（完成）
 
 将 boxed flips 的 equation-space RHS 和 FTRAN 结果统一放入 `col_bfrt`：CHUZC flip prefix 按顺序
 collect 到 vector，producer 用 byte mark 保证行 support 唯一并保留 cancellation，随后
@@ -154,6 +154,13 @@ collect 到 vector，producer 用 byte mark 保证行 support 唯一并保留 ca
 
 验收为重复行/抵消 support 单测、ReleaseFast 全测、F0g 三模型 trace digest 不变、forced-dual
 correctness 40/40 和 aggregate pivots **6833**。
+
+BFRT 现直接在 `col_bfrt` 中按 CHUZC flip 顺序聚合；byte mark 让共享 matrix row 只发布一次
+support，同时允许数值抵消继续保留 possible-nonzero 语义。`nla.ftran`、basic correction、changed-row
+gather 和 infeasibility update 消费同一 vector，原先两次 row-sized materialize/copy 已移除。
+重复行 support 单测、ReleaseFast 全测和 runner build 通过；forced-dual correctness **40/40 PASS**、
+aggregate pivots **6833**，三模型 trace counts/digests 继续保持 `105/15d11cf0…`、
+`173/c9af8318…`、`484/db4e80c0…`。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

@@ -1587,19 +1587,18 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     // B^-1 once. A pivotal tableau row cannot update the whole basic
     // vector; batching the RHS is the exact allocation-free equivalent of
     // one FTRAN per flipped column.
-    if (self.accumulateBoundFlipRhs(problem, flip_count, basis.residual_work) != .optimal)
+    if (self.accumulateBoundFlipRhs(problem, flip_count) != .optimal)
         return .numerical_failure;
-    @memcpy(basis.rhs_work, basis.residual_work);
-    self.nla.factorization.solve(basis.rhs_work) catch return .numerical_failure;
-    for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+    self.nla.ftran(&iteration.col_bfrt) catch return .numerical_failure;
+    for (iteration.col_bfrt.values) |value| if (!std.math.isFinite(value)) return .numerical_failure;
     self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
-        basis.rhs_work,
+        iteration.col_bfrt.values,
         self.dual_work.changed_row_index,
     );
 
     // Commit only after the aggregate solve succeeds. Thus an invalid
     // width, column, or numerical solve never publishes a partial batch.
-    for (basis.basic_value, basis.rhs_work) |*value, displacement| value.* -= displacement;
+    for (basis.basic_value, iteration.col_bfrt.values) |*value, displacement| value.* -= displacement;
     for (iteration.pack_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         const delta = switch (basis.col_status[column]) {
@@ -1643,19 +1642,19 @@ pub fn boundFlipResidualAcceptable(self: *SimplexEngine, problem: problem_module
     return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
 }
 
-/// Form the combined scaled equation-space displacement for a batch of
-/// boxed nonbasic bound flips. The caller owns `output`; no column is
-/// materialized and no allocation occurs in this hot path.
+/// Form the combined scaled equation-space displacement directly in the
+/// iteration-owned BFRT vector, retaining unique producer support.
 pub fn accumulateBoundFlipRhs(
     self: *SimplexEngine,
     problem: problem_module.ProblemView,
     flip_count: usize,
-    output: []f64,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
-    if (output.len != problem.num_rows or flip_count > iteration.pack_indices.len) return .numerical_failure;
-    @memset(output, 0.0);
+    if (iteration.col_bfrt.values.len != problem.num_rows or flip_count > iteration.pack_indices.len)
+        return .numerical_failure;
+    iteration.col_bfrt.clear();
+    @memset(iteration.col_bfrt.byte_work[0..problem.num_rows], 0);
     for (iteration.pack_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         if (column >= problem.num_cols + problem.num_rows) return .numerical_failure;
@@ -1672,14 +1671,26 @@ pub fn accumulateBoundFlipRhs(
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
                 if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
                 const row_index = row.toUsize();
-                if (row_index >= output.len) return .numerical_failure;
-                output[row_index] += delta * coefficient * basis.row_scale[row_index] * column_scale;
+                if (row_index >= iteration.col_bfrt.values.len) return .numerical_failure;
+                const contribution = delta * coefficient * basis.row_scale[row_index] * column_scale;
+                if (contribution == 0.0) continue;
+                if (iteration.col_bfrt.byte_work[row_index] == 0) {
+                    iteration.col_bfrt.appendIndex(@intCast(row_index)) catch return .numerical_failure;
+                    iteration.col_bfrt.byte_work[row_index] = 1;
+                }
+                iteration.col_bfrt.values[row_index] += contribution;
             }
         } else {
-            output[column - problem.num_cols] += delta;
+            const row = column - problem.num_cols;
+            if (iteration.col_bfrt.byte_work[row] == 0) {
+                iteration.col_bfrt.appendIndex(@intCast(row)) catch return .numerical_failure;
+                iteration.col_bfrt.byte_work[row] = 1;
+            }
+            iteration.col_bfrt.values[row] += delta;
         }
     }
-    for (output) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+    for (iteration.col_bfrt.activeIndices() orelse return .numerical_failure) |row|
+        if (!std.math.isFinite(iteration.col_bfrt.values[row])) return .numerical_failure;
     return .optimal;
 }
 
@@ -1755,6 +1766,7 @@ test "dual bound flips share one aggregate FTRAN" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 2);
+    try engine.ensureDualIterationWorkspace(2, 2);
     engine.basis.?.initializeSlackBasis();
     engine.basis.?.col_lower[0] = 0;
     engine.basis.?.col_lower[1] = 0;
@@ -1764,10 +1776,13 @@ test "dual bound flips share one aggregate FTRAN" {
     engine.basis.?.basic_value[1] = 10;
     engine.basis.?.primal[2] = 10;
     engine.basis.?.primal[3] = 10;
-    engine.basis.?.flip_columns[0] = 0;
-    engine.basis.?.flip_columns[1] = 1;
+    engine.dual_iteration.?.pack_indices[0] = 0;
+    engine.dual_iteration.?.pack_indices[1] = 1;
     try engine.nla.factorization.factorizeIdentity(2);
 
+    try std.testing.expectEqual(SolveStatus.optimal, engine.accumulateBoundFlipRhs(problem, 2));
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, engine.dual_iteration.?.col_bfrt.activeIndices().?);
+    try std.testing.expectEqualSlices(f64, &.{ 11, 16 }, engine.dual_iteration.?.col_bfrt.values);
     try std.testing.expectEqual(SolveStatus.optimal, engine.applyBoundFlips(problem, 2));
     // Combined equation displacement is [1*2 + 3*3, 2*2 + 4*3] = [11, 16].
     try std.testing.expectApproxEqAbs(@as(f64, -1), engine.basis.?.basic_value[0], 1e-12);
@@ -1779,6 +1794,34 @@ test "dual bound flips share one aggregate FTRAN" {
     try std.testing.expectEqual(@as(usize, 1), engine.nla.factorization.stats.ftran_calls);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_batches);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_ftran_savings);
+}
+
+test "BFRT support remains unique when accumulated rows cancel" {
+    const row = foundation.RowId.fromUsizeAssumeValid(0);
+    const problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ 0, 0 },
+        .col_lower = &.{ 0, 0 },
+        .col_upper = &.{ 1, 1 },
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &.{ 0, 1, 2 }, &.{ row, row }, &.{ 1, -1 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 2);
+    try engine.ensureDualIterationWorkspace(1, 2);
+    engine.basis.?.col_upper[0] = 1;
+    engine.basis.?.col_upper[1] = 1;
+    engine.dual_iteration.?.pack_indices[0] = 0;
+    engine.dual_iteration.?.pack_indices[1] = 1;
+
+    try std.testing.expectEqual(SolveStatus.optimal, engine.accumulateBoundFlipRhs(problem, 2));
+    try std.testing.expectEqualSlices(u32, &.{0}, engine.dual_iteration.?.col_bfrt.activeIndices().?);
+    try std.testing.expectEqual(@as(f64, 0), engine.dual_iteration.?.col_bfrt.values[0]);
 }
 
 test "neither-feasible imported basis is repaired without a crash restart" {
