@@ -248,7 +248,7 @@ alpha/theta 从错误的 `1.60953125/0.14385011 + 1 flip` 修正为 HiGHS 的
 `8261→8753`，接近 HiGHS `8774`；该总数不是完成标准，`refinery 1609 vs 396` 和 `ex72a 594 vs
 139` 表明后续 incremental update/phase exit 仍须逐字段对齐。
 
-### F0n — HVector-tight FTRAN support before RHS update（协议）
+### F0n — HVector-tight FTRAN support before RHS update（否定）
 
 F0m 的第 13 次 refinery CHUZR 中，HiGHS rows 68/98 的 infeasibility 和 DSE weight 各自完全相等，
 分叉只来自 retained list/random start。此时 HiGHS `workCount=103`，Zig `infeasibility_count=209`。
@@ -259,6 +259,11 @@ index，随后以 `value != 0` 把数值填充全部当作 changed rows。
 再由现有 factor-order gather 产生 changed support；禁止使用模型阈值或 feasibility tolerance 替代
 HVector 的固定 `1e-14` 语义。本阶段验收 refinery 首次分叉、RHS list count、40/40 correctness 和
 aggregate pivots；下一阶段再让 sparse FT 原生发布 index，删除 reconstruction scan。
+
+隔离结果：在 `col_aq/col_BFRT` FTRAN 后执行 `tight()`，refinery 首次分叉仍为第 13 次，完整模型
+`1609→1629`；debug Zig 更证明首次 CHUZR 前 list 已是 `211/dense`，而非迭代更新后逐渐膨胀，
+HiGHS 同点为 `30/sparse`。因此 tiny fill 假设错误，实验代码已撤回。差异发生在第一次 FTRAN
+之前的 Phase-I bounds/nonbasic-value/rebuild 状态，下一步转入 B2 初始化顺序对齐。
 
 ## 1. HiGHS serial dual simplex 算法路径
 
