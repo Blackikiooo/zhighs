@@ -331,3 +331,18 @@ was removed.  Together with H1e, H1h, and H3b, this establishes that support
 bookkeeping cannot accelerate the current dense-visit FT upper kernel; a
 future sparse-vector design must reduce triangular nodes visited rather than
 merely attach indices to the same traversal.
+
+### H3c — reuse dual FTRAN validation maximum in UPDATE (protocol)
+
+`computeDualDirection` already scans every FTRAN result entry and rejects any
+non-finite value before the pivot can be committed.  `Factorization.update`
+then scans the identical direction again to validate it and compute the
+maximum magnitude used by the update-growth reinversion policy.  HiGHS passes
+the validated `HVector` directly into `updateFactor` without this duplicate
+full-column audit.
+
+Accumulate `max(abs(aq))` in the existing dual validation loop and pass it as
+an optional prevalidated value to UPDATE.  Primal pivots, unit tests, and any
+standalone factorization caller retain the original scan when no value is
+provided.  The prediction is unchanged trajectories with one dense row pass
+removed per committed dual pivot, most visible in UPDATE-heavy models.
