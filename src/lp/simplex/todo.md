@@ -121,6 +121,19 @@ ReleaseFast 全测与完整构建通过，forced-dual correctness **40/40 PASS**
 `bore3d 173` digest `c9af8318…`、`etamacro 484` digest `db4e80c0…`。这确认迁移同时保持了
 数值结果、迭代数和 pivot 顺序。
 
+### F0g — single-owner entering column and UPDATE（协议）
+
+将 dual entering direction 从 `BasisState.pivot_direction` 迁移到 workspace `col_aq`：collectAj 直接
+发布 RHS support，`nla.ftranForUpdate(col_aq)` 保留 SparseLU 的 partial-Aq capture，row/column
+pivot verify、BFRT 后 primal update、DSE/Devex recurrence 和 changed-row gather 均消费该 vector，
+最后由 `nla.update(col_aq, ...)` 提交同一个 captured column。负 entering move 仍原地缩放 vector，
+保持既有算术顺序和 factor update 的 column-scale 约定。
+
+`BasisState.pivot_direction` 暂只保留给 primal simplex 和 residual scratch；公共 `performPivot` 以
+comptime-free algorithm dispatch 绑定一次 direction slice，之后循环不得重复分支。验收为 NLA
+captured-Aq 单测、ReleaseFast 全测、F0f 三模型 trace digest 不变、forced-dual correctness 40/40
+和 aggregate pivots **6833**。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
