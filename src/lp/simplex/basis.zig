@@ -88,6 +88,8 @@ pub const BasisState = struct {
     dual_row: []f64 = &.{},
     /// Pivotal tableau row `e_p^T B^-1 A` for all internal columns.
     tableau: []f64 = &.{},
+    /// Valid CHUZC support prefix in `flip_columns` before ratio testing.
+    tableau_count: usize = 0,
     /// Per-column ratios or group identifiers used by CHUZC.
     dual_ratio: []f64 = &.{},
     /// Temporary nonbasic movement direction selected by CHUZC.

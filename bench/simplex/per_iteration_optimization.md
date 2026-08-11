@@ -157,3 +157,21 @@ restore the baseline.  The L active set is therefore not a sufficient owner of
 the dense state consumed across the historical FT correction chain.  All code
 was removed; any future direct pack must be maintained inside the correction
 lifecycle with exact generation tracking.
+
+### H2b — publish packed dual tableau support (accepted)
+
+PRICE now publishes the natural-order support of the pivotal tableau row into
+the existing BFRT column workspace, and CHUZC scans that support rather than
+all structural and logical columns.  No extra allocation or persistent index
+array is required.  The forced-dual 40-model correctness gate passed and every
+committed-pivot count remained unchanged.  A 31-run alternating full-corpus
+A/B measured `197.206 ms -> 196.359 ms` at 6833 pivots, reducing aggregate
+cost from `28860.8` to `28736.9 ns/pivot` (`-0.43%`).  Per-model results were
+mixed because short fixed-cost solves are noisy, but the aggregate gain was
+carried by real iteration-heavy work including `gas11 -4.17%`, `brandy
+-3.03%`, `agg -2.43%`, and `scorpion -1.91%`.
+
+The repository's default primal Phase-I path still fails a pre-existing set
+of corpus models at `direction_column` before its first committed pivot.  An
+isolated clean-HEAD build reproduced the same `agg` failure, so H2b acceptance
+uses the frozen forced-dual protocol targeted by this optimization campaign.

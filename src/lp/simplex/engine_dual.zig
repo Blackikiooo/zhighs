@@ -363,6 +363,8 @@ fn solveDualLoop(
                     &.{},
                 .update_count = self.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
+                .packed_indices = basis.flip_columns[0..basis.tableau_count],
+                .use_packed_indices = true,
             },
         );
 
@@ -770,8 +772,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             {
                 self.active_dual_dse_update_budget = 20;
                 self.active_max_update_count = @min(self.active_max_update_count, 50);
-            }
-            else if (problem.num_rows >= 256 and self.dual_phase_one_initial_flips <= 4)
+            } else if (problem.num_rows >= 256 and self.dual_phase_one_initial_flips <= 4)
                 self.active_dual_dse_update_budget = 0;
         }
         self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
@@ -838,6 +839,8 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     &.{},
                 .update_count = self.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
+                .packed_indices = basis.flip_columns[0..basis.tableau_count],
+                .use_packed_indices = true,
             },
         );
         self.dual_work.recordRemainingViolation(
@@ -1362,6 +1365,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         }
     }
     self.dual_row_index = leaving_row;
+    basis.tableau_count = 0;
     const row_pricing = self.selectRowPricing(basis.dual_row);
     // Row pricing scatters into structural entries and therefore needs a
     // zeroed accumulation target. Column pricing overwrites every structural
@@ -1402,21 +1406,35 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             const alpha = unscaled_alpha * basis.column_scale[column];
             basis.tableau[column] = alpha;
             if (@abs(alpha) > self.numerical.zero_tolerance) nonzero_count += 1;
+            if (@abs(alpha) > self.ratio_test.tolerance) {
+                basis.flip_columns[basis.tableau_count] = @intCast(column);
+                basis.tableau_count += 1;
+            }
+        }
+    }
+    // Row pricing accumulates structural entries, so their final density is
+    // known only after the scatter. Add this block before logical columns so
+    // the packed support preserves the dense scan's natural column order and
+    // hence its deterministic CHUZC tie-breaking.
+    if (row_pricing) {
+        for (basis.tableau[0..problem.num_cols], 0..) |value, column| {
+            if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+            if (@abs(value) > self.ratio_test.tolerance) {
+                basis.flip_columns[basis.tableau_count] = @intCast(column);
+                basis.tableau_count += 1;
+            }
         }
     }
     for (0..problem.num_rows) |logical_row| {
         const value = basis.dual_row[logical_row];
-        basis.tableau[problem.num_cols + logical_row] = value;
-    }
-    nonzero_count += ep_nonzeros;
-    // Row pricing accumulates structural entries, so their final density is
-    // known only after the scatter. Column pricing counted each final alpha
-    // at its producer and avoids this second structural scan.
-    if (row_pricing) {
-        for (basis.tableau[0..problem.num_cols]) |value| {
-            if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
+        const column = problem.num_cols + logical_row;
+        basis.tableau[column] = value;
+        if (@abs(value) > self.ratio_test.tolerance) {
+            basis.flip_columns[basis.tableau_count] = @intCast(column);
+            basis.tableau_count += 1;
         }
     }
+    nonzero_count += ep_nonzeros;
     const tableau_count = problem.num_cols + problem.num_rows;
     self.current_dual_tableau_density = if (tableau_count == 0)
         0.0

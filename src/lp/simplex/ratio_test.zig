@@ -47,6 +47,10 @@ pub const DualChuzcControl = struct {
     update_count: usize = 0,
     /// Dual feasibility tolerance used by relaxed breakpoint grouping.
     dual_feasibility_tolerance: f64 = 0.0,
+    /// Natural-order pivotal-row support produced by PRICE.
+    packed_indices: []const u32 = &.{},
+    /// Distinguishes a valid empty support from the legacy dense scan.
+    use_packed_indices: bool = false,
 };
 
 /// Configured primal/dual ratio-test policy.
@@ -224,7 +228,13 @@ pub const RatioTest = struct {
         if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
         // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
-        for (0..count) |column| {
+        const scan_count = if (chuzc.use_packed_indices) chuzc.packed_indices.len else count;
+        for (0..scan_count) |position| {
+            const column = if (chuzc.use_packed_indices)
+                @as(usize, @intCast(chuzc.packed_indices[position]))
+            else
+                position;
+            if (column >= count) return .{};
             const alpha = tableau[column];
             if (@abs(alpha) <= self.tolerance) continue;
 
