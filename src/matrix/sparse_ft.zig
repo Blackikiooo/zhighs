@@ -162,8 +162,9 @@ pub const SparseForrestTomlin = struct {
         @memset(self.pivot_lookup[0..n], none);
         @memcpy(self.pivot_ids[0..n], pivot_ids);
         @memcpy(self.pivot_values[0..n], pivot_values);
-        for (pivot_ids, 0..) |pivot_id, logical| {
+        for (pivot_ids, pivot_values, 0..) |pivot_id, pivot_value, logical| {
             if (pivot_id >= n or self.pivot_lookup[pivot_id] != none) return error.DimensionMismatch;
+            if (pivot_value == 0.0 or !std.math.isFinite(pivot_value)) return error.Singular;
             self.pivot_lookup[pivot_id] = @intCast(logical);
         }
         for (0..n) |column| {
@@ -246,9 +247,7 @@ pub const SparseForrestTomlin = struct {
             logical -= 1;
             const pivot = self.pivot_ids[logical];
             if (pivot == none) continue;
-            const diagonal = self.pivot_values[logical];
-            if (diagonal == 0.0 or !std.math.isFinite(diagonal)) return error.Singular;
-            const solved = values[pivot] / diagonal;
+            const solved = values[pivot] / self.pivot_values[logical];
             if (!std.math.isFinite(solved)) return error.NumericalFailure;
             values[pivot] = solved;
             var entry = self.column_head[logical];

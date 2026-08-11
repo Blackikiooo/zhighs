@@ -237,3 +237,17 @@ still regressed sharply in the 10-model 31-run gate, from `101.666` to
 indirect sparse reads even when the support is exact.  The index allocation
 and sparse update were removed; future work on this pass must preserve
 contiguous traversal, for example by fusion or proven SIMD generation.
+
+### H1g — validate FT diagonals at their write boundary (accepted)
+
+Mutable-U diagonal values can change only in `reset` and `update`.  Updates
+already reject zero/non-finite pivots; base diagonals are now checked while
+`reset` copies their pivot IDs, allowing every subsequent `solveUpper` to
+remove the redundant per-pivot diagonal validation.  The finite-result check
+after division remains, and invalid reset input now fails earlier.
+
+The forced-dual 40-model gate passed with all 6833 pivot counts unchanged.  A
+31-run alternating full-corpus A/B measured `196.003 ms -> 194.164 ms`, or
+`28684.7 -> 28415.7 ns/pivot` (`-0.94%`).  The independent 10-model discovery
+gate was also positive at `-0.52%`, with improvements in `gas11`, `scorpion`,
+`shell`, and `sc105`.
