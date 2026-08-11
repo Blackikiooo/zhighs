@@ -427,6 +427,18 @@ aggregate `12021→11725`（HiGHS 8774）。另有 `scorpion 833→824`、`scfxm
 `israel 139→155`。结果确认外加 growth 档位同时增加 rebuild 和 pivot，不应保留；下一步对齐 HiGHS
 synthetic tick 与 numerical-trouble 的 producer 边界，并单独追踪 israel 的 residual-trigger divergence。
 
+### F0w — abort pivot on dual numerical trouble（协议）
+
+HiGHS `updateVerify` 比较 `alpha_col`/`alpha_row` 后，一旦 numerical trouble 便设置 rebuild reason；同次
+iteration 的 `updateDual/updatePrimal/updatePivots` 全部跳过，outer loop 完整 rebuild 后重新 CHUZR/CHUZC。
+Zig 当前却立刻 refactor、重新 FTRAN，然后沿用 rebuild 前选出的 row/tableau/ratio candidate 提交 pivot。
+这违反 reason-driven rebuild 边界，也解释了 F0v 后 grow7 的 3 次 solve-residual 会改变长路径。
+
+引入内部 typed direction result `ready/rebuild_required/numerical_failure`。pivot mismatch 只发布 reason，不在
+direction producer 内继续旧 transaction；各 dual loop 在自己的 work-cost/bounds 语境完成 rebuild 并
+重新选择，warm zero-cost repair 保持其零 reduced-cost 状态。验收 ReleaseFast、grow7/israel 的
+solve-residual 路径、40-model corpus；禁止在 mismatch 后复用旧 pivotal row。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
