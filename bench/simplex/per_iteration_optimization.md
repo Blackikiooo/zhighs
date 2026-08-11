@@ -251,3 +251,15 @@ The forced-dual 40-model gate passed with all 6833 pivot counts unchanged.  A
 `28684.7 -> 28415.7 ns/pivot` (`-0.94%`).  The independent 10-model discovery
 gate was also positive at `-0.52%`, with improvements in `gas11`, `scorpion`,
 `shell`, and `sc105`.
+
+### H4a — short-circuit crash coefficient filtering (rejected)
+
+The solve-entry coefficient audit was passed into the crash planner so normal
+models could short-circuit four repeated coefficient-threshold checks without
+duplicating the planner.  Matching decisions and pivot counts were unchanged,
+but the 10-model 31-run gate regressed slightly from `102.256` to `102.431 ms`
+(`+0.17%`): gains in `gas11`, `shell`, and `grow7` were outweighed by
+`scorpion`, `scrs8`, and `seba`.  A runtime invariant still leaves a branch in
+the deep loops and adds register pressure.  The change was removed; a future
+crash optimization must use true outer specialization or reduce the greedy
+planner's repeated full-column scans.
