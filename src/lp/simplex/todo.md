@@ -228,6 +228,18 @@ aggregate pivots `6833→8261`，仍低于 HiGHS 的 `8774`，但个别模型暴
 HiGHS `(9,60)`，Zig `(100,118)`。因此保留通用生命周期，下一步从 incremental primal/DSE update
 定位该分叉，不允许恢复尺寸门控。
 
+### F0m — model-independent perturbation and CHUZC grouping（协议）
+
+F0l 后用本地 debug HiGHS 对 `refinery` 逐字段比较：前 5 次 pivot 的 entering/row/alpha/theta 完全
+一致；第 6 次仍选相同 `(92,167)`，但 HiGHS `theta=0.8639937870`、BFRT count 0，Zig
+`theta=0.1438501116`、flip count 1，随后第 8 次 CHUZR 才分叉。根因边界因此确定为 CHUZC/BFRT，
+不是 RHS list 或 FTRAN。
+
+删除 `.highs` 路径 cost perturbation 公式和 CHUZC3/4 breakpoint grouping 的模型形状门控：初始化
+策略决定算法，密度只决定 kernel 表示。保留 update-limit、zero-pivot phase shortcut 和 fallback 的
+独立实验边界。本阶段验收为 refinery 前 8 次 alpha/theta/flip 与 HiGHS、ReleaseFast 全测、forced-
+dual correctness 40/40；若失败，必须修正通用 ratio/update 语义，不得恢复尺寸条件。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
