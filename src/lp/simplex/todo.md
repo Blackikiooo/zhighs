@@ -177,7 +177,7 @@ workspace 现完整拥有本地 `HEkkDual` serial path 的五个 vector；DSE ta
 f64/f128 lifecycle/bytes、DSE exact recurrence、ReleaseFast 全测和 runner build 通过；forced-dual
 correctness **40/40 PASS**、aggregate pivots **6833**，三模型 trace digests 保持不变。
 
-### F0j — complete HEkkDualRow ownership（协议）
+### F0j — complete HEkkDualRow ownership（完成）
 
 将 CHUZC 的 per-column ratio/group 和 selected move direction 从 `BasisState` 移入
 `DualIterationWorkspace`，与 pivotal-row pack/candidate prefix 组成同一 `HEkkDualRow` 对应物。
@@ -186,6 +186,11 @@ correctness **40/40 PASS**、aggregate pivots **6833**，三模型 trace digests
 
 验收为 workspace shape/bytes 单测、ReleaseFast 全测、三模型 trace digest 不变、forced-dual
 correctness 40/40 和 aggregate pivots **6833**。
+
+CHUZC ratio/group 与 move direction 现和 pack/candidate prefix 一起由 iteration workspace 拥有，
+`BasisState.dual_ratio/dual_direction` 及其分配、初始化、释放和 memory accounting 已删除。数组保持
+SoA 连续布局且只覆写 active candidates。ReleaseFast 全测、runner build、forced-dual **40/40**、
+**6833** pivots 及三模型 trace digest 全部保持。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

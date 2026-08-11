@@ -65,6 +65,10 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
         pack_indices: []u32,
         pack_values: []Real,
         pack_count: usize = 0,
+        /// CHUZC ratio or breakpoint group keyed by global column.
+        work_ratio: []Real,
+        /// CHUZC selected nonbasic move keyed by global column.
+        work_direction: []Real,
 
         const Self = @This();
         pub const Scalar = Real;
@@ -87,8 +91,14 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             errdefer allocator.free(pack_indices);
             const pack_values = try allocator.alloc(Real, total_columns);
             errdefer allocator.free(pack_values);
+            const work_ratio = try allocator.alloc(Real, total_columns);
+            errdefer allocator.free(work_ratio);
+            const work_direction = try allocator.alloc(Real, total_columns);
+            errdefer allocator.free(work_direction);
             @memset(pack_indices, 0);
             @memset(pack_values, 0);
+            @memset(work_ratio, std.math.inf(Real));
+            @memset(work_direction, 0);
             return .{
                 .allocator = allocator,
                 .num_rows = num_rows,
@@ -100,6 +110,8 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 .col_dse = col_dse,
                 .pack_indices = pack_indices,
                 .pack_values = pack_values,
+                .work_ratio = work_ratio,
+                .work_direction = work_direction,
             };
         }
 
@@ -112,6 +124,8 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             self.col_dse.deinit();
             self.allocator.free(self.pack_indices);
             self.allocator.free(self.pack_values);
+            self.allocator.free(self.work_ratio);
+            self.allocator.free(self.work_direction);
             self.* = undefined;
         }
 
@@ -163,7 +177,9 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             return self.row_ep.retainedBytes() + self.row_ap.retainedBytes() +
                 self.col_aq.retainedBytes() + self.col_bfrt.retainedBytes() + self.col_dse.retainedBytes() +
                 std.mem.sliceAsBytes(self.pack_indices).len +
-                std.mem.sliceAsBytes(self.pack_values).len;
+                std.mem.sliceAsBytes(self.pack_values).len +
+                std.mem.sliceAsBytes(self.work_ratio).len +
+                std.mem.sliceAsBytes(self.work_direction).len;
         }
     };
 }

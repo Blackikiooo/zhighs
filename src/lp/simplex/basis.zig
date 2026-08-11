@@ -87,10 +87,6 @@ pub const BasisState = struct {
     /// Pivotal tableau row `e_p^T B^-1 A` for all internal columns.
     /// Retained only by primal pricing; dual simplex owns split row_ep/row_ap.
     tableau: []f64 = &.{},
-    /// Per-column ratios or group identifiers used by CHUZC.
-    dual_ratio: []f64 = &.{},
-    /// Temporary nonbasic movement direction selected by CHUZC.
-    dual_direction: []f64 = &.{},
     /// Candidate storage used by primal ratio tests.
     flip_columns: []u32 = &.{},
     /// Sparse/hyper-sparse CHUZR candidate row indexes.
@@ -142,8 +138,6 @@ pub const BasisState = struct {
         self.row_edge_weight = try allocator.alloc(f64, rows);
         self.devex_reference = try allocator.alloc(u8, total_cols);
         self.tableau = try allocator.alloc(f64, total_cols);
-        self.dual_ratio = try allocator.alloc(f64, total_cols);
-        self.dual_direction = try allocator.alloc(f64, total_cols);
         self.flip_columns = try allocator.alloc(u32, total_cols);
         self.dual_candidate_rows = try allocator.alloc(u32, rows);
         self.dual_candidate_score = try allocator.alloc(f64, rows);
@@ -177,8 +171,6 @@ pub const BasisState = struct {
         @memset(self.row_edge_weight, 1.0);
         @memset(self.devex_reference, 0);
         @memset(self.tableau, 0.0);
-        @memset(self.dual_ratio, std.math.inf(f64));
-        @memset(self.dual_direction, 0.0);
         @memset(self.flip_columns, 0);
         @memset(self.dual_candidate_rows, 0);
         @memset(self.dual_candidate_score, 0.0);
@@ -250,8 +242,6 @@ pub const BasisState = struct {
         self.allocator.free(self.row_edge_weight);
         self.allocator.free(self.devex_reference);
         self.allocator.free(self.tableau);
-        self.allocator.free(self.dual_ratio);
-        self.allocator.free(self.dual_direction);
         self.allocator.free(self.flip_columns);
         self.allocator.free(self.dual_candidate_rows);
         self.allocator.free(self.dual_candidate_score);
@@ -291,8 +281,6 @@ pub const BasisState = struct {
         total += std.mem.sliceAsBytes(self.row_edge_weight).len;
         total += std.mem.sliceAsBytes(self.devex_reference).len;
         total += std.mem.sliceAsBytes(self.tableau).len;
-        total += std.mem.sliceAsBytes(self.dual_ratio).len;
-        total += std.mem.sliceAsBytes(self.dual_direction).len;
         total += std.mem.sliceAsBytes(self.flip_columns).len;
         total += std.mem.sliceAsBytes(self.dual_candidate_rows).len;
         total += std.mem.sliceAsBytes(self.dual_candidate_score).len;
