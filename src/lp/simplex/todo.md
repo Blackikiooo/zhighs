@@ -408,7 +408,7 @@ producer 撤销 support 时用 HiGHS `1e-14` 计数；`row_ap` 只除以结构�
 了 DSE 切换作为 grow7 长路径根因，同时保留了正确的通用控制框架；下一步转向 basis update/reinvert
 lifecycle，其 18 次 update-growth reinversion 明显偏离 HiGHS。
 
-### F0v — remove foreign growth-tier reinversion（协议）
+### F0v — remove foreign growth-tier reinversion（完成）
 
 HiGHS 的正常 update lifecycle 只有显式 `simplex_update_limit`、solve/pivot numerical trouble 与 factor
 synthetic clock；它不按 `max(abs(FTRAN column))/abs(pivot)` 的 `1e2/1e4/1e7/1e10` 四档缩短 update
@@ -419,6 +419,13 @@ chain。Zig 这套档位是早期稳定性补丁：grow7 的 `max_update_growth=
 显式 update limit，dense Eta 依 retained capacity，residual/pivot warning 仍可提前 rebuild。后续单独实现
 producer synthetic tick，不能把 growth ratio 冒充 tick。先验收 ReleaseFast、grow7 correctness/pivots/
 reinversion，再跑 40-model corpus；若失败只能修 factor update/residual，不能恢复尺寸或模型阈值。
+
+四档 growth policy 已从 decision path 删除，maximum ratio 仅保留为统计；update limit、Eta capacity 和
+numerical warning 继续生效。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。grow7
+`851→482`（HiGHS 339），factor reinversion `20→5`，其中 2 次 update-limit、3 次 solve-residual；全 corpus
+aggregate `12021→11725`（HiGHS 8774）。另有 `scorpion 833→824`、`scfxm1 482→480`，主要回退
+`israel 139→155`。结果确认外加 growth 档位同时增加 rebuild 和 pivot，不应保留；下一步对齐 HiGHS
+synthetic tick 与 numerical-trouble 的 producer 边界，并单独追踪 israel 的 residual-trigger divergence。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

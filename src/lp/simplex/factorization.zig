@@ -626,16 +626,13 @@ pub const Factorization = struct {
         self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
     }
 
-    /// Adapt the update-chain length to observed numerical growth. Benign
-    /// updates retain the caller's hard limit; increasingly oblique entering
-    /// columns request earlier reinversion before residual drift accumulates.
+    /// Return the storage-safe form of HiGHS' explicit update limit.
+    ///
+    /// `maximum_update_growth` remains a useful diagnostic, but HiGHS does
+    /// not turn that ratio into a four-tier reinversion policy. Early
+    /// reinversion belongs to solve/pivot checks and the synthetic clock.
     pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
-        const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
-        if (self.maximum_update_growth >= 1e10) return @min(storage_limit, 8);
-        if (self.maximum_update_growth >= 1e7) return @min(storage_limit, 16);
-        if (self.maximum_update_growth >= 1e4) return @min(storage_limit, 32);
-        if (self.maximum_update_growth >= 1e2) return @min(storage_limit, 64);
-        return storage_limit;
+        return if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
     }
 
     /// Return the reason a reinversion is currently required, if any.
@@ -643,7 +640,8 @@ pub const Factorization = struct {
         const recommended = self.recommendedUpdateLimit(hard_limit);
         if (self.update_count < recommended) return null;
         const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
-        return if (recommended < storage_limit) .update_growth else .update_limit;
+        std.debug.assert(recommended == storage_limit);
+        return .update_limit;
     }
 
     /// Convenience wrapper: true if a reinversion is required.
@@ -836,7 +834,7 @@ test "eta update restores the actual column from a signed movement direction" {
     try std.testing.expectApproxEqAbs(@as(f64, 5), rhs[1], 1e-12);
 }
 
-test "relative update growth tightens the reinversion interval" {
+test "relative update growth is diagnostic rather than a reinversion tier" {
     var factorization = Factorization.init(std.testing.allocator);
     defer factorization.deinit();
     try factorization.factorizeIdentity(2);
@@ -846,14 +844,12 @@ test "relative update growth tightens the reinversion interval" {
         .direction = &[_]f64{ 1e-5, 1 },
     });
     try std.testing.expectApproxEqRel(@as(f64, 1e5), factorization.maximum_update_growth, 1e-12);
-    try std.testing.expectEqual(@as(usize, 32), factorization.recommendedUpdateLimit(100));
-    factorization.update_count = 31;
+    try std.testing.expectEqual(@as(usize, 100), factorization.recommendedUpdateLimit(100));
+    factorization.update_count = 99;
     try std.testing.expect(!factorization.needsRefactor(100));
-    factorization.update_count = 32;
+    factorization.update_count = 100;
     try std.testing.expect(factorization.needsRefactor(100));
-    try std.testing.expectEqual(ReinversionReason.update_growth, factorization.reinversionReason(100).?);
-    factorization.recordReinversion(.update_growth);
-    try std.testing.expectEqual(@as(usize, 1), factorization.stats.update_growth_reinversions);
+    try std.testing.expectEqual(ReinversionReason.update_limit, factorization.reinversionReason(100).?);
     try factorization.refactorizeInPlace();
     try std.testing.expectEqual(@as(f64, 1.0), factorization.maximum_update_growth);
 }
