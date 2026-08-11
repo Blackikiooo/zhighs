@@ -31,13 +31,23 @@ committed simplex iterations。稀疏矩阵、primal simplex 和 tasks/multi dua
 HiGHS 的 `count < 0` dense/unknown sentinel，以类型化状态取代带符号魔数；用 comptime `Real`
 生成 f64 和扩展精度版本；串行框架不携带 PAMI `next` 链。其余清零阈值、reindex 阈值、索引顺序、
 可能非零语义和算术顺序必须与 HiGHS 一致。验收为 ReleaseFast 全测、独立语义测试和零现有求解
-行为变化；接入 NLA 属于后续 F0b，不在本提交混合完成。
+行为变化；接入 iteration workspace/NLA 属于后续 F0b/F0c，不在本提交混合完成。
 
 实现已落在 `indexed_vector.zig`：显式 `.indexed/.dense` 状态替代负 count，f64/f128 由同一
 comptime 类型生成；保留 HiGHS 的 30% clear、10% reindex、possible-nonzero、`1e-14/1e-50`、
 pack snapshot、扩展精度运算顺序、synthetic tick 及 UPDATE scratch 所有权。独立测试覆盖 sparse/
 dense clear、自然序 reindex、tight、pack、norm、跨精度 copy 和 saxpy cancellation；ReleaseFast
 全量测试及 `git diff --check` 通过，现有 solver 尚未接入，因此求解行为为零变化。
+
+### F0b — serial dual iteration workspace（协议）
+
+参照 `HEkkDual` 的成员生命周期，用 `DualIterationWorkspace(Real)` 唯一拥有 `row_ep`、
+`row_ap`、`col_aq`、`col_BFRT` 和 CHUZC 的组合 pack。行向量维度固定为 `num_row`，结构 tableau
+维度为 `num_col`，组合 pack 容量为 `num_col + num_row`；`beginIteration` 只按各自产生者 support
+清零，不触碰跨迭代 factor 状态。扩展精度由同一 comptime 定义生成，不复制 workspace 代码。
+
+本阶段只建立所有权、维度和 pack 顺序语义并完成独立测试，不接入现有 dual kernel；F0c 再让
+SimplexNla 原生消费这些 vector。验收仍是 ReleaseFast 全测和零现有求解行为变化。
 
 ## 1. HiGHS serial dual simplex 算法路径
 
