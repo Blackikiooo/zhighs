@@ -137,3 +137,12 @@ setup-only A/B improved `capri -12.32%`, `grow7 -8.62%`, `sc105 -7.25%`, and
 was removed: rebuilding combinatorial state with branch-heavy scalar loops and
 the resulting code layout is not a safe universal replacement for the current
 initialization path.
+
+### H1d — repack captured FT Aq (rejected)
+
+The dense captured Aq was replaced with natural-order packed index/value
+streams before FT update.  All pivot counts remained identical.  An initial
+31-run A/B was mildly positive overall, but a 101-run confirmation resolved to
+`shell +0.11%`, `scrs8 +0.70%`, and `sc105 -0.13%`.  Repacking by rescanning
+the dense vector merely moves work from UPDATE to FTRAN and was removed.  A
+future packed Aq must be published directly by the sparse FTRAN producer.
