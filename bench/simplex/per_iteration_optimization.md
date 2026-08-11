@@ -263,3 +263,15 @@ but the 10-model 31-run gate regressed slightly from `102.256` to `102.431 ms`
 the deep loops and adds register pressure.  The change was removed; a future
 crash optimization must use true outer specialization or reduce the greedy
 planner's repeated full-column scans.
+
+### H1h — sparse DSE tau FTRAN from retained Ep support (rejected)
+
+The exact nonzero support of each pivotal BTRAN row was retained and passed to
+the adaptive solve for `tau = B^-1 B^-T e_p`, matching HiGHS' indexed
+`HVector` interface.  Representative trajectories stayed identical, but the
+10-model 31-run gate regressed from `102.306` to `105.300 ms` (`+2.93%`),
+including `scorpion +9.39%`, `capri +7.21%`, and `shell +4.16%`.  Despite
+`shell`'s roughly 3% DSE Ep density, the current FT-aware hyper FTRAN pays more
+for marking, scatter, and dense materialization than it saves in the L pass.
+All support storage was removed.  Sparse DSE dispatch should be revisited only
+after improving that lower-level FT hyper kernel.
