@@ -83,6 +83,17 @@ ReleaseFast 全测、40 模型 forced-dual correctness 和 committed pivot 数�
 公开 `engine.factorization` 路径已清零。ReleaseFast 全测通过，forced-dual 40 模型 correctness
 **40/40 PASS**，committed pivots 合计仍为 **6833**，本阶段未改变任何迭代 kernel 的数值输入或顺序。
 
+### F0e — engine-owned serial dual workspace（协议）
+
+把 `DualIterationWorkspace(f64)` 安装为 `SimplexEngine` 的模型形状资源，生命周期与当前 LP 实例
+一致而不再依附 `BasisState`。同尺寸重复 solve 必须复用分配；尺寸变化时以先成功构造、后替换的
+transactional 顺序更新，OOM 不得破坏旧 workspace；`deinit/requestedBytes` 必须覆盖完整所有权。
+
+本阶段不读取或写入 iteration vector，求解数值行为应为零变化。验收为生命周期/内存复用单测、
+ReleaseFast 全测、forced-dual 40 模型 correctness **40/40** 且 committed pivots 合计仍为 **6833**。
+通过后 F0f 才原子迁移 BTRAN→PRICE→CHUZC 的整条只读链，禁止同时保留两套具有不同 support
+顺序的 active tableau row。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
