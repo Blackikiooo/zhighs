@@ -70,6 +70,14 @@ indices，其余 dense consumer 先用 vector 自有 packed scratch allocation-f
 非平凡 dense basis、stale complement、sparse support 和 captured-Aq UPDATE 测试全部通过；现有
 engine 尚未接入，求解行为零变化。
 
+### F0d — engine NLA ownership migration（协议）
+
+将 `SimplexEngine.factorization` 替换为 `SimplexEngine.nla: SimplexNla`，所有 factor build/solve/
+update、reinversion policy、统计和测试观测显式经 `nla.factorization` 访问。本阶段是机械所有权迁移：
+现有 engine 数值向量仍调用 compatibility slice API，不同时切换 dual iteration 数据流。验收为
+ReleaseFast 全测、40 模型 forced-dual correctness 和 committed pivot 数逐项不变。通过后，F0e 才
+把 `DualIterationWorkspace` 装入 engine 并迁移一条完整的 BTRAN→PRICE→CHUZC 只读链。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
