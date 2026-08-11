@@ -265,6 +265,19 @@ aggregate pivots；下一阶段再让 sparse FT 原生发布 index，删除 reco
 HiGHS 同点为 `30/sparse`。因此 tiny fill 假设错误，实验代码已撤回。差异发生在第一次 FTRAN
 之前的 Phase-I bounds/nonbasic-value/rebuild 状态，下一步转入 B2 初始化顺序对齐。
 
+### F0o — HiGHS-default cold basis policy（协议）
+
+继续逐字段检查推翻了“同一初始 basis”的隐含前提：本地 HiGHS `simplex_crash_strategy` 默认值为 0，
+refinery 首次 CHUZR 的 basis head 为 logical（row 1 → column 465）；Zig `.automatic` 通过模型尺寸/
+密度规则安装 structural crash（同一 row → column 32）。因此 F0m 的 pivot 前缀只是局部巧合，不能
+作为完整算法等价证据。
+
+将 Zig `.automatic` crash 解析为 HiGHS 默认 logical basis；仅 `.ltssf/.bixby` 显式请求可安装
+structural crash。删除 automatic 的模型形状选择、覆盖率/condition 验收、Bixby 二次尝试、DSE
+预算补偿和 recursive logical fallback；显式 crash 的失败仍原子恢复 logical basis。验收为首次
+basis head/RHS list 与 HiGHS、ReleaseFast 全测、forced-dual 40/40，以及逐模型 pivot 变化。此项
+优先级高于保留既有低迭代数，因为目标是先建立相同算法起点。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
