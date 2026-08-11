@@ -25,13 +25,19 @@ committed simplex iterations。稀疏矩阵、primal simplex 和 tasks/multi dua
 5. 框架验收顺序固定为：单元语义 → 首次 rebuild 全状态 → pivot 前缀 → 完整模型 → 40 模型。
    在完整 40 模型与 HiGHS 算法路径对齐以前，运行时间只作回归保护，不作设计选择依据。
 
-### F0a — Zig 泛型 indexed vector（协议）
+### F0a — Zig 泛型 indexed vector（完成）
 
 直接参照本地 `HVectorBase.{h,cpp}` 实现拥有内存的 `IndexedVector(Real)`。用显式 enum 表示
 HiGHS 的 `count < 0` dense/unknown sentinel，以类型化状态取代带符号魔数；用 comptime `Real`
 生成 f64 和扩展精度版本；串行框架不携带 PAMI `next` 链。其余清零阈值、reindex 阈值、索引顺序、
 可能非零语义和算术顺序必须与 HiGHS 一致。验收为 ReleaseFast 全测、独立语义测试和零现有求解
 行为变化；接入 NLA 属于后续 F0b，不在本提交混合完成。
+
+实现已落在 `indexed_vector.zig`：显式 `.indexed/.dense` 状态替代负 count，f64/f128 由同一
+comptime 类型生成；保留 HiGHS 的 30% clear、10% reindex、possible-nonzero、`1e-14/1e-50`、
+pack snapshot、扩展精度运算顺序、synthetic tick 及 UPDATE scratch 所有权。独立测试覆盖 sparse/
+dense clear、自然序 reindex、tight、pack、norm、跨精度 copy 和 saxpy cancellation；ReleaseFast
+全量测试及 `git diff --check` 通过，现有 solver 尚未接入，因此求解行为为零变化。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

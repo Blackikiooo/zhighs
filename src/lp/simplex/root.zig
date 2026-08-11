@@ -20,6 +20,8 @@ pub const ratio_test = @import("ratio_test.zig");
 pub const numerical = @import("numerical.zig");
 /// Persistent dual work arrays and Phase-I bound/cost transformations.
 pub const dual_phase_one = @import("dual_phase_one.zig");
+/// Generic dense-plus-indexed numerical vector used by simplex NLA.
+pub const indexed_vector = @import("indexed_vector.zig");
 /// Preferred semantic alias for the persistent serial-dual work module.
 pub const dual_work = dual_phase_one;
 /// Unified dual phase, rebuild and cost-lifecycle controller.
