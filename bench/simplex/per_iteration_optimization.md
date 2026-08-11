@@ -275,3 +275,21 @@ including `scorpion +9.39%`, `capri +7.21%`, and `shell +4.16%`.  Despite
 for marking, scatter, and dense materialization than it saves in the L pass.
 All support storage was removed.  Sparse DSE dispatch should be revisited only
 after improving that lower-level FT hyper kernel.
+
+### H3b — consume packed FTRAN support in pivot commit (protocol)
+
+HiGHS `HEkkDualRHS::updatePrimal` updates the basic solution through the
+indexed `col_aq` whenever its count is at most 40% of the row dimension, and
+uses a dense pass only above that threshold.  zhighs already gathers the exact
+nonzero FTRAN result into `changed_row_index`, but `performPivot` ignores that
+support for the numerical update and then performs a second full-row pass to
+scatter every basic value back into the global primal vector.
+
+Change only the traversal ownership: use the existing natural-order support
+for both operations when it contains at most 40% of the rows, otherwise retain
+the current dense loops.  Every indexed update must use the same scalar
+expression as the dense path, and the entering/leaving assignments remain in
+their current order.  The prediction is unchanged pivot traces with a lower
+`performPivot` cost on sparse-FTRAN models; the representative gate is
+`shell`, `capri`, `scrs8`, `seba`, `grow7`, and `sc105`, followed by the frozen
+40-model forced-dual gate if the aggregate signal is positive.
