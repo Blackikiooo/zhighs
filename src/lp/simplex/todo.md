@@ -192,6 +192,18 @@ CHUZC ratio/group 与 move direction 现和 pack/candidate prefix 一起由 iter
 SoA 连续布局且只覆写 active candidates。ReleaseFast 全测、runner build、forced-dual **40/40**、
 **6833** pivots 及三模型 trace digest 全部保持。
 
+### F0k — complete dual RHS candidate ownership（协议）
+
+将旧 hyper-sparse CHUZR 的 retained candidate row/score 从 `BasisState` 移入持久
+`DualWorkState`，使所有 row infeasibility、index/mark、changed-row support 和候选筛选状态均由
+同一个 dual RHS 对应物拥有。`ensureCapacity` 必须事务式扩展候选 SoA，`deinit/requestedBytes`
+覆盖完整内存；basis 删除 dual-only 字段、分配和初始化。
+
+本阶段只修正所有权，不改变候选容量、评分、遍历顺序或启用条件。验收为 candidate lifecycle/
+memory accounting 单测、ReleaseFast 全测、F0j 三模型 trace digest 不变、forced-dual correctness
+40/40 和 aggregate pivots **6833**。通过后，major controller 才能在不依赖 basis scratch 的前提下
+统一 CHUZR 生命周期，并最终删除旧 selector 与模型形状开关。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
