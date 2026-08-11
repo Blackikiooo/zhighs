@@ -328,6 +328,19 @@ aggregate `10571→10940`。这证明 baseline 门控既掩盖了成功，也掩
 自动路径逐模型与预先运行的显式 `highs` A/B 完全一致，aggregate `10940 vs 8774`。因此后续所有
 修复都在同一初始化状态上进行，brandy 的接近对齐和 gas11/klein1 的回退都不会再被策略分流隐藏。
 
+### F0r — source-equivalent dual phase entry（协议）
+
+HiGHS 在 perturb 后若无原始 dual infeasibility 会直接进入 Phase II；否则进入 Phase I，由统一 major
+loop 和 rebuild reason 决定退出。Zig 仍仅对两个模型形状开放 zero-pivot Phase-II，按第三种形状缩短
+update chain，并用 `shouldPreflightDualPhaseOneFallback` 在 row/flip/mass 阈值上提前放弃 dual Phase I；
+零 pivot 后还对一个形状强制 Devex。这些都不是 HiGHS 算法状态。
+
+删除 `useHighsRhsInfeasibilityList/useHighsUltrawideLifecycle/useHighsBreakpointGroups/`
+`useShortDualUpdateChain` 和 preflight helper：zero-infeasibility transition 对 `.highs` 路径普遍生效，
+其余模型一律进入同一个 dual Phase-I loop；update limit 和 DSE rule 只由通用控制/观测量决定。
+验收为 ReleaseFast 全测、forced-dual 40/40、逐模型 phase iteration 与 aggregate；失败只能修统一
+phase/rebuild 语义，不得恢复形状阈值。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
