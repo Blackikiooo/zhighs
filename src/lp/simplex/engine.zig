@@ -8,6 +8,7 @@ const std = @import("std");
 const basis_module = @import("basis.zig");
 const basis_snapshot_module = @import("basis_snapshot.zig");
 const factorization_module = @import("factorization.zig");
+const simplex_nla_module = @import("simplex_nla.zig");
 const pricing_module = @import("pricing.zig");
 const ratio_module = @import("ratio_test.zig");
 const numerical_module = @import("numerical.zig");
@@ -636,8 +637,8 @@ pub const SimplexEngine = struct {
     algorithm: Algorithm = .dual_revised,
     /// Model-shaped mutable basis, allocated at the start of a solve.
     basis: ?basis_module.BasisState = null,
-    /// Current basis inverse/factor representation and update chain.
-    factorization: factorization_module.Factorization,
+    /// Vector-native numerical linear algebra owner and factor update chain.
+    nla: simplex_nla_module.SimplexNla,
     /// Persistent dual Phase-I/II bounds, moves, shifts and diagnostics.
     dual_work: dual_phase_one_module.DualWorkState,
     /// Unified dual phase and rebuild controller.
@@ -808,7 +809,7 @@ pub const SimplexEngine = struct {
     pub fn init(a: std.mem.Allocator) SimplexEngine {
         return .{
             .allocator = a,
-            .factorization = factorization_module.Factorization.init(a),
+            .nla = simplex_nla_module.SimplexNla.init(a),
             .dual_work = dual_phase_one_module.DualWorkState.init(a),
             .crash = crash_module.CrashWorkspace.init(a),
             .degeneracy = degeneracy_module.Workspace.init(a),
@@ -818,7 +819,7 @@ pub const SimplexEngine = struct {
     /// Release the active basis and every retained sub-workspace.
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
-        self.factorization.deinit();
+        self.nla.deinit();
         self.dual_work.deinit();
         self.crash.deinit();
         self.degeneracy.deinit();
@@ -830,7 +831,7 @@ pub const SimplexEngine = struct {
     /// Allocator metadata and borrowed problem storage are excluded.
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.factorization.requestedBytes() + self.dual_work.requestedBytes() +
+        return basis_bytes + self.nla.retainedBytes() + self.dual_work.requestedBytes() +
             self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes();
     }
     /// Legacy dimension-only entry point retained for API compatibility.
@@ -911,7 +912,7 @@ pub const SimplexEngine = struct {
         self.basis = basis_module.BasisState.init(self.allocator, problem.num_rows, problem.num_cols) catch return .numerical_failure;
         self.degeneracy.ensureCapacity(problem.num_rows, self.basis.?.col_status.len) catch return .numerical_failure;
         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-        self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+        self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
         self.dual_edge_weights_valid = true;
         self.observeFactorizationStability();
         self.iterations = 0;
@@ -949,7 +950,7 @@ pub const SimplexEngine = struct {
             // Invalid, singular, or neither-feasible warm starts fall back to
             // the deterministic logical crash basis.
             if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-            self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+            self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
             self.dual_edge_weights_valid = true;
             self.observeFactorizationStability();
         }
@@ -1081,7 +1082,7 @@ pub const SimplexEngine = struct {
             if (!crash_installed) {
                 self.stats.crash_fallbacks += 1;
                 if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-                self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
                 self.numerical = logical_numerical_state;
                 self.pricing = logical_pricing_state;
                 self.dual_edge_weights_valid = true;
@@ -1143,7 +1144,7 @@ pub const SimplexEngine = struct {
                 self.stats.crash_fallbacks += 1;
                 crash_installed = false;
                 if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-                self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
                 self.numerical = logical_numerical_state;
                 self.pricing = logical_pricing_state;
                 self.dual_edge_weights_valid = true;
@@ -1162,7 +1163,7 @@ pub const SimplexEngine = struct {
                         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
                     } else {
                         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-                        self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+                        self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
                         self.numerical = logical_numerical_state;
                         self.pricing = logical_pricing_state;
                         self.dual_edge_weights_valid = true;
@@ -1258,7 +1259,7 @@ pub const SimplexEngine = struct {
             // A failed explicit experiment falls back to the frozen logical
             // crash and artificial Phase I, preserving the correctness path.
             if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-            self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+            self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
             self.numerical = numerical_before_dual_phase_one;
             self.pricing = pricing_before_dual_phase_one;
             self.failure_site = .none;

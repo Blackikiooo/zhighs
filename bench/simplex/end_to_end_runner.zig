@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
     engine.numerical.degenerate_pivot_limit = degenerate_limit;
     engine.numerical.max_refinement_steps = refinement_steps;
     engine.numerical.fresh_factorization_recovery_pivots = fresh_recovery_pivots;
-    engine.factorization.sparse_dimension_threshold = sparse_threshold;
+    engine.nla.factorization.sparse_dimension_threshold = sparse_threshold;
     const trace: []zhighs.lp.simplex.engine.PivotTraceEvent = if (trace_enabled)
         try allocator.alloc(zhighs.lp.simplex.engine.PivotTraceEvent, @min(max_iterations, 100_000))
     else
@@ -302,20 +302,20 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const stats = engine.factorization.stats;
+    const stats = engine.nla.factorization.stats;
     const reinversions = stats.update_limit_reinversions + stats.update_growth_reinversions + stats.solve_residual_reinversions;
     const total_ns = parsed_ns + solve_ns;
     const line = try std.fmt.allocPrint(
         allocator,
         "zhighs\t{s}\t{s}\t{s}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{e:.6}\t{e:.6}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n",
-        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iteration_counters.committed_pivots, primal_residual, dual_residual, ray_residual, ray_objective, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.factorization.update_count, parsed_ns, solve_ns, total_ns },
+        .{ path, @tagName(status), @tagName(engine.failure_site), engine.objective_value, engine.iteration_counters.committed_pivots, primal_residual, dual_residual, ray_residual, ray_objective, stats.factorizations, reinversions, stats.update_limit_reinversions, stats.update_growth_reinversions, stats.ft_updates, engine.nla.factorization.update_count, parsed_ns, solve_ns, total_ns },
     );
     defer allocator.free(line);
     try std.Io.File.stdout().writeStreamingAll(io_context, line);
     if (!collect_statistics) return;
 
     const simplex_stats = engine.stats;
-    const factor_stats = engine.factorization.stats;
+    const factor_stats = engine.nla.factorization.stats;
     const aq_density = if (simplex_stats.aq_samples == 0 or problem.num_rows == 0)
         0.0
     else

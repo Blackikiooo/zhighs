@@ -156,7 +156,7 @@ pub fn installSparseCrashBasis(
         }
         self.factorizeCurrentBasis(problem) catch continue;
         if (self.finishRefactorization() != .optimal) continue;
-        const condition = self.factorization.pivotConditionEstimate();
+        const condition = self.nla.factorization.pivotConditionEstimate();
         if (!std.math.isFinite(condition) or condition > 1e12) continue;
         if (self.recomputeBasicValuesUnchecked(problem) != .optimal) continue;
         if (!std.math.isFinite(self.numerical.last_relative_residual) or

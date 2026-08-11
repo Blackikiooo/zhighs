@@ -53,7 +53,7 @@ pub fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
         // RHS; fall back to a dense clear when the backend did not publish a
         // support (the first iteration is already zeroed above).
         if (row != 0) {
-            const previous_indices = self.factorization.lastSparseSolveIndices();
+            const previous_indices = self.nla.factorization.lastSparseSolveIndices();
             if (previous_indices.len == 0)
                 @memset(basis.dual_row, 0.0)
             else for (previous_indices) |index| basis.dual_row[index] = 0.0;
@@ -62,9 +62,9 @@ pub fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
         // Unit-vector BTRAN: pass the single nonzero index for
         // sparse-index adaptive dispatch (hyper-sparse L solve).
         const ep_index = [_]u32{@intCast(row)};
-        self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
+        self.nla.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
         var norm_squared: f64 = 0.0;
-        const result_indices = self.factorization.lastSparseSolveIndices();
+        const result_indices = self.nla.factorization.lastSparseSolveIndices();
         if (result_indices.len == 0) {
             for (basis.dual_row) |entry| norm_squared += entry * entry;
         } else {
@@ -155,7 +155,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         return .numerical_failure;
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
     @memcpy(basis.residual_work, basis.dual_row);
-    self.factorization.solve(basis.residual_work) catch return .numerical_failure;
+    self.nla.factorization.solve(basis.residual_work) catch return .numerical_failure;
     var aq_nonzeros: usize = 0;
     var tau_nonzeros: usize = 0;
     const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
@@ -250,7 +250,7 @@ test "exact dual steepest-edge weights use BTRAN row norms" {
     engine.basis.?.basic_value[1] = -2.0;
     @memset(engine.basis.?.basic_lower, 0.0);
     @memset(engine.basis.?.basic_upper, std.math.inf(f64));
-    try engine.factorization.factorize(2, &[_]f64{ 2, 0, 0, 0.5 });
+    try engine.nla.factorization.factorize(2, &[_]f64{ 2, 0, 0, 0.5 });
     try std.testing.expectEqual(SolveStatus.optimal, engine.ensureExactDualEdgeWeights());
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), engine.basis.?.row_edge_weight[1], 1e-12);
@@ -270,7 +270,7 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
-    try engine.factorization.factorizeIdentity(2);
+    try engine.nla.factorization.factorizeIdentity(2);
     engine.pricing.rule = .steepest_edge;
     engine.dual_edge_weights_valid = true;
     engine.dual_row_index = 0;
@@ -287,24 +287,24 @@ test "dual steepest-edge recurrence matches exact weights for a nontrivial basis
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
-    try engine.factorization.factorize(2, &[_]f64{ 2, 1, 1, 3 });
+    try engine.nla.factorization.factorize(2, &[_]f64{ 2, 1, 1, 3 });
     engine.pricing.rule = .steepest_edge;
     engine.dual_edge_weights_valid = false;
     try std.testing.expectEqual(SolveStatus.optimal, engine.ensureExactDualEdgeWeights());
 
     @memset(engine.basis.?.dual_row, 0);
     engine.basis.?.dual_row[0] = 1;
-    try engine.factorization.solveTranspose(engine.basis.?.dual_row);
+    try engine.nla.factorization.solveTranspose(engine.basis.?.dual_row);
     engine.basis.?.pivot_direction[0] = 4;
     engine.basis.?.pivot_direction[1] = -2;
-    try engine.factorization.solve(engine.basis.?.pivot_direction);
+    try engine.nla.factorization.solve(engine.basis.?.pivot_direction);
     const pivot = engine.basis.?.pivot_direction[0];
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, pivot));
     const updated_weights = [_]f64{
         engine.basis.?.row_edge_weight[0],
         engine.basis.?.row_edge_weight[1],
     };
-    try engine.factorization.update(.{
+    try engine.nla.factorization.update(.{
         .leaving_row = 0,
         .entering_col = 0,
         .direction = engine.basis.?.pivot_direction,
@@ -314,7 +314,7 @@ test "dual steepest-edge recurrence matches exact weights for a nontrivial basis
     for (updated_weights, 0..) |updated, row| {
         @memset(engine.basis.?.rhs_work, 0);
         engine.basis.?.rhs_work[row] = 1;
-        try engine.factorization.solveTranspose(engine.basis.?.rhs_work);
+        try engine.nla.factorization.solveTranspose(engine.basis.?.rhs_work);
         var exact: f64 = 0;
         for (engine.basis.?.rhs_work) |value| exact += value * value;
         try std.testing.expectApproxEqAbs(exact, updated, 1e-12);

@@ -147,7 +147,7 @@ pub fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
         control.clock_io orelse std.Io.Threaded.global_single_threaded.io()
     else
         null;
-    self.factorization.resetStatistics(self.statistics_io);
+    self.nla.factorization.resetStatistics(self.statistics_io);
 }
 
 /// Read the optional statistics clock; null means timing collection is disabled.

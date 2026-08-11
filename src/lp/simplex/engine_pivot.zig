@@ -28,21 +28,21 @@ const RebuildReason = @import("engine.zig").RebuildReason;
 
 fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
-    if (self.factorization.supportsSparseUpdateRhs()) {
+    if (self.nla.factorization.supportsSparseUpdateRhs()) {
         const count = self.fillInternalColumnSparse(
             problem,
             entering_col,
             basis.pivot_direction,
             self.dual_work.changed_row_index,
         ) orelse return .numerical_failure;
-        self.factorization.solveForUpdateSparse(
+        self.nla.factorization.solveForUpdateSparse(
             basis.pivot_direction,
             self.dual_work.changed_row_index[0..count],
         ) catch return .numerical_failure;
     } else {
         if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal)
             return .numerical_failure;
-        self.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
+        self.nla.factorization.solveForUpdate(basis.pivot_direction) catch return .numerical_failure;
     }
     return .optimal;
 }
@@ -60,10 +60,10 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
     // than forming B*x-a_q on every iteration. Keep the stronger whole-column
     // guard periodically while the FT chain ages; a fresh factorization does
     // not need an immediate residual reconstruction.
-    const check_full_residual = self.factorization.update_count != 0 and
-        self.factorization.update_count % 8 == 0;
+    const check_full_residual = self.nla.factorization.update_count != 0 and
+        self.nla.factorization.update_count % 8 == 0;
     if (check_full_residual and !self.directionResidualAcceptable(problem, entering_col)) {
-        self.factorization.recordReinversion(.solve_residual);
+        self.nla.factorization.recordReinversion(.solve_residual);
         if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
             self.failure_site = .direction_refactor;
             return .numerical_failure;
@@ -75,7 +75,7 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
                 self.failure_site = .direction_refinement;
                 return .numerical_failure;
             }
-            self.factorization.solve(basis.residual_work) catch {
+            self.nla.factorization.solve(basis.residual_work) catch {
                 self.failure_site = .direction_refinement;
                 return .numerical_failure;
             };
@@ -88,7 +88,7 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
         }
     }
     self.observeAqDensity(basis.pivot_direction);
-    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+    self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
         basis.pivot_direction,
         self.dual_work.changed_row_index,
     );
@@ -130,9 +130,9 @@ pub fn computeDualDirection(
     else
         @abs(@abs(alpha_col) - @abs(alpha_row)) / min_alpha;
     if ((!std.math.isFinite(relative_difference) or relative_difference > 1e-7) and
-        self.factorization.update_count > 0)
+        self.nla.factorization.update_count > 0)
     {
-        self.factorization.recordReinversion(.solve_residual);
+        self.nla.factorization.recordReinversion(.solve_residual);
         if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
             self.failure_site = .direction_refactor;
             return .numerical_failure;
@@ -152,7 +152,7 @@ pub fn computeDualDirection(
         direction_nonzeros += 1;
     }
     self.observeAqDensity(basis.pivot_direction);
-    self.dual_work.changed_row_count = self.factorization.orderGatheredFtranIndices(
+    self.dual_work.changed_row_count = self.nla.factorization.orderGatheredFtranIndices(
         basis.pivot_direction,
         self.dual_work.changed_row_index,
         direction_nonzeros,
@@ -227,13 +227,13 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             forced_rebuild_reason = .fresh_mode;
             break :blk false;
         }
-        self.factorization.update(.{
+        self.nla.factorization.update(.{
             .leaving_row = @intCast(leaving_row),
             .entering_col = @intCast(entering_col),
             .direction = basis.pivot_direction,
             .column_scale = entering_direction,
         }) catch |err| {
-            const failure_kind = self.factorization.recordUpdateFailure(err);
+            const failure_kind = self.nla.factorization.recordUpdateFailure(err);
             if (self.stats.first_update_failure_kind == null) {
                 self.stats.first_update_failure_kind = failure_kind;
                 self.stats.first_update_failure_iteration = self.iterations;
@@ -289,15 +289,15 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
             .leaving_row = @intCast(leaving_row),
             .pivot = pivot,
             .step = step,
-            .update_count = self.factorization.update_count,
+            .update_count = self.nla.factorization.update_count,
             .ftran_relative_residual = self.numerical.last_ftran_relative_residual,
             .condition_estimate = self.numerical.pivot_condition_estimate,
             .bound_flip_count = 0,
         };
         self.pivot_trace_count += 1;
     }
-    const reinversion_reason = self.factorization.reinversionReason(self.active_max_update_count);
-    if (reinversion_reason) |reason| self.factorization.recordReinversion(reason);
+    const reinversion_reason = self.nla.factorization.reinversionReason(self.active_max_update_count);
+    if (reinversion_reason) |reason| self.nla.factorization.recordReinversion(reason);
     if (!update_succeeded or reinversion_reason != null or self.numerical.needsRefactor()) {
         const rebuild_reason = forced_rebuild_reason orelse if (reinversion_reason) |reason| switch (reason) {
             .update_limit => RebuildReason.update_limit,
@@ -325,7 +325,7 @@ pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_modu
     const original_count = problem.num_cols + problem.num_rows;
     if (costs.len < original_count or shifts.len < original_count) return .numerical_failure;
     for (basis.basic_index, 0..) |column, row| basis.dual[row] = if (column < original_count) costs[column] + shifts[column] else 0.0;
-    self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+    self.nla.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
     const pricing_started = self.statisticsTimestamp();
     defer self.recordPricingElapsed(pricing_started);
     for (0..problem.num_cols) |column| {
@@ -393,7 +393,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
 
     @memset(basis.residual_work, 0.0);
     basis.residual_work[row] = 1.0;
-    self.factorization.solveTranspose(basis.residual_work) catch return .numerical_failure;
+    self.nla.factorization.solveTranspose(basis.residual_work) catch return .numerical_failure;
     const row_pricing = self.selectRowPricing(basis.residual_work);
     const pricing_started = self.statisticsTimestamp();
     defer if (row_pricing)
@@ -453,7 +453,7 @@ pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.Probl
         else
             0.0;
     }
-    self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+    self.nla.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
     const row_pricing = self.selectRowPricing(basis.dual);
     const pricing_started = self.statisticsTimestamp();
     defer if (row_pricing)
@@ -524,7 +524,7 @@ pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemVie
 /// Assemble and factorize the matrix columns named by the current basis head.
 pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: problem_module.ProblemView) factorization_module.FactorizationError!void {
     const basis = if (self.basis) |*value| value else return error.DimensionMismatch;
-    return self.factorization.factorizeBasis(
+    return self.nla.factorization.factorizeBasis(
         problem.matrix,
         basis.basic_index,
         basis.row_scale,
@@ -576,7 +576,7 @@ test "reinversion preserves DSE validity only in original-objective Phase II" {
 
 /// Feed the current factor pivot spread into the numerical warning policy.
 pub fn observeFactorizationStability(self: *SimplexEngine) void {
-    self.numerical.pivot_condition_estimate = self.factorization.pivotConditionEstimate();
+    self.numerical.pivot_condition_estimate = self.nla.factorization.pivotConditionEstimate();
     if (!std.math.isFinite(self.numerical.pivot_condition_estimate) or self.numerical.pivot_condition_estimate > 1e12)
         self.numerical.numerical_warning = true;
 }
@@ -615,7 +615,7 @@ pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.Pr
         }
     }
     @memcpy(basis.rhs_work, basis.residual_work);
-    self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
+    self.nla.factorization.solve(basis.rhs_work) catch return .numerical_failure;
 
     var refinement_step: usize = 0;
     while (true) {
@@ -632,7 +632,7 @@ pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.Pr
         if (self.numerical.last_relative_residual <= self.numerical.residual_tolerance or
             refinement_step >= self.numerical.max_refinement_steps)
             break;
-        self.factorization.solve(basis.pivot_direction) catch return .numerical_failure;
+        self.nla.factorization.solve(basis.pivot_direction) catch return .numerical_failure;
         for (basis.rhs_work, basis.pivot_direction) |*value, correction| value.* += correction;
         refinement_step += 1;
         self.numerical.refinement_count += 1;

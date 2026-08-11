@@ -655,7 +655,7 @@ test "Model.optimize publishes an LP solution and basis attributes" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), model.pi[0], 1e-12);
     try std.testing.expectEqual(BasisStatus.basic, model.vbasis[0]);
     try std.testing.expectEqual(@as(usize, 1), model.lp_session.cold_solves);
-    const factor_buffer = model.lp_session.engine.factorization.dense_lu.lu.ptr;
+    const factor_buffer = model.lp_session.engine.nla.factorization.dense_lu.lu.ptr;
 
     const cached_revision = model.compiled_view_cache.source_revision.?;
     const cached_row_upper_ptr = model.compiled_view_cache.row_upper.ptr;
@@ -663,7 +663,7 @@ test "Model.optimize publishes an LP solution and basis attributes" {
     try std.testing.expectEqual(cached_revision, model.compiled_view_cache.source_revision.?);
     try std.testing.expectEqual(cached_row_upper_ptr, model.compiled_view_cache.row_upper.ptr);
     try std.testing.expectEqual(@as(usize, 1), model.lp_session.reoptimizations);
-    try std.testing.expectEqual(factor_buffer, model.lp_session.engine.factorization.dense_lu.lu.ptr);
+    try std.testing.expectEqual(factor_buffer, model.lp_session.engine.nla.factorization.dense_lu.lu.ptr);
 
     try model.setDblAttrElement(.rhs, 0, 4.0);
     try model.optimize();

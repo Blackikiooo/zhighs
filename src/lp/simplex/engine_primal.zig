@@ -76,7 +76,7 @@ pub fn chooseLeavingWithPolicy(self: *SimplexEngine, allow_bland: bool) PrimalLe
         self.ratio_test.chooseLeavingHighs(
             basis.ratio_direction,
             basis.basic_margin,
-            self.factorization.update_count,
+            self.nla.factorization.update_count,
             self.numerical.primal_tolerance,
         );
     if (choice.row == null) return .{ .status = .unbounded };
@@ -249,8 +249,8 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
             // Never certify dual feasibility from an updated BTRAN chain.
             // Reinvert the unchanged basis once and price again; a stale
             // transpose solve can otherwise publish a false optimum.
-            if (self.factorization.update_count != 0) {
-                self.factorization.recordReinversion(.solve_residual);
+            if (self.nla.factorization.update_count != 0) {
+                self.nla.factorization.recordReinversion(.solve_residual);
                 if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
                 if (self.recomputeReducedCosts(problem) != .optimal) {
                     self.failure_site = .reduced_cost;
@@ -291,13 +291,13 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
         // fresh basis before mutating basis membership.
         if (leaving.status == .optimal and self.pivotNeedsFreshFactorization(leaving.row.?)) {
             small_pivot_retry = true;
-            if (self.factorization.update_count != 0) {
+            if (self.nla.factorization.update_count != 0) {
                 // Once a basis exposes a component at the forward-accuracy
                 // boundary, occasional FT updates can steer later ratio
                 // tests onto a different numerical path. Recompute from a
                 // fresh basis before deciding whether the pivot is real.
                 self.fresh_factorization_pivots_remaining = self.numerical.fresh_factorization_recovery_pivots;
-                self.factorization.recordReinversion(.small_pivot);
+                self.nla.factorization.recordReinversion(.small_pivot);
                 if (self.refactorizeBasis(problem, .small_pivot) != .optimal) return .numerical_failure;
                 if (self.computeDirection(problem, entering.column) != .optimal) return .numerical_failure;
                 if (entering.direction < 0) {
@@ -596,8 +596,8 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
             );
         }
         const entering_choice = entering orelse {
-            if (self.factorization.update_count != 0) {
-                self.factorization.recordReinversion(.solve_residual);
+            if (self.nla.factorization.update_count != 0) {
+                self.nla.factorization.recordReinversion(.solve_residual);
                 if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
                 if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
                 continue;
@@ -746,7 +746,7 @@ pub fn restartPhaseOneWithoutPerturbation(
     self.fresh_factorization_pivots_remaining = 0;
     self.reduced_cost_update_count = 0;
     if (self.initializeProblemStorage(problem) != .optimal) return .numerical_failure;
-    self.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
+    self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
     self.dual_edge_weights_valid = true;
     self.observeFactorizationStability();
     if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
@@ -806,7 +806,7 @@ pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_modu
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const artificial_begin = problem.num_cols + problem.num_rows;
     for (basis.basic_index, 0..) |global_col, row| basis.dual[row] = if (global_col >= artificial_begin) 1.0 else 0.0;
-    self.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+    self.nla.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
     const row_pricing = self.selectRowPricing(basis.dual);
     const pricing_started = self.statisticsTimestamp();
     defer if (row_pricing)
@@ -906,7 +906,7 @@ test "engine solves a standard-form LP with primal revised simplex" {
     try std.testing.expectEqual(@as(usize, 0), engine.stats.phase_one_iterations);
     try std.testing.expect(engine.stats.pricing_calls > 0);
     try std.testing.expectEqual(@as(u64, 0), engine.stats.pricing_ns);
-    try std.testing.expectEqual(engine.factorization.stats.ftran_calls, engine.factorization.stats.dense_ftran_dispatches);
+    try std.testing.expectEqual(engine.nla.factorization.stats.ftran_calls, engine.nla.factorization.stats.dense_ftran_dispatches);
     try std.testing.expectEqual(engine.stats.rebuild_calls, engine.stats.classifiedRebuilds());
     try std.testing.expect(engine.requestedBytes() > 0);
 }

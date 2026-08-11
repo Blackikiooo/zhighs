@@ -391,7 +391,7 @@ fn solveDualLoop(
                     self.dual_work.highs_permutation[0..original_cols]
                 else
                     &.{},
-                .update_count = self.factorization.update_count,
+                .update_count = self.nla.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
                 .packed_indices = basis.flip_columns[0..basis.tableau_count],
                 .use_packed_indices = true,
@@ -867,7 +867,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     self.dual_work.highs_permutation[0..original_count]
                 else
                     &.{},
-                .update_count = self.factorization.update_count,
+                .update_count = self.nla.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
                 .packed_indices = basis.flip_columns[0..basis.tableau_count],
                 .use_packed_indices = true,
@@ -1335,14 +1335,14 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     // same workspace. Clear that producer-owned support instead of the whole
     // row; fall back to a dense clear if a sparse FTRAN or dense BTRAN revoked
     // ownership since the previous pivotal row.
-    const previous_dual_row = self.factorization.lastSparseSolveIndices();
+    const previous_dual_row = self.nla.factorization.lastSparseSolveIndices();
     if (previous_dual_row.len == 0)
         @memset(basis.dual_row, 0.0)
     else for (previous_dual_row) |index| basis.dual_row[index] = 0.0;
     basis.dual_row[row] = 1.0;
     // Unit-vector BTRAN for pivotal row: wire sparse-index dispatch.
     const ep_index = [_]u32{@intCast(row)};
-    self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
+    self.nla.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
     self.observeEpDensity(basis.dual_row);
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
     const row_pricing = self.selectRowPricing(basis.dual_row);
@@ -1557,7 +1557,7 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
     // B^-T e_0 has squared norm 100, while B^-T e_1 has norm 1.
     // The stale weights first select row 0 (violation 10), but its corrected
     // score is 1, so the fresh CHUZR scan must select row 1 (score 2).
-    try engine.factorization.factorize(2, &[_]f64{ 0.1, 0, 0, 1 });
+    try engine.nla.factorization.factorize(2, &[_]f64{ 0.1, 0, 0, 1 });
 
     var leaving: ?pricing_module.DualLeavingChoice = null;
     try std.testing.expectEqual(
@@ -1595,9 +1595,9 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     if (self.accumulateBoundFlipRhs(problem, flip_count, basis.residual_work) != .optimal)
         return .numerical_failure;
     @memcpy(basis.rhs_work, basis.residual_work);
-    self.factorization.solve(basis.rhs_work) catch return .numerical_failure;
+    self.nla.factorization.solve(basis.rhs_work) catch return .numerical_failure;
     for (basis.rhs_work) |value| if (!std.math.isFinite(value)) return .numerical_failure;
-    self.dual_work.changed_row_count = self.factorization.gatherFtranResultIndices(
+    self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
         basis.rhs_work,
         self.dual_work.changed_row_index,
     );
@@ -1768,7 +1768,7 @@ test "dual bound flips share one aggregate FTRAN" {
     engine.basis.?.primal[3] = 10;
     engine.basis.?.flip_columns[0] = 0;
     engine.basis.?.flip_columns[1] = 1;
-    try engine.factorization.factorizeIdentity(2);
+    try engine.nla.factorization.factorizeIdentity(2);
 
     try std.testing.expectEqual(SolveStatus.optimal, engine.applyBoundFlips(problem, 2));
     // Combined equation displacement is [1*2 + 3*3, 2*2 + 4*3] = [11, 16].
@@ -1778,7 +1778,7 @@ test "dual bound flips share one aggregate FTRAN" {
     try std.testing.expectApproxEqAbs(@as(f64, 3), engine.basis.?.primal[1], 1e-12);
     try std.testing.expectEqual(basis_module.BasisStatus.at_upper, engine.basis.?.col_status[0]);
     try std.testing.expectEqual(basis_module.BasisStatus.at_upper, engine.basis.?.col_status[1]);
-    try std.testing.expectEqual(@as(usize, 1), engine.factorization.stats.ftran_calls);
+    try std.testing.expectEqual(@as(usize, 1), engine.nla.factorization.stats.ftran_calls);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_batches);
     try std.testing.expectEqual(@as(usize, 1), engine.stats.bound_flip_ftran_savings);
 }

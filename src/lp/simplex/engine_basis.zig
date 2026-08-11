@@ -275,7 +275,7 @@ test "singular imported basis is repaired without discarding independent structu
     var structural_basics: usize = 0;
     for (engine.basis.?.basic_index) |column| structural_basics += @intFromBool(column < problem.num_cols);
     try std.testing.expectEqual(@as(usize, 1), structural_basics);
-    try std.testing.expect(engine.factorization.pivotConditionEstimate() < 1e12);
+    try std.testing.expect(engine.nla.factorization.pivotConditionEstimate() < 1e12);
 }
 
 test "rank repair cumulatively replaces multiple dependent structural basics" {
@@ -369,6 +369,6 @@ test "rank repair restores a singular sparse backend basis" {
     defer engine.deinit();
 
     try std.testing.expectEqual(SolveStatus.optimal, engine.solveProblem(problem, .{ .initial_basis = initial_basis }));
-    try std.testing.expectEqual(factorization_module.BackendKind.sparse_lu, engine.factorization.backend_kind);
+    try std.testing.expectEqual(factorization_module.BackendKind.sparse_lu, engine.nla.factorization.backend_kind);
     try std.testing.expectEqual(@as(usize, 2), engine.rank_repair_count);
 }
