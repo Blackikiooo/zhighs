@@ -86,6 +86,12 @@ pub const DualPhaseOneWorkspace = struct {
     infeasibility_mark: []u8 = &.{},
     /// HVector-equivalent row order changed by the latest FTRAN.
     changed_row_index: []u32 = &.{},
+    /// Retained row indexes for the legacy hyper-sparse CHUZR selector.
+    /// Kept beside the authoritative infeasibility list until the unified
+    /// major controller removes the legacy selector entirely.
+    candidate_row: []u32 = &.{},
+    /// Weighted CHUZR merits parallel to `candidate_row`.
+    candidate_score: []f64 = &.{},
     /// Active prefix length of `infeasibility_index`.
     infeasibility_count: usize = 0,
     /// Active prefix length of `changed_row_index`.
@@ -146,6 +152,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.infeasibility_index);
         self.allocator.free(self.infeasibility_mark);
         self.allocator.free(self.changed_row_index);
+        self.allocator.free(self.candidate_row);
+        self.allocator.free(self.candidate_score);
         self.allocator.free(self.checkpoint_status);
         self.allocator.free(self.checkpoint_basic_index);
         self.* = .{ .allocator = self.allocator };
@@ -183,6 +191,10 @@ pub const DualPhaseOneWorkspace = struct {
         errdefer self.allocator.free(infeasibility_mark);
         const changed_row_index = try self.allocator.alloc(u32, count);
         errdefer self.allocator.free(changed_row_index);
+        const candidate_row = try self.allocator.alloc(u32, count);
+        errdefer self.allocator.free(candidate_row);
+        const candidate_score = try self.allocator.alloc(f64, count);
+        errdefer self.allocator.free(candidate_score);
         const checkpoint_status = try self.allocator.alloc(basis_module.BasisStatus, count);
         errdefer self.allocator.free(checkpoint_status);
         const checkpoint_basic_index = try self.allocator.alloc(u32, count);
@@ -202,6 +214,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.infeasibility_index);
         self.allocator.free(self.infeasibility_mark);
         self.allocator.free(self.changed_row_index);
+        self.allocator.free(self.candidate_row);
+        self.allocator.free(self.candidate_score);
         self.allocator.free(self.checkpoint_status);
         self.allocator.free(self.checkpoint_basic_index);
         self.saved_lower = lower;
@@ -218,6 +232,8 @@ pub const DualPhaseOneWorkspace = struct {
         self.infeasibility_index = infeasibility_index;
         self.infeasibility_mark = infeasibility_mark;
         self.changed_row_index = changed_row_index;
+        self.candidate_row = candidate_row;
+        self.candidate_score = candidate_score;
         self.checkpoint_status = checkpoint_status;
         self.checkpoint_basic_index = checkpoint_basic_index;
         self.checkpoint_valid = false;
@@ -838,6 +854,8 @@ pub const DualPhaseOneWorkspace = struct {
             std.mem.sliceAsBytes(self.infeasibility_index).len +
             std.mem.sliceAsBytes(self.infeasibility_mark).len +
             std.mem.sliceAsBytes(self.changed_row_index).len +
+            std.mem.sliceAsBytes(self.candidate_row).len +
+            std.mem.sliceAsBytes(self.candidate_score).len +
             std.mem.sliceAsBytes(self.checkpoint_status).len +
             std.mem.sliceAsBytes(self.checkpoint_basic_index).len;
     }
@@ -866,6 +884,22 @@ test "dual work view aliases live basis arrays and owns cost lifecycle" {
     try std.testing.expect(work.shiftBack(view.dual, 0));
     try std.testing.expectEqual(@as(f64, 1.25), basis.reduced_cost[0]);
     try std.testing.expectEqual(@as(f64, 0.0), view.shift[0]);
+}
+
+test "dual RHS candidate storage grows transactionally and is accounted" {
+    var work = DualWorkState.init(std.testing.allocator);
+    defer work.deinit();
+    try work.ensureCapacity(7);
+    try std.testing.expectEqual(@as(usize, 7), work.candidate_row.len);
+    try std.testing.expectEqual(@as(usize, 7), work.candidate_score.len);
+    const row_pointer = work.candidate_row.ptr;
+    const score_pointer = work.candidate_score.ptr;
+    const candidate_bytes = std.mem.sliceAsBytes(work.candidate_row).len +
+        std.mem.sliceAsBytes(work.candidate_score).len;
+    try std.testing.expect(work.requestedBytes() >= candidate_bytes);
+    try work.ensureCapacity(5);
+    try std.testing.expectEqual(row_pointer, work.candidate_row.ptr);
+    try std.testing.expectEqual(score_pointer, work.candidate_score.ptr);
 }
 
 test "dual correction flips boxed and shifts one-sided work costs" {

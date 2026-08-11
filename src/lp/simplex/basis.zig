@@ -89,10 +89,6 @@ pub const BasisState = struct {
     tableau: []f64 = &.{},
     /// Candidate storage used by primal ratio tests.
     flip_columns: []u32 = &.{},
-    /// Sparse/hyper-sparse CHUZR candidate row indexes.
-    dual_candidate_rows: []u32 = &.{},
-    /// Weighted infeasibility score parallel to `dual_candidate_rows`.
-    dual_candidate_score: []f64 = &.{},
 
     // --- Published solution (post-cleanup, original coordinates) ---
     /// Final structural primal values after unscaling and cleanup.
@@ -139,8 +135,6 @@ pub const BasisState = struct {
         self.devex_reference = try allocator.alloc(u8, total_cols);
         self.tableau = try allocator.alloc(f64, total_cols);
         self.flip_columns = try allocator.alloc(u32, total_cols);
-        self.dual_candidate_rows = try allocator.alloc(u32, rows);
-        self.dual_candidate_score = try allocator.alloc(f64, rows);
         self.published_primal = try allocator.alloc(f64, cols);
         self.published_dual = try allocator.alloc(f64, rows);
         self.published_reduced_cost = try allocator.alloc(f64, cols);
@@ -172,8 +166,6 @@ pub const BasisState = struct {
         @memset(self.devex_reference, 0);
         @memset(self.tableau, 0.0);
         @memset(self.flip_columns, 0);
-        @memset(self.dual_candidate_rows, 0);
-        @memset(self.dual_candidate_score, 0.0);
         @memset(self.published_primal, 0.0);
         @memset(self.published_dual, 0.0);
         @memset(self.published_reduced_cost, 0.0);
@@ -243,8 +235,6 @@ pub const BasisState = struct {
         self.allocator.free(self.devex_reference);
         self.allocator.free(self.tableau);
         self.allocator.free(self.flip_columns);
-        self.allocator.free(self.dual_candidate_rows);
-        self.allocator.free(self.dual_candidate_score);
         self.allocator.free(self.published_primal);
         self.allocator.free(self.published_dual);
         self.allocator.free(self.published_reduced_cost);
@@ -282,8 +272,6 @@ pub const BasisState = struct {
         total += std.mem.sliceAsBytes(self.devex_reference).len;
         total += std.mem.sliceAsBytes(self.tableau).len;
         total += std.mem.sliceAsBytes(self.flip_columns).len;
-        total += std.mem.sliceAsBytes(self.dual_candidate_rows).len;
-        total += std.mem.sliceAsBytes(self.dual_candidate_score).len;
         total += std.mem.sliceAsBytes(self.published_primal).len;
         total += std.mem.sliceAsBytes(self.published_dual).len;
         total += std.mem.sliceAsBytes(self.published_reduced_cost).len;
