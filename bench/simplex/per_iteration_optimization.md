@@ -108,3 +108,12 @@ This rules out switching the update loop before the existing basic-column
 reduced-cost and `shiftBack` lifecycle is aligned with HiGHS.  The next H1
 experiment must preserve the dense recurrence and isolate work that provably
 cannot affect numerical state, starting with the post-update finite scan.
+
+### H1b — fuse the post-update finite scan (rejected)
+
+Finite checks were fused into the unchanged dense recurrence, eliminating a
+second reduced-cost vector pass.  Six-model 31-run alternating A/B preserved
+every pivot count, but produced mixed noise rather than a general gain:
+`scrs8 -0.37%`, `grow7 -1.78%`, `sc105 -0.02%`, `shell +0.33%`,
+`capri +1.69%`, and `seba +1.98%`.  The added per-element branch offsets the
+saved read pass on this corpus, so the implementation was removed.
