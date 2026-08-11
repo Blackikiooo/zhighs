@@ -127,3 +127,13 @@ vector loop: `shell +1.94%`, `scrs8 +2.34%`, `seba +2.49%`,
 `capri +11.74%`, `sc105 +0.47%`, and only `grow7 -1.03%`.  The code was
 removed.  Future sparse traversal gates must include dimension and touched
 bytes, not density alone.
+
+### H2a — reuse scaling across crash-prefix validation (rejected)
+
+Crash prefix retries were reset from retained scaled bounds instead of
+repeating six equilibration passes.  Pivot counts were identical.  A 101-run
+setup-only A/B improved `capri -12.32%`, `grow7 -8.62%`, `sc105 -7.25%`, and
+`scrs8 -2.86%`, but regressed `shell +12.89%` and `seba +3.96%`.  The helper
+was removed: rebuilding combinatorial state with branch-heavy scalar loops and
+the resulting code layout is not a safe universal replacement for the current
+initialization path.
