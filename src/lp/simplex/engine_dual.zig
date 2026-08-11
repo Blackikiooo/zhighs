@@ -1345,9 +1345,21 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     self.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
     self.observeEpDensity(basis.dual_row);
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
+    const row_pricing = self.selectRowPricing(basis.dual_row);
     var exact_weight: f64 = 0.0;
     var ep_nonzeros: usize = 0;
-    if (needs_exact_weight) {
+    if (needs_exact_weight and !row_pricing) {
+        // Column PRICE consumes the scaled BTRAN row immediately below. Fuse
+        // that materialization with the mandatory exact DSE scan so the row
+        // is read only once while preserving the norm accumulation order.
+        for (basis.dual_row, basis.row_scale, basis.rhs_work) |entry, scale, *scaled_entry| {
+            exact_weight += entry * entry;
+            if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
+            scaled_entry.* = entry * scale;
+        }
+        if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
+            return .numerical_failure;
+    } else if (needs_exact_weight) {
         for (basis.dual_row) |entry| {
             exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
@@ -1396,7 +1408,6 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     }
     self.dual_row_index = leaving_row;
     basis.tableau_count = 0;
-    const row_pricing = self.selectRowPricing(basis.dual_row);
     // Row pricing scatters into structural entries and therefore needs a
     // zeroed accumulation target. Column pricing overwrites every structural
     // entry below, while the logical block is overwritten in both paths; do
@@ -1422,8 +1433,10 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         // Cache the row-scaled BTRAN vector once. Recomputing this product for
         // every matrix entry made column pricing pay an avoidable multiply per
         // nonzero; `rhs_work` is dead until the later BFRT/FTRAN stages.
-        for (basis.dual_row, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
-            scaled_dual.* = dual_value * scale;
+        if (!needs_exact_weight) {
+            for (basis.dual_row, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
+                scaled_dual.* = dual_value * scale;
+        }
         nonzero_count = if (self.has_dropped_model_coefficient)
             priceStructuralColumns(true, problem, basis, self.numerical.zero_tolerance, self.ratio_test.tolerance)
         else

@@ -210,3 +210,17 @@ Despite deleting one dense row read, the 10-model 31-run gate regressed from
 +1.70%`, and `capri +1.26%`.  Moving the substantial DSE validation block into
 the PRICE/CHUZC tail harmed hot-code layout enough to dominate the saved read.
 The original phase ordering was restored.
+
+### H2e — fuse DSE norm with column-PRICE scaling (accepted)
+
+Keeping the DSE validation block in its original location avoids H2d's code
+layout regression.  On column-PRICE pivots, the mandatory exact-norm scan now
+also materializes the row-scaled BTRAN vector that PRICE consumes next; Devex
+and row-PRICE retain their prior loops.  The squared-norm accumulation order,
+support threshold, and validation timing are unchanged.
+
+The forced-dual 40-model gate passed with all 6833 pivot counts unchanged.  A
+31-run alternating full-corpus A/B measured `193.680 ms -> 192.338 ms`, or
+`28344.8 -> 28148.5 ns/pivot` (`-0.69%`).  The 10-model discovery gate was
+also positive (`-0.42%`), including `scorpion -2.24%`, `sc105 -1.91%`, and
+`shell -1.04%`.
