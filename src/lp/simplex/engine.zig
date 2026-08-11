@@ -7,6 +7,7 @@
 const std = @import("std");
 const basis_module = @import("basis.zig");
 const basis_snapshot_module = @import("basis_snapshot.zig");
+const dual_iteration_workspace_module = @import("dual_iteration_workspace.zig");
 const factorization_module = @import("factorization.zig");
 const simplex_nla_module = @import("simplex_nla.zig");
 const pricing_module = @import("pricing.zig");
@@ -639,6 +640,8 @@ pub const SimplexEngine = struct {
     basis: ?basis_module.BasisState = null,
     /// Vector-native numerical linear algebra owner and factor update chain.
     nla: simplex_nla_module.SimplexNla,
+    /// Serial-dual vectors shared by CHUZR through basis UPDATE.
+    dual_iteration: ?dual_iteration_workspace_module.DualIterationWorkspace(f64) = null,
     /// Persistent dual Phase-I/II bounds, moves, shifts and diagnostics.
     dual_work: dual_phase_one_module.DualWorkState,
     /// Unified dual phase and rebuild controller.
@@ -819,6 +822,7 @@ pub const SimplexEngine = struct {
     /// Release the active basis and every retained sub-workspace.
     pub fn deinit(self: *SimplexEngine) void {
         if (self.basis) |*b| b.deinit();
+        if (self.dual_iteration) |*workspace| workspace.deinit();
         self.nla.deinit();
         self.dual_work.deinit();
         self.crash.deinit();
@@ -831,8 +835,25 @@ pub const SimplexEngine = struct {
     /// Allocator metadata and borrowed problem storage are excluded.
     pub fn requestedBytes(self: *const SimplexEngine) usize {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
-        return basis_bytes + self.nla.retainedBytes() + self.dual_work.requestedBytes() +
+        const dual_iteration_bytes = if (self.dual_iteration) |*workspace| workspace.retainedBytes() else 0;
+        return basis_bytes + dual_iteration_bytes + self.nla.retainedBytes() + self.dual_work.requestedBytes() +
             self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes();
+    }
+
+    /// Retain the serial-dual workspace across solves of the same shape.
+    /// A differently shaped replacement is fully allocated before the old
+    /// workspace is released, so allocation failure leaves the engine valid.
+    fn ensureDualIterationWorkspace(self: *SimplexEngine, num_rows: usize, num_cols: usize) !void {
+        if (self.dual_iteration) |*workspace| {
+            if (workspace.num_rows == num_rows and workspace.num_cols == num_cols) return;
+        }
+        const replacement = try dual_iteration_workspace_module.DualIterationWorkspace(f64).init(
+            self.allocator,
+            num_rows,
+            num_cols,
+        );
+        if (self.dual_iteration) |*workspace| workspace.deinit();
+        self.dual_iteration = replacement;
     }
     /// Legacy dimension-only entry point retained for API compatibility.
     /// Use `solveProblem` for an actual LP.
@@ -892,6 +913,7 @@ pub const SimplexEngine = struct {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
+        self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         var has_dropped_model_coefficient = false;
         for (problem.matrix.values) |coefficient| {
             if (coefficient != 0.0 and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) {
@@ -1389,6 +1411,7 @@ pub const SimplexEngine = struct {
             error.InvalidBounds => .infeasible,
             error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
         };
+        self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         if (self.active_pricing_kernel != .column)
             self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
         if (!self.refreshProblemStorage(problem)) {
@@ -1590,6 +1613,26 @@ test "engine rejects malformed borrowed problem dimensions" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     try std.testing.expectEqual(SolveStatus.numerical_failure, engine.solveProblem(problem, .{}));
+}
+
+test "engine retains serial dual workspace for an unchanged model shape" {
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    try engine.ensureDualIterationWorkspace(3, 5);
+    const retained_pack = engine.dual_iteration.?.pack_indices.ptr;
+    const retained_bytes = engine.requestedBytes();
+    engine.dual_iteration.?.row_ep.values[1] = 7;
+    try engine.dual_iteration.?.row_ep.appendIndex(1);
+
+    try engine.ensureDualIterationWorkspace(3, 5);
+    try std.testing.expectEqual(retained_pack, engine.dual_iteration.?.pack_indices.ptr);
+    try std.testing.expectEqual(retained_bytes, engine.requestedBytes());
+    try std.testing.expectEqual(@as(f64, 7), engine.dual_iteration.?.row_ep.values[1]);
+
+    try engine.ensureDualIterationWorkspace(4, 2);
+    try std.testing.expectEqual(@as(usize, 4), engine.dual_iteration.?.num_rows);
+    try std.testing.expectEqual(@as(usize, 2), engine.dual_iteration.?.num_cols);
 }
 
 test "automatic crash Bixby retry isolates rejected coverage bands" {
