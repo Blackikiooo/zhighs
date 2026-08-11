@@ -366,7 +366,7 @@ ReleaseFast 全测和 forced-dual correctness **40/40 PASS**，aggregate 及 she
 根因；调用仍保留，因为它补齐了 source-equivalent phase boundary 和未来非逻辑 warm basis 的正确性。
 下一步比较 Phase-II DSE recurrence/切换，而不是继续修改初始化。
 
-### F0t — model-independent DSE lifecycle（协议）
+### F0t — model-independent DSE lifecycle（完成）
 
 当前 DSE 有两层数据集补丁：recurrence 仅在 65–95 row/超宽形状使用 HiGHS 的 expanded evaluation
 order；automatic budget 又按 10 组 row/column/flip/crash 阈值设为 0/1/4/8/16/20/32。HiGHS 对所有
@@ -379,6 +379,13 @@ order；automatic budget 又按 10 组 row/column/flip/crash 阈值设为 0/1/4/
 budget 保留为诊断控制。DSE recurrence 对所有模型固定使用 HiGHS expanded expression，禁止按尺寸选择
 浮点表达式。验收为 ReleaseFast、40/40、DSE switch 统计和 aggregate；grow7 回退作为下一步观测量
 对齐目标，不恢复模型 cap。
+
+所有 shape/flip budget 分支已删除；automatic 不再读取 hard cap，显式数字 budget 的既有诊断语义
+保留。DSE recurrence 对所有模型固定为 HiGHS expanded evaluation order。ReleaseFast 全测和
+forced-dual correctness **40/40 PASS**，aggregate `12021 vs 8774`；相对 F0r，`refinery
+1391→1091`、`etamacro 532→514`、`agg 225→205`，主要回退仅 `grow7 387→851`。下一步校正
+costly-DSE density 的 HVector count（当前错误地按 simplex `1e-12` 扫 dense values），使 grow7 由
+通用观测触发 Devex。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

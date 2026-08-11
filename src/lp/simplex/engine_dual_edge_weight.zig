@@ -143,9 +143,6 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     var tau_nonzeros: usize = 0;
     const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
     const kai = -2.0 / pivot;
-    const highs_evaluation_order = basis.row_edge_weight.len >= 65 and
-        basis.row_edge_weight.len <= 95 and
-        basis.col_status.len >= basis.row_edge_weight.len * 9;
     for (basis.row_edge_weight, iteration.col_aq.values, iteration.col_dse.values, 0..) |*weight, alpha, tau, row| {
         if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
         if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
@@ -153,16 +150,9 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
         // HiGHS traverses the indexed pivotal column and therefore never
         // evaluates the recurrence for exact structural zeros.
         if (alpha == 0.0) continue;
-        // Preserve HiGHS' evaluation order on highly symmetric ultrawide
-        // bases: the expanded ratio form changes strict CHUZR ties when the
-        // recurrence differs by one ulp. Other regimes retain their shorter
-        // established basis paths.
-        const updated = if (highs_evaluation_order)
-            weight.* + alpha * (new_pivotal_edge_weight * alpha + kai * tau)
-        else blk: {
-            const ratio = alpha / pivot;
-            break :blk weight.* - 2.0 * ratio * tau + ratio * ratio * exact_pivot_weight;
-        };
+        // Preserve HiGHS' operation order: strict CHUZR ties are sensitive to
+        // a one-ulp difference between this form and the algebraic ratio form.
+        const updated = weight.* + alpha * (new_pivotal_edge_weight * alpha + kai * tau);
         if (!std.math.isFinite(updated)) return .numerical_failure;
         weight.* = @max(updated, 1e-4);
     }
@@ -198,7 +188,8 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
 /// pivots has elapsed. The unknown phase retains the hard-cap semantics for
 /// direct framework users and unit tests.
 pub fn shouldSwitchDualDseToDevex(self: *const SimplexEngine, total_columns: usize) bool {
-    if (self.active_dual_dse_update_budget != 0 and self.dual_control.phase != .phase_two)
+    if (!self.active_adaptive_dual_dse_budget and
+        self.active_dual_dse_update_budget != 0 and self.dual_control.phase != .phase_two)
         return self.dual_dse_updates_since_start >= self.active_dual_dse_update_budget;
     const costly = self.dual_dse_updates_since_start * 10 > total_columns and
         self.dual_dse_costly_iterations * 20 > self.dual_dse_updates_since_start;
@@ -212,11 +203,16 @@ test "dual DSE budget caps Phase I but not original-objective Phase II" {
     defer engine.deinit();
     engine.active_dual_dse_update_budget = 64;
     engine.dual_dse_updates_since_start = 64;
+    engine.active_adaptive_dual_dse_budget = false;
 
     // Direct framework users retain the explicit hard-cap behavior.
     try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
     engine.dual_control.enterPhase(.phase_one);
     try std.testing.expect(engine.shouldSwitchDualDseToDevex(1000));
+
+    // Automatic policy ignores the diagnostic cap and uses measured work.
+    engine.active_adaptive_dual_dse_budget = true;
+    try std.testing.expect(!engine.shouldSwitchDualDseToDevex(1000));
 
     // Phase II only switches for measured DSE cost or weight inaccuracy.
     engine.dual_control.enterPhase(.phase_two);
