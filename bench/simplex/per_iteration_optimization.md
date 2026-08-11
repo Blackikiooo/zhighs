@@ -146,3 +146,14 @@ streams before FT update.  All pivot counts remained identical.  An initial
 `shell +0.11%`, `scrs8 +0.70%`, and `sc105 -0.13%`.  Repacking by rescanning
 the dense vector merely moves work from UPDATE to FTRAN and was removed.  A
 future packed Aq must be published directly by the sparse FTRAN producer.
+
+### H1e — publish packed Aq from sparse L support (rejected)
+
+The hyper-sparse update FTRAN passed its active L support directly into FT
+capture, with correction pivots appended and indices restored to natural row
+order.  Although unit tests passed, representative pivot paths changed badly
+(`shell 480 -> 838`, `capri 264 -> 423`, `scrs8 438 -> 762`).  Sorting did not
+restore the baseline.  The L active set is therefore not a sufficient owner of
+the dense state consumed across the historical FT correction chain.  All code
+was removed; any future direct pack must be maintained inside the correction
+lifecycle with exact generation tracking.
