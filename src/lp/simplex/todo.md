@@ -209,6 +209,17 @@ memory accounting 单测、ReleaseFast 全测、F0j 三模型 trace digest 不�
 字段。ReleaseFast 全测和 runner build 通过，forced-dual correctness **40/40 PASS**、aggregate
 pivots **6833**；三模型 trace 保持 `105/15d11cf0…`、`173/c9af8318…`、`484/db4e80c0…`。
 
+### F0l — model-independent HEkkDualRHS lifecycle（协议）
+
+删除 `useHighsRhsInfeasibilityList/useHighsBreakpointGroups` 对 CHUZR 状态生命周期的模型行列范围
+门控。只要选择 `.highs` 初始化，cold rebuild、Phase-I bounds 安装、reinversion 和 Phase-II bounds
+恢复都必须无条件重建同一 `DualWorkState` infeasibility list，`chooseRow` 也必须始终消费它；模型
+密度只能决定 indexed/dense 表示，不能决定是否采用 HiGHS 算法。
+
+本阶段不同时启用 CHUZC4 grouping、改变 update limit 或删除 fallback。验收首先要求 ReleaseFast
+全测和 forced-dual correctness 40/40；随后逐模型记录 committed pivot 变化并定位首次分叉。若发生
+正确性退化，不恢复模型尺寸门控，而是补齐 `HEkkDualRHS` 缺失的通用 cutoff/rebuild 语义。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
