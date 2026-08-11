@@ -224,3 +224,16 @@ The forced-dual 40-model gate passed with all 6833 pivot counts unchanged.  A
 `28344.8 -> 28148.5 ns/pivot` (`-0.69%`).  The 10-model discovery gate was
 also positive (`-0.42%`), including `scorpion -2.24%`, `sc105 -1.91%`, and
 `shell -1.04%`.
+
+### H3a — exact-nonzero sparse reduced-cost recurrence (rejected)
+
+PRICE published every exactly nonzero tableau entry into a dedicated
+natural-order support, allowing the reduced-cost recurrence to skip only
+strict `alpha == 0` terms.  This corrected H1a's tolerance-truncated support:
+all representative pivot counts and statuses remained identical.  Performance
+still regressed sharply in the 10-model 31-run gate, from `101.666` to
+`103.850 ms` (`+2.15%`), including `brandy +5.53%`, `capri +3.35%`, and
+`scrs8 +3.34%`.  For these dimensions, contiguous dense recurrence beats
+indirect sparse reads even when the support is exact.  The index allocation
+and sparse update were removed; future work on this pass must preserve
+contiguous traversal, for example by fusion or proven SIMD generation.
