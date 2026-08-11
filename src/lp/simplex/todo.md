@@ -6,6 +6,33 @@
 cleanup 上与 `HEkkDual` 源码同构；验证口径为相同模型、presolve off、相同 simplex 选项下的
 committed simplex iterations。稀疏矩阵、primal simplex 和 tasks/multi dual 不在本路线首轮范围。
 
+## 0. 框架收敛原则（2026-08-11 重置）
+
+当前目标从局部性能追赶切回框架完整性：算法、状态转移和数值顺序以本地 HiGHS 为准，Zig 只在
+表达所有权、泛型专门化、错误联合、内存布局和编译期消除分支上发挥语言优势。完成结构等价前，
+不再接受通过模型尺寸、密度区间或固定迭代阈值选择算法行为的新分支。
+
+实施边界：
+
+1. 建立泛型 `IndexedVector(Real)`，覆盖 `HVectorBase<T>` 的 indexed/dense 状态、稀疏清零、
+   `tight/reIndex/pack/norm2/saxpy` 和 synthetic tick；先作为独立基础设施，不接入热路径。
+2. 建立 `SimplexNla` 边界，让 collect/FTRAN/BTRAN/UPDATE 原生接收同一 indexed vector，索引由
+   producer 维护，不允许 solve 后补扫 dense 数组伪造 support。
+3. 建立 serial-dual iteration workspace，对应 `row_ep/row_ap/col_aq/col_BFRT`、`dualRow` 和
+   `dualRHS`；CHUZR 到 UPDATE 的整个迭代共享它，不再把临时向量散落在 `BasisState`。
+4. 用单一 major phase/rebuild controller 接管 B--F 各阶段；新路径通过逐字段/逐 pivot 门禁后，
+   删除旧的模型形状开关和 fallback 拼接，而不是继续为它们增加补偿条件。
+5. 框架验收顺序固定为：单元语义 → 首次 rebuild 全状态 → pivot 前缀 → 完整模型 → 40 模型。
+   在完整 40 模型与 HiGHS 算法路径对齐以前，运行时间只作回归保护，不作设计选择依据。
+
+### F0a — Zig 泛型 indexed vector（协议）
+
+直接参照本地 `HVectorBase.{h,cpp}` 实现拥有内存的 `IndexedVector(Real)`。用显式 enum 表示
+HiGHS 的 `count < 0` dense/unknown sentinel，以类型化状态取代带符号魔数；用 comptime `Real`
+生成 f64 和扩展精度版本；串行框架不携带 PAMI `next` 链。其余清零阈值、reindex 阈值、索引顺序、
+可能非零语义和算术顺序必须与 HiGHS 一致。验收为 ReleaseFast 全测、独立语义测试和零现有求解
+行为变化；接入 NLA 属于后续 F0b，不在本提交混合完成。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
