@@ -276,7 +276,7 @@ for marking, scatter, and dense materialization than it saves in the L pass.
 All support storage was removed.  Sparse DSE dispatch should be revisited only
 after improving that lower-level FT hyper kernel.
 
-### H3b — consume packed FTRAN support in pivot commit (protocol)
+### H3b — consume packed FTRAN support in pivot commit (rejected)
 
 HiGHS `HEkkDualRHS::updatePrimal` updates the basic solution through the
 indexed `col_aq` whenever its count is at most 40% of the row dimension, and
@@ -293,3 +293,13 @@ their current order.  The prediction is unchanged pivot traces with a lower
 `performPivot` cost on sparse-FTRAN models; the representative gate is
 `shell`, `capri`, `scrs8`, `seba`, `grow7`, and `sc105`, followed by the frozen
 40-model forced-dual gate if the aggregate signal is positive.
+
+ReleaseFast tests passed and every representative pivot count, status, and
+objective remained identical.  The 31-run alternating gate nevertheless
+regressed by `+6.67%` in aggregate: `shell +17.88%`, `capri +15.19%`,
+`sc105 +1.00%`, `grow7 -0.28%`, `scrs8 -1.40%`, and `seba -2.22%`.
+Two contiguous row passes are cheaper than two indirect support traversals in
+the dominant regimes, despite FTRAN sparsity.  The implementation was removed.
+This rules out transplanting HiGHS' 40% consumer threshold onto a support that
+zhighs reconstructs after the solve; the next alignment step must make sparse
+support producer-owned across the factor solve and its consumers.
