@@ -387,6 +387,20 @@ forced-dual correctness **40/40 PASS**，aggregate `12021 vs 8774`；相对 F0r�
 costly-DSE density 的 HVector count（当前错误地按 simplex `1e-12` 扫 dense values），使 grow7 由
 通用观测触发 Devex。
 
+### F0u — HiGHS HVector density streams（协议）
+
+源码核对进一步定位到密度的维度错误，而不仅是 tiny threshold：HiGHS 独立维护
+`row_ep.count / num_row`、`col_aq.count / num_row`、`row_DSE.count / num_row` 和
+`row_ap.count / num_col`；Zig 却把 `row_ep + row_ap` 合并后除以 `num_row + num_col`，再作为
+`row_ap_density` 输入 costly-DSE。该值在长宽不平衡模型上没有相同物理意义，会错误延迟或提前
+DSE→Devex。
+
+恢复四条独立的 producer-owned density stream：优先读取 `IndexedVector.activeIndices().len`，仅在 dense
+producer 撤销 support 时用 HiGHS `1e-14` 计数；`row_ap` 只除以结构列数，hyper-sparse PRICE 的算法
+判据仍保留其现有 tableau support 口径，避免把观测修复混入定价策略。costly-DSE frequency 和 5%/10%
+切换条件保持源码常数。验收为 ReleaseFast、40/40、grow7 DSE 统计及全 corpus aggregate；不得恢复任何
+模型预算。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
