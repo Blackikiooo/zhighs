@@ -303,3 +303,20 @@ the dominant regimes, despite FTRAN sparsity.  The implementation was removed.
 This rules out transplanting HiGHS' 40% consumer threshold onto a support that
 zhighs reconstructs after the solve; the next alignment step must make sparse
 support producer-owned across the factor solve and its consumers.
+
+### H1i — publish exact entering support inside FT upper solve (protocol)
+
+HiGHS `HFactor::ftranFT` extends `HVector.index` while applying the mutable
+upper solve.  zhighs instead materializes the dense direction, scans all rows
+to collect exact nonzeros, and scans the base pivot order again whenever the
+result is at most 10% dense.  Extend only the indexed entering-column FT solve
+so `solveUpper` publishes every exactly nonzero solved pivot while that value
+is already hot.  For sparse outputs, restore the existing reverse base-pivot
+order before exposing the support; for outputs above 10%, publish no support
+and retain the current natural-order scan.  This preserves all consumer order
+and numerical expressions.
+
+The prediction is identical pivot traces with one or two dimension-sized
+post-FTRAN scans removed on sparse entering directions.  Validate first on the
+six representative models with 31-run alternating A/B, then run the frozen
+40-model forced-dual gate if the signal is positive.
