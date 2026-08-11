@@ -73,11 +73,14 @@ pub const SimplexNla = struct {
     }
 
     /// Entering-column FTRAN preserves the captured Aq required by the next
-    /// Forrest--Tomlin update. Current FT storage does not yet publish exact
-    /// result support, so this boundary truthfully marks the result dense.
+    /// Forrest--Tomlin update and retains the mutable-U producer order.
     pub fn ftranForUpdate(self: *SimplexNla, vector: *Vector) NlaError!void {
         if (vector.state == .indexed and self.factorization.supportsSparseUpdateRhs()) {
             try self.factorization.solveForUpdateSparse(vector.values, vector.indices[0..vector.index_count]);
+            const output = self.factorization.lastUpdateFtranIndices();
+            @memcpy(vector.indices[0..output.len], output);
+            vector.index_count = output.len;
+            return;
         } else {
             vector.materializeZeroComplement();
             try self.factorization.solveForUpdate(vector.values);

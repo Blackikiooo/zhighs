@@ -290,7 +290,7 @@ FTRAN HVector support 的插入顺序：HiGHS 在相同 103-row list 中先遇 r
 reconstruction 先遇 row 68。下一阶段应让 NLA/FT 原生发布 producer-order support，不能再用基维度
 或模型名称规则修补 tie-break。
 
-### F0p — FT-native FTRAN producer support（协议）
+### F0p — FT-native FTRAN producer support（完成）
 
 F0o 首次分叉的全部数值状态和 RNG 已排除，只剩 `col_aq.index` 的 producer order。HiGHS
 `HFactor::ftranU` 在 mutable U 上按 reverse logical pivot order 求解并直接写 HVector index；Zig
@@ -302,6 +302,15 @@ F0o 首次分叉的全部数值状态和 RNG 已排除，只剩 `col_aq.index` �
 推测 factor order。使用固定 `1e-14` HVector tiny 语义在 producer 边界清零。验收为 sparse-FT 单测、
 refinery 第 13 次 pivot、ReleaseFast 全测、forced-dual 40/40 和 aggregate pivots；禁止在 CHUZR
 中加入人为 row tie-break。
+
+`SparseForrestTomlin::solveUpper` 现在按 mutable-U reverse logical traversal 直接发布经过 `1e-14`
+清理的 support；`SparseLU → Factorization → SimplexNla` 保持借用链，`col_aq` 离开 NLA 时仍是
+indexed vector，engine 删除 base-LU `pivot_columns` 重建。新增单测覆盖 FT pivot 追加后的顺序和
+tiny 清零；ReleaseFast 全测、forced-dual correctness **40/40 PASS**。aggregate pivots
+`10702→10571`（HiGHS `8774`），其中 `brandy 813→767`、`vtp-base 175→167`、`lotfi 337→263`；
+`refinery 1377→1391`，第 13 次 tie 仍分叉，因为 Zig 与 HiGHS 的 base LU pivot permutation 不同，
+而非 support 所有权仍错误。后续不应追求 factor-order 逐项相同，应转向影响 Phase-I exit 的状态机
+和 update 语义；该 producer-owned support 作为通用架构修正保留。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

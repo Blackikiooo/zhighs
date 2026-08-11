@@ -539,12 +539,9 @@ pub const SparseLU = struct {
             // FT corrections and modified U solve on original-space rhs.
             try self.ft.prepareFtran(rhs, false);
             try self.ft.solveUpper(rhs);
-            var output_count: usize = 0;
-            for (rhs, 0..) |value, index| if (value != 0.0) {
-                output_indices[output_count] = @intCast(index);
-                output_count += 1;
-            };
-            return output_count;
+            const output = self.ft.lastFtranOutputIndices();
+            @memcpy(output_indices[0..output.len], output);
+            return output.len;
         }
         self.ensureHyperViews();
         self.clearActive();
@@ -699,6 +696,12 @@ pub const SparseLU = struct {
     pub fn lastSparseFtranOutputIndices(self: *const SparseLU) []const u32 {
         if (self.last_sparse_output_transpose) return &.{};
         return self.hyper_output[0..self.last_sparse_output_count];
+    }
+
+    /// Exact mutable-U traversal order from the latest entering-column FTRAN.
+    pub fn lastUpdateFtranOutputIndices(self: *const SparseLU) []const u32 {
+        if (!self.ft_ready) return &.{};
+        return self.ft.lastFtranOutputIndices();
     }
 
     /// Total stored L and U off-diagonal entries plus the diagonal.

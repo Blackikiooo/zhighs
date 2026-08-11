@@ -162,19 +162,19 @@ pub fn computeDualDirection(
         alpha_col = iteration.col_aq.values[leaving_row];
         if (!std.math.isFinite(alpha_col)) return .numerical_failure;
     }
-    var direction_nonzeros: usize = 0;
-    for (iteration.col_aq.values, 0..) |value, row| {
+    for (iteration.col_aq.values) |value| {
         if (!std.math.isFinite(value)) return .numerical_failure;
-        if (value == 0.0) continue;
-        self.dual_work.changed_row_index[direction_nonzeros] = @intCast(row);
-        direction_nonzeros += 1;
     }
     self.observeAqDensity(iteration.col_aq.values);
-    self.dual_work.changed_row_count = self.nla.factorization.orderGatheredFtranIndices(
-        iteration.col_aq.values,
-        self.dual_work.changed_row_index,
-        direction_nonzeros,
-    );
+    if (iteration.col_aq.activeIndices()) |indices| {
+        @memcpy(self.dual_work.changed_row_index[0..indices.len], indices);
+        self.dual_work.changed_row_count = indices.len;
+    } else {
+        self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
+            iteration.col_aq.values,
+            self.dual_work.changed_row_index,
+        );
+    }
     return .optimal;
 }
 

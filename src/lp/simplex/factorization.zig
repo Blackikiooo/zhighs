@@ -433,6 +433,12 @@ pub const Factorization = struct {
         return self.sparse_lu.lastSparseFtranOutputIndices();
     }
 
+    /// Producer-owned mutable-U support of the latest update FTRAN.
+    pub fn lastUpdateFtranIndices(self: *const Factorization) []const u32 {
+        if (self.backend_kind != .sparse_lu) return &.{};
+        return self.sparse_lu.lastUpdateFtranOutputIndices();
+    }
+
     /// FTRAN used for an entering column. SparseLU retains the partial `aq`
     /// spike required by its next Forrest--Tomlin update; dense LU continues
     /// to use the product-form Eta path.

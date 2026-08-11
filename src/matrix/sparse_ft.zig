@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const none = std.math.maxInt(u32);
+const highs_tiny: f64 = 1e-14;
 
 pub const FtError = error{ DimensionMismatch, Singular, NumericalFailure, OutOfMemory, CapacityOverflow };
 
@@ -99,6 +100,10 @@ pub const SparseForrestTomlin = struct {
     captured_aq: []f64 = &.{},
     /// Whether `captured_aq` contains a valid pending spike.
     aq_ready: bool = false,
+    /// Stable pivot IDs emitted by the latest forward upper solve, in the
+    /// reverse logical traversal order consumed by simplex HVector clients.
+    ftran_output: []u32 = &.{},
+    ftran_output_count: usize = 0,
 
     /// Construct an empty lazily allocated FT update store.
     pub fn init(allocator: std.mem.Allocator) SparseForrestTomlin {
@@ -127,6 +132,7 @@ pub const SparseForrestTomlin = struct {
         self.allocator.free(self.work);
         self.allocator.free(self.ep_touched);
         self.allocator.free(self.captured_aq);
+        self.allocator.free(self.ftran_output);
         self.* = init(self.allocator);
     }
 
@@ -156,6 +162,7 @@ pub const SparseForrestTomlin = struct {
         self.correction_count = 0;
         self.ep_touched_count = 0;
         self.aq_ready = false;
+        self.ftran_output_count = 0;
         @memset(self.work[0..n], 0.0);
         @memset(self.row_head[0..n], none);
         @memset(self.column_head[0..self.logical_capacity], none);
@@ -219,6 +226,7 @@ pub const SparseForrestTomlin = struct {
         total += std.mem.sliceAsBytes(self.work).len;
         total += std.mem.sliceAsBytes(self.ep_touched).len;
         total += std.mem.sliceAsBytes(self.captured_aq).len;
+        total += std.mem.sliceAsBytes(self.ftran_output).len;
         return total;
     }
 
@@ -242,18 +250,31 @@ pub const SparseForrestTomlin = struct {
     /// Solve the current mutable upper triangular system in place.
     pub fn solveUpper(self: *SparseForrestTomlin, values: []f64) FtError!void {
         if (values.len != self.dimension) return error.DimensionMismatch;
+        self.ftran_output_count = 0;
         var logical = self.logical_count;
         while (logical > 0) {
             logical -= 1;
             const pivot = self.pivot_ids[logical];
             if (pivot == none) continue;
-            const solved = values[pivot] / self.pivot_values[logical];
+            const pivot_multiplier = values[pivot];
+            if (@abs(pivot_multiplier) <= highs_tiny) {
+                values[pivot] = 0.0;
+                continue;
+            }
+            const solved = pivot_multiplier / self.pivot_values[logical];
             if (!std.math.isFinite(solved)) return error.NumericalFailure;
+            self.ftran_output[self.ftran_output_count] = pivot;
+            self.ftran_output_count += 1;
             values[pivot] = solved;
             var entry = self.column_head[logical];
             while (entry != none) : (entry = self.column_next[entry])
                 values[self.entry_row[entry]] -= self.entry_value[entry] * solved;
         }
+    }
+
+    /// Producer-owned HVector support from the latest forward upper solve.
+    pub fn lastFtranOutputIndices(self: *const SparseForrestTomlin) []const u32 {
+        return self.ftran_output[0..self.ftran_output_count];
     }
 
     /// U^-T followed by the reverse FT row-correction product. `captureEp`
@@ -423,6 +444,7 @@ pub const SparseForrestTomlin = struct {
         try self.resizeRetained(&self.work, capacity);
         try self.resizeRetained(&self.ep_touched, capacity);
         try self.resizeRetained(&self.captured_aq, capacity);
+        try self.resizeRetained(&self.ftran_output, capacity);
     }
     /// Grow arrays addressed by mutable logical U column.
     fn ensureLogical(self: *SparseForrestTomlin, required: usize) FtError!void {
@@ -494,4 +516,32 @@ test "captureEp clears retained workspace by its producer-owned support" {
     // The next capture clears exactly the IDs written by the previous suffix.
     try ft.captureEp(0);
     try std.testing.expectEqualSlices(f64, &[_]f64{ 0.5, 0, 0 }, ft.work[0..3]);
+}
+
+test "forward solve publishes mutable U traversal order after an update" {
+    var ft = SparseForrestTomlin.init(std.testing.allocator);
+    defer ft.deinit();
+    const pivots = [_]u32{ 0, 1, 2 };
+    const diagonal = [_]f64{ 2, 3, 4 };
+    const starts = [_]usize{ 0, 0, 0, 0 };
+    try ft.reset(&pivots, &diagonal, &starts, &.{}, &.{});
+
+    var entering = [_]f64{ 1, 1, 1 };
+    try ft.prepareFtran(&entering, true);
+    try ft.solveUpper(&entering);
+    try ft.captureEp(1);
+    try ft.update(1, entering[1], highs_tiny);
+
+    var rhs = [_]f64{ 1, 1, 1 };
+    try ft.prepareFtran(&rhs, false);
+    try ft.solveUpper(&rhs);
+    // Row 1 was removed from its original logical position and appended as
+    // the newest FT pivot, so reverse traversal must publish it first.
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 0 }, ft.lastFtranOutputIndices());
+
+    rhs = .{ 1, 1e-15, 1 };
+    try ft.prepareFtran(&rhs, false);
+    try ft.solveUpper(&rhs);
+    try std.testing.expectEqual(@as(f64, 0), rhs[1]);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 0 }, ft.lastFtranOutputIndices());
 }
