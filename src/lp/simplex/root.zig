@@ -22,6 +22,8 @@ pub const numerical = @import("numerical.zig");
 pub const dual_phase_one = @import("dual_phase_one.zig");
 /// Generic dense-plus-indexed numerical vector used by simplex NLA.
 pub const indexed_vector = @import("indexed_vector.zig");
+/// Serial-dual row/column vectors with one-iteration ownership.
+pub const dual_iteration_workspace = @import("dual_iteration_workspace.zig");
 /// Preferred semantic alias for the persistent serial-dual work module.
 pub const dual_work = dual_phase_one;
 /// Unified dual phase, rebuild and cost-lifecycle controller.

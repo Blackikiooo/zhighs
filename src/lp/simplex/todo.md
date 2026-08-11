@@ -39,7 +39,7 @@ pack snapshot、扩展精度运算顺序、synthetic tick 及 UPDATE scratch 所
 dense clear、自然序 reindex、tight、pack、norm、跨精度 copy 和 saxpy cancellation；ReleaseFast
 全量测试及 `git diff --check` 通过，现有 solver 尚未接入，因此求解行为为零变化。
 
-### F0b — serial dual iteration workspace（协议）
+### F0b — serial dual iteration workspace（完成）
 
 参照 `HEkkDual` 的成员生命周期，用 `DualIterationWorkspace(Real)` 唯一拥有 `row_ep`、
 `row_ap`、`col_aq`、`col_BFRT` 和 CHUZC 的组合 pack。行向量维度固定为 `num_row`，结构 tableau
@@ -48,6 +48,11 @@ dense clear、自然序 reindex、tight、pack、norm、跨精度 copy 和 saxpy
 
 本阶段只建立所有权、维度和 pack 顺序语义并完成独立测试，不接入现有 dual kernel；F0c 再让
 SimplexNla 原生消费这些 vector。验收仍是 ReleaseFast 全测和零现有求解行为变化。
+
+实现已落在 `dual_iteration_workspace.zig`：四个 vector 的维度和生命周期互不混用，CHUZC pack
+严格按 `row_ap.index` 后接 `row_ep.index + num_col` 的 producer 顺序形成，f64/f128 共用同一
+定义。独立测试覆盖非自然 support 顺序、logical offset 和逐迭代 sparse clear；ReleaseFast 全测
+通过，尚未接入现有 engine，求解行为零变化。下一步 F0c 建立 NLA 的 vector-native contract。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

@@ -1,0 +1,160 @@
+//! Serial dual-simplex vectors whose support lives for one major iteration.
+//!
+//! The ownership mirrors `HEkkDual`: BTRAN produces `row_ep`, PRICE produces
+//! `row_ap`, the entering FTRAN produces `col_aq`, and BFRT produces
+//! `col_bfrt`.  CHUZC consumes one combined pack in producer order.  Keeping
+//! these vectors out of `BasisState` prevents basis lifetime and iteration
+//! scratch lifetime from being conflated.
+
+const std = @import("std");
+const indexed_vector = @import("indexed_vector.zig");
+
+pub const DualIterationError = error{ DenseIndexState, PackCapacityExceeded, Overflow };
+
+pub fn DualIterationWorkspace(comptime Real: type) type {
+    const Vector = indexed_vector.IndexedVector(Real);
+    return struct {
+        allocator: std.mem.Allocator,
+        num_rows: usize,
+        num_cols: usize,
+
+        /// Pivotal BTRAN row `B^-T e_p`, indexed by basis row.
+        row_ep: Vector,
+        /// Structural pivotal tableau row produced by PRICE.
+        row_ap: Vector,
+        /// Entering FTRAN column `B^-1 a_q`.
+        col_aq: Vector,
+        /// FTRAN of the accumulated bound-flip RHS.
+        col_bfrt: Vector,
+
+        /// CHUZC row: structural row_ap entries followed by logical row_ep.
+        pack_indices: []u32,
+        pack_values: []Real,
+        pack_count: usize = 0,
+
+        const Self = @This();
+        pub const Scalar = Real;
+
+        /// Allocate the four vectors and the combined CHUZC pack once.
+        pub fn init(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize) !Self {
+            const total_columns = std.math.add(usize, num_cols, num_rows) catch return error.Overflow;
+            if (total_columns > std.math.maxInt(u32)) return error.Overflow;
+            var row_ep = try Vector.init(allocator, num_rows);
+            errdefer row_ep.deinit();
+            var row_ap = try Vector.init(allocator, num_cols);
+            errdefer row_ap.deinit();
+            var col_aq = try Vector.init(allocator, num_rows);
+            errdefer col_aq.deinit();
+            var col_bfrt = try Vector.init(allocator, num_rows);
+            errdefer col_bfrt.deinit();
+            const pack_indices = try allocator.alloc(u32, total_columns);
+            errdefer allocator.free(pack_indices);
+            const pack_values = try allocator.alloc(Real, total_columns);
+            errdefer allocator.free(pack_values);
+            @memset(pack_indices, 0);
+            @memset(pack_values, 0);
+            return .{
+                .allocator = allocator,
+                .num_rows = num_rows,
+                .num_cols = num_cols,
+                .row_ep = row_ep,
+                .row_ap = row_ap,
+                .col_aq = col_aq,
+                .col_bfrt = col_bfrt,
+                .pack_indices = pack_indices,
+                .pack_values = pack_values,
+            };
+        }
+
+        /// Release all iteration-owned storage.
+        pub fn deinit(self: *Self) void {
+            self.row_ep.deinit();
+            self.row_ap.deinit();
+            self.col_aq.deinit();
+            self.col_bfrt.deinit();
+            self.allocator.free(self.pack_indices);
+            self.allocator.free(self.pack_values);
+            self.* = undefined;
+        }
+
+        /// Begin a new iteration using each producer's retained support for
+        /// sparse clear. Factorization and basis state are deliberately absent.
+        pub fn beginIteration(self: *Self) void {
+            self.row_ep.clear();
+            self.row_ap.clear();
+            self.col_aq.clear();
+            self.col_bfrt.clear();
+            self.pack_count = 0;
+        }
+
+        /// Pack PRICE structural entries first, then BTRAN logical entries,
+        /// preserving the exact order published by both producers.
+        pub fn buildPivotalRowPack(self: *Self) DualIterationError!void {
+            const structural = self.row_ap.activeIndices() orelse return error.DenseIndexState;
+            const logical = self.row_ep.activeIndices() orelse return error.DenseIndexState;
+            if (structural.len + logical.len > self.pack_indices.len) return error.PackCapacityExceeded;
+            var output: usize = 0;
+            for (structural) |column| {
+                self.pack_indices[output] = column;
+                self.pack_values[output] = self.row_ap.values[column];
+                output += 1;
+            }
+            for (logical) |row| {
+                self.pack_indices[output] = @intCast(self.num_cols + row);
+                self.pack_values[output] = self.row_ep.values[row];
+                output += 1;
+            }
+            self.pack_count = output;
+        }
+
+        pub inline fn packedIndices(self: *const Self) []const u32 {
+            return self.pack_indices[0..self.pack_count];
+        }
+
+        pub inline fn packedValues(self: *const Self) []const Real {
+            return self.pack_values[0..self.pack_count];
+        }
+
+        /// Bytes represented by the complete retained iteration workspace.
+        pub fn retainedBytes(self: *const Self) usize {
+            return self.row_ep.retainedBytes() + self.row_ap.retainedBytes() +
+                self.col_aq.retainedBytes() + self.col_bfrt.retainedBytes() +
+                std.mem.sliceAsBytes(self.pack_indices).len +
+                std.mem.sliceAsBytes(self.pack_values).len;
+        }
+    };
+}
+
+test "dual iteration workspace preserves HiGHS CHUZC producer order" {
+    const Workspace = DualIterationWorkspace(f64);
+    var workspace = try Workspace.init(std.testing.allocator, 3, 4);
+    defer workspace.deinit();
+
+    workspace.row_ap.values[3] = 30;
+    workspace.row_ap.values[1] = 10;
+    try workspace.row_ap.appendIndex(3);
+    try workspace.row_ap.appendIndex(1);
+    workspace.row_ep.values[2] = 2;
+    workspace.row_ep.values[0] = -1;
+    try workspace.row_ep.appendIndex(2);
+    try workspace.row_ep.appendIndex(0);
+
+    try workspace.buildPivotalRowPack();
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1, 6, 4 }, workspace.packedIndices());
+    try std.testing.expectEqualSlices(f64, &.{ 30, 10, 2, -1 }, workspace.packedValues());
+}
+
+test "dual iteration workspace clears only iteration-owned vector state" {
+    const Workspace = DualIterationWorkspace(f128);
+    var workspace = try Workspace.init(std.testing.allocator, 5, 7);
+    defer workspace.deinit();
+    workspace.col_aq.values[4] = 8;
+    try workspace.col_aq.appendIndex(4);
+    workspace.col_bfrt.values[1] = -3;
+    try workspace.col_bfrt.appendIndex(1);
+    workspace.pack_count = 2;
+    workspace.beginIteration();
+    try std.testing.expectEqual(@as(f128, 0), workspace.col_aq.values[4]);
+    try std.testing.expectEqual(@as(f128, 0), workspace.col_bfrt.values[1]);
+    try std.testing.expectEqual(@as(usize, 0), workspace.pack_count);
+}
