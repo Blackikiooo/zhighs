@@ -304,7 +304,7 @@ This rules out transplanting HiGHS' 40% consumer threshold onto a support that
 zhighs reconstructs after the solve; the next alignment step must make sparse
 support producer-owned across the factor solve and its consumers.
 
-### H1i — publish exact entering support inside FT upper solve (protocol)
+### H1i — publish exact entering support inside FT upper solve (rejected)
 
 HiGHS `HFactor::ftranFT` extends `HVector.index` while applying the mutable
 upper solve.  zhighs instead materializes the dense direction, scans all rows
@@ -320,3 +320,14 @@ The prediction is identical pivot traces with one or two dimension-sized
 post-FTRAN scans removed on sparse entering directions.  Validate first on the
 six representative models with 31-run alternating A/B, then run the frozen
 40-model forced-dual gate if the signal is positive.
+
+ReleaseFast tests passed and the six representative status, objective, and
+pivot trajectories were identical.  The 31-run alternating gate nevertheless
+regressed on every model and by `+13.40%` in aggregate: `shell +3.14%`,
+`capri +5.93%`, `scrs8 +31.42%`, `seba +2.01%`, `grow7 +1.23%`, and `sc105
++4.65%`.  Recording support inside the hottest mutable-U loop costs more than
+the eliminated sequential scans, especially on `scrs8`.  The implementation
+was removed.  Together with H1e, H1h, and H3b, this establishes that support
+bookkeeping cannot accelerate the current dense-visit FT upper kernel; a
+future sparse-vector design must reduce triangular nodes visited rather than
+merely attach indices to the same traversal.
