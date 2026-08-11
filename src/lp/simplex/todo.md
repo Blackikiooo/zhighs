@@ -312,6 +312,17 @@ tiny 清零；ReleaseFast 全测、forced-dual correctness **40/40 PASS**。aggr
 而非 support 所有权仍错误。后续不应追求 factor-order 逐项相同，应转向影响 Phase-I exit 的状态机
 和 update 语义；该 producer-owned support 作为通用架构修正保留。
 
+### F0q — model-independent HiGHS initialization（协议）
+
+`.automatic` 当前仍由 `shouldUseBaselineDualInitialization` 按 row/column 数、equality 比例、cost 和
+matrix range 为 4 个模型选择旧 baseline。显式 `highs` A/B 已通过 correctness **40/40**：
+`brandy 767→312`（HiGHS 304），同时 `gas11 595→1075`、`klein1 119→436`、`agg 198→225`，
+aggregate `10571→10940`。这证明 baseline 门控既掩盖了成功，也掩盖了待修的统一生命周期缺陷。
+
+删除 `shouldUseBaselineDualInitialization`，令 `.automatic` 无条件选择 `.highs`；`.baseline` 仅保留为
+显式诊断策略。验收为 ReleaseFast 全测、forced-dual 40/40，并以显式 `highs` A/B 数值作为路径锁。
+本阶段允许 aggregate 暂时回退，后续必须在统一 HiGHS 路径修复 gas11/klein1，不得重新增加模型判定。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
