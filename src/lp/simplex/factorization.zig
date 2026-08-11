@@ -427,6 +427,12 @@ pub const Factorization = struct {
         return self.sparse_lu.lastSparseOutputIndices();
     }
 
+    /// Exact producer-owned support of the latest adaptive sparse FTRAN.
+    pub fn lastSparseFtranIndices(self: *const Factorization) []const u32 {
+        if (self.backend_kind != .sparse_lu) return &.{};
+        return self.sparse_lu.lastSparseFtranOutputIndices();
+    }
+
     /// FTRAN used for an entering column. SparseLU retains the partial `aq`
     /// spike required by its next Forrest--Tomlin update; dense LU continues
     /// to use the product-form Eta path.
@@ -448,6 +454,11 @@ pub const Factorization = struct {
     /// Whether the active basis can consume an indexed entering-column RHS.
     pub fn supportsSparseUpdateRhs(self: *const Factorization) bool {
         return self.backend_kind == .sparse_lu;
+    }
+
+    /// Whether an indexed RHS will remain hyper-sparse through dispatch.
+    pub fn usesHyperSparseRhs(self: *const Factorization, input_count: usize) bool {
+        return self.backend_kind == .sparse_lu and input_count * 8 < self.dimension;
     }
 
     /// Sparse-LU FTRAN with FT capture from caller-published RHS indices.

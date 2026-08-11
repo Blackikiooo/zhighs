@@ -160,6 +160,19 @@ pub fn IndexedVector(comptime Real: type) type {
             }
         }
 
+        /// Zero the stale complement before a dense consumer reads `values`.
+        /// Packed-value storage is dead until the next explicit pack request,
+        /// so it serves as allocation-free preservation for active entries.
+        pub fn materializeZeroComplement(self: *Self) void {
+            if (self.state == .dense) return;
+            for (self.indices[0..self.index_count], 0..) |index, output|
+                self.packed_values[output] = self.values[index];
+            @memset(self.values, 0);
+            for (self.indices[0..self.index_count], 0..) |index, output|
+                self.values[index] = self.packed_values[output];
+            self.packed_count = 0;
+        }
+
         /// Copy an indexed vector, converting scalar precision at compile time.
         pub fn copyFrom(self: *Self, from: anytype) IndexedVectorError!void {
             if (self.values.len != from.values.len) return error.DimensionMismatch;
@@ -227,6 +240,18 @@ test "indexed vector sparse and dense clear preserve HVector lifecycle" {
     vector.state = .dense;
     vector.clear();
     for (vector.values) |value| try std.testing.expectEqual(@as(f64, 0), value);
+}
+
+test "indexed vector materializes a zero complement for dense consumers" {
+    const Vector = IndexedVector(f64);
+    var vector = try Vector.init(std.testing.allocator, 5);
+    defer vector.deinit();
+    @memset(vector.values, 99);
+    vector.values[3] = -7;
+    try vector.appendIndex(3);
+    vector.materializeZeroComplement();
+    try std.testing.expectEqualSlices(f64, &.{ 0, 0, 0, -7, 0 }, vector.values);
+    try std.testing.expectEqualSlices(u32, &.{3}, vector.activeIndices().?);
 }
 
 test "indexed vector reindex pack norm and tight match HVector ordering" {

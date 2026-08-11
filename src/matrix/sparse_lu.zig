@@ -695,6 +695,12 @@ pub const SparseLU = struct {
         return self.hyper_output[0..self.last_sparse_output_count];
     }
 
+    /// Exact support produced by the latest adaptive hyper-sparse FTRAN.
+    pub fn lastSparseFtranOutputIndices(self: *const SparseLU) []const u32 {
+        if (self.last_sparse_output_transpose) return &.{};
+        return self.hyper_output[0..self.last_sparse_output_count];
+    }
+
     /// Total stored L and U off-diagonal entries plus the diagonal.
     pub fn factorNonzeros(self: *const SparseLU) usize {
         return self.dimension + self.l_nonzeros + self.u_nonzeros;

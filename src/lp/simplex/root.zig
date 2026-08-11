@@ -24,6 +24,8 @@ pub const dual_phase_one = @import("dual_phase_one.zig");
 pub const indexed_vector = @import("indexed_vector.zig");
 /// Serial-dual row/column vectors with one-iteration ownership.
 pub const dual_iteration_workspace = @import("dual_iteration_workspace.zig");
+/// Vector-native FTRAN/BTRAN/UPDATE ownership boundary.
+pub const simplex_nla = @import("simplex_nla.zig");
 /// Preferred semantic alias for the persistent serial-dual work module.
 pub const dual_work = dual_phase_one;
 /// Unified dual phase, rebuild and cost-lifecycle controller.

@@ -54,7 +54,7 @@ SimplexNla 原生消费这些 vector。验收仍是 ReleaseFast 全测和零现�
 定义。独立测试覆盖非自然 support 顺序、logical offset 和逐迭代 sparse clear；ReleaseFast 全测
 通过，尚未接入现有 engine，求解行为零变化。下一步 F0c 建立 NLA 的 vector-native contract。
 
-### F0c — vector-native SimplexNla contract（协议）
+### F0c — vector-native SimplexNla contract（完成）
 
 建立 concrete `SimplexNla`（无 vtable）并让其拥有 `Factorization`。FTRAN/BTRAN/UPDATE 的公共
 参数改为 `IndexedVector(f64)`：空 indexed RHS 保持空；SparseLU hyper kernel 已发布的 support
@@ -62,6 +62,13 @@ SimplexNla 原生消费这些 vector。验收仍是 ReleaseFast 全测和零现�
 在 NLA 内全量扫描补造索引。`ftranForUpdate` 保持 captured-Aq 生命周期，UPDATE 必须消费同一
 vector。先用 identity 和非平凡 dense basis 验证数值、状态降级和零 RHS；现有 engine 接入留到
 F0d，因此本阶段仍要求求解行为零变化。
+
+实现已落在 `simplex_nla.zig`：concrete NLA 拥有 factorization，空 indexed RHS 零操作，SparseLU
+hyper FTRAN/BTRAN 的 producer support 保持 indexed，dense/FT 未发布 support 时显式降级 dense。
+同时补齐 indexed RHS 的 stale-complement 边界：只有真正 hyper-sparse dispatch 可以直接消费
+indices，其余 dense consumer 先用 vector 自有 packed scratch allocation-free 物化零补集。identity、
+非平凡 dense basis、stale complement、sparse support 和 captured-Aq UPDATE 测试全部通过；现有
+engine 尚未接入，求解行为零变化。
 
 ## 1. HiGHS serial dual simplex 算法路径
 
