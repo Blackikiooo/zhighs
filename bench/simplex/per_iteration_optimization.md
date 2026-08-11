@@ -92,3 +92,19 @@ show a repeatable improvement outside observed noise, with no committed-pivot
 regression.  The outer loop continues until the 40-model aggregate zhighs
 ns/pivot is below HiGHS; geometric per-model ns/pivot and worst regressions are
 reported as secondary guards.
+
+## Experiment log
+
+### H1a — packed reduced-cost update (rejected)
+
+The first direct port added a persistent nonbasic tableau support and updated
+only that support, matching `HEkkDualRow::updateDual` structurally.  Unit tests
+passed and representative solutions retained their status and objective, but
+the pivot paths regressed immediately: `shell 480 -> 629`, `capri 264 -> 575`,
+`scrs8 438 -> 1035`, `grow7 98 -> 104`, and `sc105 80 -> 93`.  All experiment
+code was removed.
+
+This rules out switching the update loop before the existing basic-column
+reduced-cost and `shiftBack` lifecycle is aligned with HiGHS.  The next H1
+experiment must preserve the dense recurrence and isolate work that provably
+cannot affect numerical state, starting with the post-update finite scan.
