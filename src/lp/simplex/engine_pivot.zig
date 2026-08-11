@@ -25,6 +25,7 @@ const foundation = @import("foundation");
 const matrix = @import("matrix");
 const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
+const DualDirectionStatus = @import("engine.zig").DualDirectionStatus;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
 fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
@@ -125,7 +126,7 @@ pub fn computeDualDirection(
     problem: problem_module.ProblemView,
     entering_col: usize,
     leaving_row: usize,
-) SolveStatus {
+) DualDirectionStatus {
     if (self.basis == null) return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     if (entering_col >= problem.num_cols + problem.num_rows or
@@ -141,7 +142,7 @@ pub fn computeDualDirection(
         return .numerical_failure;
     }
 
-    var alpha_col = iteration.col_aq.values[leaving_row];
+    const alpha_col = iteration.col_aq.values[leaving_row];
     const min_alpha = @min(@abs(alpha_col), @abs(alpha_row));
     const relative_difference = if (min_alpha == 0.0)
         (if (alpha_col == alpha_row) 0.0 else std.math.inf(f64))
@@ -151,16 +152,7 @@ pub fn computeDualDirection(
         self.nla.factorization.update_count > 0)
     {
         self.nla.factorization.recordReinversion(.solve_residual);
-        if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
-            self.failure_site = .direction_refactor;
-            return .numerical_failure;
-        }
-        if (solveDualEnteringDirection(self, problem, entering_col) != .optimal) {
-            self.failure_site = .direction_solve;
-            return .numerical_failure;
-        }
-        alpha_col = iteration.col_aq.values[leaving_row];
-        if (!std.math.isFinite(alpha_col)) return .numerical_failure;
+        return .rebuild_required;
     }
     for (iteration.col_aq.values) |value| {
         if (!std.math.isFinite(value)) return .numerical_failure;
@@ -175,7 +167,7 @@ pub fn computeDualDirection(
             self.dual_work.changed_row_index,
         );
     }
-    return .optimal;
+    return .ready;
 }
 
 /// Validate an updated FTRAN before its direction reaches ratio testing.

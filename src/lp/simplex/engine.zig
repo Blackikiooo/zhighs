@@ -76,6 +76,8 @@ pub const IterationLogCallback = *const fn (event: ProgressEventView, user_data:
 pub const LogLevel = enum { off, iterations };
 /// Public solve result status re-exported by the engine API.
 pub const SolveStatus = solution_module.SolveStatus;
+/// Internal result of the dual pivotal-column producer.
+pub const DualDirectionStatus = enum { ready, rebuild_required, numerical_failure };
 /// Internal stage at which an unrecovered numerical failure occurred.
 pub const FailureSite = enum {
     none,

@@ -419,8 +419,16 @@ fn solveDualLoop(
         };
         const entering_index: usize = @intCast(entering_col);
         fresh_no_entering_basis = false;
-        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
-            return .numerical_failure;
+        switch (self.computeDualDirection(problem, entering_index, @intCast(leaving.row))) {
+            .ready => {},
+            .rebuild_required => {
+                if (rebuildDualState(self, problem, use_work_costs, .solve_residual, true) == null)
+                    return .numerical_failure;
+                fresh_no_entering_basis = true;
+                continue;
+            },
+            .numerical_failure => return .numerical_failure,
+        }
         if (entering.direction < 0.0) {
             for (iteration.col_aq.values) |*value| value.* = -value.*;
         }
@@ -806,8 +814,15 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         }
         const entering_col = entering.column orelse unreachable;
         const entering_index: usize = @intCast(entering_col);
-        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
-            return .not_implemented;
+        switch (self.computeDualDirection(problem, entering_index, @intCast(leaving.row))) {
+            .ready => {},
+            .rebuild_required => {
+                if (rebuildDualState(self, problem, true, .solve_residual, true) == null)
+                    return .not_implemented;
+                continue;
+            },
+            .numerical_failure => return .not_implemented,
+        }
         if (entering.direction < 0.0) {
             for (iteration.col_aq.values) |*value| value.* = -value.*;
         }
@@ -1202,8 +1217,18 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
         const entering_col = entering.column orelse return .infeasible;
         const entering_index: usize = @intCast(entering_col);
-        if (self.computeDualDirection(problem, entering_index, @intCast(leaving.row)) != .optimal)
-            return .numerical_failure;
+        switch (self.computeDualDirection(problem, entering_index, @intCast(leaving.row))) {
+            .ready => {},
+            .rebuild_required => {
+                if (self.refactorizeBasis(problem, .solve_residual) != .optimal)
+                    return .numerical_failure;
+                if (self.recomputeBasicValuesUnchecked(problem) != .optimal)
+                    return .numerical_failure;
+                @memset(basis.reduced_cost, 0.0);
+                continue;
+            },
+            .numerical_failure => return .numerical_failure,
+        }
         if (entering.direction < 0.0) {
             for (iteration.col_aq.values) |*value| value.* = -value.*;
         }

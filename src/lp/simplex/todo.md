@@ -427,7 +427,7 @@ aggregate `12021→11725`（HiGHS 8774）。另有 `scorpion 833→824`、`scfxm
 `israel 139→155`。结果确认外加 growth 档位同时增加 rebuild 和 pivot，不应保留；下一步对齐 HiGHS
 synthetic tick 与 numerical-trouble 的 producer 边界，并单独追踪 israel 的 residual-trigger divergence。
 
-### F0w — abort pivot on dual numerical trouble（协议）
+### F0w — abort pivot on dual numerical trouble（完成）
 
 HiGHS `updateVerify` 比较 `alpha_col`/`alpha_row` 后，一旦 numerical trouble 便设置 rebuild reason；同次
 iteration 的 `updateDual/updatePrimal/updatePivots` 全部跳过，outer loop 完整 rebuild 后重新 CHUZR/CHUZC。
@@ -438,6 +438,13 @@ Zig 当前却立刻 refactor、重新 FTRAN，然后沿用 rebuild 前选出的 
 direction producer 内继续旧 transaction；各 dual loop 在自己的 work-cost/bounds 语境完成 rebuild 并
 重新选择，warm zero-cost repair 保持其零 reduced-cost 状态。验收 ReleaseFast、grow7/israel 的
 solve-residual 路径、40-model corpus；禁止在 mismatch 后复用旧 pivotal row。
+
+dual direction producer 现返回 typed internal status；mismatch 不再自行 refactor/FTRAN 并复用旧 row，而由
+Phase I、Phase II 或 zero-cost repair controller 在各自 work state 中 rebuild 后重新选择。ReleaseFast
+全测和 forced-dual correctness **40/40 PASS**，aggregate 与逐模型 pivot 保持 `11725 vs 8774`；grow7
+的 3 次 solve-residual 均未经过该 dual mismatch 分支，确认它们来自 primal `B*x-a_q` 周期检查。该修复
+保留为 source-equivalent transaction boundary；下一步处理 primal 路径中 HiGHS 不存在的每 8 update
+全列残差 gate。
 
 ## 1. HiGHS serial dual simplex 算法路径
 
