@@ -332,7 +332,7 @@ bookkeeping cannot accelerate the current dense-visit FT upper kernel; a
 future sparse-vector design must reduce triangular nodes visited rather than
 merely attach indices to the same traversal.
 
-### H3c — reuse dual FTRAN validation maximum in UPDATE (protocol)
+### H3c — reuse dual FTRAN validation maximum in UPDATE (rejected)
 
 `computeDualDirection` already scans every FTRAN result entry and rejects any
 non-finite value before the pivot can be committed.  `Factorization.update`
@@ -346,3 +346,12 @@ an optional prevalidated value to UPDATE.  Primal pivots, unit tests, and any
 standalone factorization caller retain the original scan when no value is
 provided.  The prediction is unchanged trajectories with one dense row pass
 removed per committed dual pivot, most visible in UPDATE-heavy models.
+
+ReleaseFast tests and all representative trajectories passed, but the 31-run
+alternating gate regressed by `+14.90%` in aggregate: `shell +24.43%`, `scrs8
++17.57%`, `seba +1.59%`, `capri -1.72%`, `grow7 -0.18%`, and `sc105 -0.08%`.
+The optional prevalidated-state branch and its surrounding layout cost more in
+the dominant FT paths than the removed scan saves.  The implementation was
+removed.  This strengthens the case for isolating a compact HiGHS-style
+iteration kernel rather than adding more cross-cutting state to the existing
+hot functions.
