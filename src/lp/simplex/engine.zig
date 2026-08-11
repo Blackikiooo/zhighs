@@ -664,6 +664,9 @@ pub const SimplexEngine = struct {
     objective_value: f64 = 0.0,
     /// Multiplier mapping working objective coefficients to original scale.
     objective_scale: f64 = 1.0,
+    /// Whether the current model still needs coefficient filtering in hot
+    /// matrix kernels after the solve-entry audit.
+    has_dropped_model_coefficient: bool = false,
     /// Whether `basis.unbounded_ray` contains a validated certificate.
     unbounded_ray_valid: bool = false,
     /// Whether `basis.infeasibility_ray` contains a validated certificate.
@@ -895,6 +898,7 @@ pub const SimplexEngine = struct {
                 break;
             }
         }
+        self.has_dropped_model_coefficient = has_dropped_model_coefficient;
         if (self.active_dual_initialization_strategy == .automatic) {
             self.active_dual_initialization_strategy = if (has_dropped_model_coefficient or
                 shouldUseBaselineDualInitialization(problem)) .baseline else .highs;

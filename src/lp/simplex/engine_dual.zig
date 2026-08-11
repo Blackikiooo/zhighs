@@ -48,6 +48,36 @@ fn useHighsUltrawideLifecycle(problem: problem_module.ProblemView) bool {
         problem.num_cols >= problem.num_rows * 8;
 }
 
+/// Column PRICE specialized by the solve-entry coefficient audit.  Normal
+/// models take the branch-free kernel; models containing coefficients at the
+/// canonical drop threshold retain the exact filtered behavior.
+fn priceStructuralColumns(
+    comptime filter_small_coefficients: bool,
+    problem: problem_module.ProblemView,
+    basis: *basis_module.BasisState,
+    zero_tolerance: f64,
+    ratio_tolerance: f64,
+) usize {
+    var nonzero_count: usize = 0;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        var unscaled_alpha: f64 = 0.0;
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
+            if (filter_small_coefficients and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            unscaled_alpha += basis.rhs_work[matrix_row.toUsize()] * coefficient;
+        }
+        const alpha = unscaled_alpha * basis.column_scale[column];
+        basis.tableau[column] = alpha;
+        if (@abs(alpha) > zero_tolerance) nonzero_count += 1;
+        if (@abs(alpha) > ratio_tolerance) {
+            basis.flip_columns[basis.tableau_count] = @intCast(column);
+            basis.tableau_count += 1;
+        }
+    }
+    return nonzero_count;
+}
+
 fn useHighsBreakpointGroups(problem: problem_module.ProblemView) bool {
     return useHighsRhsInfeasibilityList(problem) or useHighsUltrawideLifecycle(problem);
 }
@@ -1394,23 +1424,10 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         // nonzero; `rhs_work` is dead until the later BFRT/FTRAN stages.
         for (basis.dual_row, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
             scaled_dual.* = dual_value * scale;
-        for (0..problem.num_cols) |column| {
-            const begin = problem.matrix.col_starts[column];
-            const end = problem.matrix.col_starts[column + 1];
-            var unscaled_alpha: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const row_index = matrix_row.toUsize();
-                unscaled_alpha += basis.rhs_work[row_index] * coefficient;
-            }
-            const alpha = unscaled_alpha * basis.column_scale[column];
-            basis.tableau[column] = alpha;
-            if (@abs(alpha) > self.numerical.zero_tolerance) nonzero_count += 1;
-            if (@abs(alpha) > self.ratio_test.tolerance) {
-                basis.flip_columns[basis.tableau_count] = @intCast(column);
-                basis.tableau_count += 1;
-            }
-        }
+        nonzero_count = if (self.has_dropped_model_coefficient)
+            priceStructuralColumns(true, problem, basis, self.numerical.zero_tolerance, self.ratio_test.tolerance)
+        else
+            priceStructuralColumns(false, problem, basis, self.numerical.zero_tolerance, self.ratio_test.tolerance);
     }
     // Row pricing accumulates structural entries, so their final density is
     // known only after the scatter. Add this block before logical columns so

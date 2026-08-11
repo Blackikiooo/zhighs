@@ -175,3 +175,18 @@ The repository's default primal Phase-I path still fails a pre-existing set
 of corpus models at `direction_column` before its first committed pivot.  An
 isolated clean-HEAD build reproduced the same `agg` failure, so H2b acceptance
 uses the frozen forced-dual protocol targeted by this optimization campaign.
+
+### H2c — specialize PRICE after the coefficient audit (accepted)
+
+HiGHS removes small matrix entries before simplex and its column PRICE inner
+loop therefore has no coefficient-retention branch.  zhighs already audited
+the complete matrix at solve entry, so the result is now retained and selects
+one of two compile-time-specialized PRICE kernels: the common branch-free path
+and the original filtered path for models that actually contain dropped
+coefficients.  Numerical ordering is unchanged for both paths.
+
+The forced-dual 40-model correctness gate passed with all 6833 pivot counts
+unchanged.  A 31-run alternating full-corpus A/B measured `197.034 ms ->
+195.402 ms`, or `28835.7 -> 28596.9 ns/pivot` (`-0.83%`).  The representative
+gate showed the intended PRICE-heavy improvements, including `shell -3.12%`,
+`scrs8 -2.52%`, `grow7 -2.17%`, and `capri -1.78%`.
