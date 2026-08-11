@@ -248,6 +248,18 @@ alpha/theta 从错误的 `1.60953125/0.14385011 + 1 flip` 修正为 HiGHS 的
 `8261→8753`，接近 HiGHS `8774`；该总数不是完成标准，`refinery 1609 vs 396` 和 `ex72a 594 vs
 139` 表明后续 incremental update/phase exit 仍须逐字段对齐。
 
+### F0n — HVector-tight FTRAN support before RHS update（协议）
+
+F0m 的第 13 次 refinery CHUZR 中，HiGHS rows 68/98 的 infeasibility 和 DSE weight 各自完全相等，
+分叉只来自 retained list/random start。此时 HiGHS `workCount=103`，Zig `infeasibility_count=209`。
+源码边界是 HiGHS FTRAN 的 HVector support 已执行 tiny-value 清理，而 Zig 因 FT backend 尚未发布
+index，随后以 `value != 0` 把数值填充全部当作 changed rows。
+
+在 `col_aq/col_BFRT` 离开 NLA、进入 primal infeasibility update 前应用泛型 `IndexedVector.tight()`，
+再由现有 factor-order gather 产生 changed support；禁止使用模型阈值或 feasibility tolerance 替代
+HVector 的固定 `1e-14` 语义。本阶段验收 refinery 首次分叉、RHS list count、40/40 correctness 和
+aggregate pivots；下一阶段再让 sparse FT 原生发布 index，删除 reconstruction scan。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
