@@ -228,7 +228,7 @@ aggregate pivots `6833→8261`，仍低于 HiGHS 的 `8774`，但个别模型暴
 HiGHS `(9,60)`，Zig `(100,118)`。因此保留通用生命周期，下一步从 incremental primal/DSE update
 定位该分叉，不允许恢复尺寸门控。
 
-### F0m — model-independent perturbation and CHUZC grouping（协议）
+### F0m — model-independent perturbation and CHUZC grouping（完成）
 
 F0l 后用本地 debug HiGHS 对 `refinery` 逐字段比较：前 5 次 pivot 的 entering/row/alpha/theta 完全
 一致；第 6 次仍选相同 `(92,167)`，但 HiGHS `theta=0.8639937870`、BFRT count 0，Zig
@@ -239,6 +239,14 @@ F0l 后用本地 debug HiGHS 对 `refinery` 逐字段比较：前 5 次 pivot �
 策略决定算法，密度只决定 kernel 表示。保留 update-limit、zero-pivot phase shortcut 和 fallback 的
 独立实验边界。本阶段验收为 refinery 前 8 次 alpha/theta/flip 与 HiGHS、ReleaseFast 全测、forced-
 dual correctness 40/40；若失败，必须修正通用 ratio/update 语义，不得恢复尺寸条件。
+
+`.highs` 现在无条件使用其随机向量 perturbation 公式和 CHUZC breakpoint grouping；baseline 策略
+仍保留原比较路径。`refinery` 的前 12 个 `(entering,row_out)` 已与本地 HiGHS 完全一致，第 6 次
+alpha/theta 从错误的 `1.60953125/0.14385011 + 1 flip` 修正为 HiGHS 的
+`1.60953125/0.86399379 + 0 flip`；首次变量分叉推迟到第 13 次（HiGHS `(107,98)`，Zig
+`(50,68)`）。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。aggregate pivots
+`8261→8753`，接近 HiGHS `8774`；该总数不是完成标准，`refinery 1609 vs 396` 和 `ex72a 594 vs
+139` 表明后续 incremental update/phase exit 仍须逐字段对齐。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

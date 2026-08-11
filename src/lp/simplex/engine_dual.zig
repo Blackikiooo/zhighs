@@ -386,7 +386,7 @@ fn solveDualLoop(
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = useHighsBreakpointGroups(problem),
+                .highs_breakpoint_groups = self.active_dual_initialization_strategy == .highs,
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.active_dual_initialization_strategy == .highs and
                     self.dual_work.highs_permutation.len >= original_cols)
@@ -868,7 +868,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
-                .highs_breakpoint_groups = useHighsBreakpointGroups(problem),
+                .highs_breakpoint_groups = self.active_dual_initialization_strategy == .highs,
                 .trace_chuzc = self.active_pivot_trace.len != 0,
                 .permutation = if (self.dual_work.highs_permutation.len >= original_count)
                     self.dual_work.highs_permutation[0..original_count]
@@ -1167,7 +1167,8 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
     const workspace = &self.dual_work;
     const original_count = problem.num_cols + problem.num_rows;
     const maximize = problem.objective_sense == .maximize;
-    if (self.active_dual_initialization_strategy == .highs)
+    const highs_lifecycle = self.active_dual_initialization_strategy == .highs;
+    if (highs_lifecycle)
         highs_random.initializeVectors(
             workspace.perturbation[0..original_count],
             workspace.highs_permutation[0..original_count],
@@ -1181,19 +1182,19 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
             self.objective_scale * basis.column_scale[column];
         workspace.work_cost[column] = cost;
         maximum = @max(maximum, @abs(cost));
-        if (!useHighsBreakpointGroups(problem) and
+        if (!highs_lifecycle and
             std.math.isFinite(workspace.saved_lower[column]) and std.math.isFinite(workspace.saved_upper[column]) and
             workspace.saved_lower[column] != workspace.saved_upper[column]) boxed += 1;
     }
-    if (useHighsBreakpointGroups(problem)) for (workspace.work_range[0..original_count]) |range| {
+    if (highs_lifecycle) for (workspace.work_range[0..original_count]) |range| {
         if (range < 1e30) boxed += 1;
     };
     if (maximum > 100.0) maximum = @sqrt(@sqrt(maximum));
-    const boxed_denominator = if (useHighsBreakpointGroups(problem)) original_count else problem.num_cols;
+    const boxed_denominator = if (highs_lifecycle) original_count else problem.num_cols;
     if (boxed_denominator != 0 and boxed * 100 < boxed_denominator) maximum = @min(maximum, 1.0);
-    const base = 5e-7 * if (useHighsBreakpointGroups(problem)) maximum else @max(maximum, 1.0);
+    const base = 5e-7 * if (highs_lifecycle) maximum else @max(maximum, 1.0);
     for (0..problem.num_cols) |column| {
-        const random_value = if (useHighsBreakpointGroups(problem))
+        const random_value = if (highs_lifecycle)
             workspace.perturbation[column]
         else
             deterministicUnit(column, workspace.basis_epoch);
@@ -1201,7 +1202,7 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
         const upper = workspace.saved_upper[column];
         var perturbation: f64 = 0.0;
         if (lower != upper) {
-            const magnitude = if (useHighsBreakpointGroups(problem))
+            const magnitude = if (highs_lifecycle)
                 (1.0 + random_value) * (@abs(workspace.work_cost[column]) + 1.0) * base
             else
                 random_value * base;
