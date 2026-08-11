@@ -190,3 +190,13 @@ unchanged.  A 31-run alternating full-corpus A/B measured `197.034 ms ->
 195.402 ms`, or `28835.7 -> 28596.9 ns/pivot` (`-0.83%`).  The representative
 gate showed the intended PRICE-heavy improvements, including `shell -3.12%`,
 `scrs8 -2.52%`, `grow7 -2.17%`, and `capri -1.78%`.
+
+### H1f — specialize entering-column assembly (rejected)
+
+The same solve-entry audit was applied to compile-time-specialized dense and
+sparse FTRAN column assembly, mirroring HiGHS `collectAj`.  Pivot counts stayed
+unchanged, but the 10-model 31-run alternating gate regressed from `102.626`
+to `103.033 ms` (`+0.40%`), including `gas11 +0.96%` and `scfxm1 +1.67%`.
+Entering columns are short enough that the predictable retention branch is
+cheaper than the extra helper dispatch and code footprint.  The experiment
+was removed while the accepted PRICE specialization remains isolated.
