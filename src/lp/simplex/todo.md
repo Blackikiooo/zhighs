@@ -265,7 +265,7 @@ aggregate pivots；下一阶段再让 sparse FT 原生发布 index，删除 reco
 HiGHS 同点为 `30/sparse`。因此 tiny fill 假设错误，实验代码已撤回。差异发生在第一次 FTRAN
 之前的 Phase-I bounds/nonbasic-value/rebuild 状态，下一步转入 B2 初始化顺序对齐。
 
-### F0o — HiGHS-default cold basis policy（协议）
+### F0o — HiGHS-default cold basis policy（完成）
 
 继续逐字段检查推翻了“同一初始 basis”的隐含前提：本地 HiGHS `simplex_crash_strategy` 默认值为 0，
 refinery 首次 CHUZR 的 basis head 为 logical（row 1 → column 465）；Zig `.automatic` 通过模型尺寸/
@@ -277,6 +277,18 @@ structural crash。删除 automatic 的模型形状选择、覆盖率/condition 
 预算补偿和 recursive logical fallback；显式 crash 的失败仍原子恢复 logical basis。验收为首次
 basis head/RHS list 与 HiGHS、ReleaseFast 全测、forced-dual 40/40，以及逐模型 pivot 变化。此项
 优先级高于保留既有低迭代数，因为目标是先建立相同算法起点。
+
+`.automatic` 现在严格解析为 logical basis，模型尺寸/密度 crash 选择、coverage/condition 验收、
+Bixby 二次尝试、crash 相关 DSE 补偿及递归 logical fallback 共删除 242 行；`.ltssf/.bixby` 仍是
+独立显式策略。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。统一逻辑基后 aggregate
+pivots 为 `10702 vs HiGHS 8774`，真实暴露出 `refinery 1377 vs 396`、`brandy 813 vs 304`、
+`ex72a 516 vs 139` 等框架差异，不再由数据集 crash 掩盖。
+
+`refinery` 的前 12 个 pivot 仍与 HiGHS 一致；第 13 次 CHUZR 两侧 RNG state、random start、list
+count、rows 68/98 的 basic value、squared infeasibility 和 DSE weight 均逐位一致。首次分叉只来自
+FTRAN HVector support 的插入顺序：HiGHS 在相同 103-row list 中先遇 row 98，Zig 当前 sparse-FT
+reconstruction 先遇 row 68。下一阶段应让 NLA/FT 原生发布 producer-order support，不能再用基维度
+或模型名称规则修补 tie-break。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

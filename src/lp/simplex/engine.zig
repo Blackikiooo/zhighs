@@ -30,24 +30,6 @@ pub const PhaseOneStrategy = enum { primal, dual, automatic };
 /// Initial-basis construction policy.
 pub const CrashStrategy = enum { logical, ltssf, bixby, automatic };
 
-/// Decide whether a rejected LTSSF crash merits a second Bixby-ranked basis.
-/// The coverage bands correspond to the anchored prefix lengths emitted by
-/// the crash planner; condition separates useful pivot-strength ranking from
-/// cases where LTSSF's sparsity ordering is already the safer choice.
-fn shouldRetryAutomaticCrashWithBixby(rows: usize, structural: usize, condition: f64) bool {
-    if (rows == 0 or !std.math.isFinite(condition)) return false;
-    const scaled: u128 = @as(u128, structural) * 32;
-    const row_scale: u128 = rows;
-    const three_eighths = scaled >= row_scale * 10 and scaled <= row_scale * 14;
-    const three_sixteenths = scaled >= row_scale * 5 and scaled <= row_scale * 7;
-    const high_coverage = scaled >= row_scale * 23;
-    const ranked_three_eighths = three_eighths and
-        ((condition >= 8.0 and condition <= 16.0) or condition >= 100.0);
-    return ranked_three_eighths or
-        (three_sixteenths and rows >= 200) or
-        (high_coverage and condition >= 50.0 and condition <= 100.0);
-}
-
 /// Select the signed-row baseline coordinates for cold models whose shape or
 /// scaling makes the unscaled HiGHS coordinate start take a longer basis path.
 fn shouldUseBaselineDualInitialization(problem: problem_module.ProblemView) bool {
@@ -981,123 +963,15 @@ pub const SimplexEngine = struct {
         const logical_numerical_state = self.numerical;
         const logical_pricing_state = self.pricing;
         var crash_installed = false;
-        const large_mildly_wide = problem.num_rows >= 450 and
-            @as(u128, problem.num_cols) * 5 >= @as(u128, problem.num_rows) * 6 and
-            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
-        const large_low_degree_columns = if (large_mildly_wide) blk: {
-            var low_degree_columns: usize = 0;
-            for (0..problem.num_cols) |column| {
-                const degree = problem.matrix.col_starts[column + 1] - problem.matrix.col_starts[column];
-                low_degree_columns += @intFromBool(degree <= 2);
-            }
-            break :blk @as(u128, low_degree_columns) * 4 >= @as(u128, problem.num_cols) * 3;
-        } else false;
-        const large_irregular_columns = large_mildly_wide and !large_low_degree_columns;
-        const prefer_large_network_crash = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            problem.num_rows >= 512 and
-            @as(u128, problem.num_cols) * 5 >= @as(u128, problem.num_rows) * 9 and
-            large_low_degree_columns;
-        const skip_automatic_crash = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            ((problem.num_rows >= 384 and problem.num_rows <= 416 and
-                problem.num_cols > problem.num_rows and
-                @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2) or
-                // A structural basis cannot cover a tall model. Once at
-                // least one sixth of its rows must remain logical, the
-                // symbolic crash is dominated by the identity start.
-                @as(u128, problem.num_rows) * 5 >= @as(u128, problem.num_cols) * 6 or
-                // Medium-wide starts need the dense network structure used by
-                // the Bixby selector below; sparse counterparts reject LTSSF.
-                (problem.num_rows >= 128 and problem.num_rows <= 160 and
-                    @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
-                    @as(u128, problem.matrix.values.len) < @as(u128, problem.num_cols) * 8) or
-                // Large mildly wide models need a strong low-degree column
-                // population for crash matching to repay its factorizations.
-                large_irregular_columns);
-        const prefer_automatic_bixby = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            ((problem.num_rows >= 40 and problem.num_rows <= 64 and
-                problem.num_cols <= problem.num_rows and
-                @as(u128, problem.num_cols) * 10 >= @as(u128, problem.num_rows) * 9 and
-                @as(u128, problem.matrix.values.len) <= @as(u128, problem.num_cols) * 3) or
-                (problem.num_rows >= 128 and problem.num_rows <= 160 and
-                @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2 and
-                @as(u128, problem.matrix.values.len) >= @as(u128, problem.num_cols) * 8) or
-                (problem.num_rows >= 450 and problem.num_rows <= 510 and
-                    @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 2));
-        const prefer_sparse_near_square_crash = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            problem.num_rows >= 96 and problem.num_rows <= 220 and
-            problem.num_cols <= problem.num_rows and
-            @as(u128, problem.num_cols) * 10 >= @as(u128, problem.num_rows) * 9 and
-            @as(u128, problem.matrix.values.len) <= @as(u128, problem.num_cols) * 3;
-        const prefer_dense_medium_rectangular_crash = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            problem.num_rows >= 320 and problem.num_rows <= 340 and
-            problem.num_cols > problem.num_rows and
-            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2 and
-            problem.matrix.values.len >= 2000;
-        const prefer_compact_wide_crash = control.crash_strategy == .automatic and
-            control.crash_max_columns == null and
-            problem.num_rows >= 80 and problem.num_rows <= 95 and
-            @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3 and
-            @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 3;
         const crash_strategy: CrashStrategy = switch (control.crash_strategy) {
             .logical => CrashStrategy.logical,
             .ltssf => CrashStrategy.ltssf,
             .bixby => CrashStrategy.bixby,
-            // Automatic first builds an LTSSF candidate, then applies the
-            // structural-coverage and dual-workset gates below. Medium mildly
-            // rectangular starts repeatedly reject that candidate and return
-            // to the identical logical basis, so avoid the dead factorization.
-            .automatic => if (skip_automatic_crash)
-                .logical
-            else if (prefer_automatic_bixby)
-                .bixby
-            else
-                .ltssf,
+            // HiGHS' default simplex_crash_strategy is off. Keep structural
+            // crash algorithms available only as explicit caller choices.
+            .automatic => CrashStrategy.logical,
         };
-        const crash_max_columns = if (prefer_automatic_bixby and problem.num_rows >= 450)
-            // Keep a small logical anchor set in large wide bases. Bixby's
-            // pivot ranking fills the other fifteen sixteenths without the
-            // instability of forcing a completely structural basis.
-            @as(?usize, problem.num_rows * 15 / 16)
-        else if (prefer_large_network_crash)
-            // Large, mildly wide network matrices offer an almost complete
-            // low-degree matching. Fill 31/32 of the basis: this removes most
-            // Phase-I pivots while leaving enough logical anchors to avoid the
-            // rank-deficient tail of the symbolic matching.
-            @as(?usize, problem.num_rows * 31 / 32)
-        else if (control.crash_strategy == .automatic and
-            control.crash_max_columns == null and problem.num_rows >= 16 and problem.num_rows <= 32)
-            // Compact bases are cheap to validate and refactor. Let LTSSF use
-            // every matched structural column instead of retaining the usual
-            // quarter of logical anchors; the denser starting basis can remove
-            // several dual Phase-I pivots without increasing numerical risk.
-            @as(?usize, problem.num_rows)
-        else if (control.crash_strategy == .automatic and
-            control.crash_max_columns == null and problem.num_rows >= 65 and problem.num_rows <= 95 and
-            problem.num_cols >= problem.num_rows * 8)
-            // Ultrawide network-style models can provide a complete, very
-            // sparse structural matching. Validate that full basis: retaining
-            // even a few logical anchors discards the crash at the coverage
-            // gate and needlessly repeats the logical-basis pivot sequence.
-            @as(?usize, problem.num_rows)
-        else if (control.crash_strategy == .automatic and
-            control.crash_max_columns == null and problem.num_rows >= 512 and
-            @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3)
-            // Large wide matrices can expose a long symbolic matching whose
-            // dense prefix is rank deficient. Starting with one third of the
-            // rows avoids repeated failed factorizations and retains enough
-            // structural coverage to shorten the subsequent dual solve.
-            @as(?usize, problem.num_rows / 3)
-        else if (control.crash_strategy == .automatic and
-            control.crash_max_columns == null and problem.num_rows >= 96 and problem.num_rows <= 128 and
-            @as(u128, problem.num_cols) * 2 >= @as(u128, problem.num_rows) * 3)
-            @as(?usize, 25)
-        else
-            control.crash_max_columns;
+        const crash_max_columns = control.crash_max_columns;
         if (crash_strategy == .ltssf or crash_strategy == .bixby) {
             self.stats.crash_attempts += 1;
             crash_installed = self.installSparseCrashBasis(problem, crash_max_columns, if (crash_strategy == .bixby) .bixby else .ltssf);
@@ -1115,98 +989,6 @@ pub const SimplexEngine = struct {
             if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
         }
         if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
-        if (control.crash_strategy == .automatic and crash_installed) {
-            const basis = if (self.basis) |*value| value else return .numerical_failure;
-            const original_count = problem.num_cols + problem.num_rows;
-            var dual_infeasible_count: usize = 0;
-            for (basis.reduced_cost[0..original_count], basis.col_status[0..original_count]) |reduced, status| {
-                const infeasible = switch (status) {
-                    .at_lower => reduced < -self.numerical.dual_tolerance,
-                    .at_upper => reduced > self.numerical.dual_tolerance,
-                    .free, .superbasic => @abs(reduced) > self.numerical.dual_tolerance,
-                    .basic, .fixed => false,
-                };
-                dual_infeasible_count += @intFromBool(infeasible);
-            }
-            var maximum_basic_violation: f64 = 0.0;
-            for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
-                maximum_basic_violation = @max(
-                    maximum_basic_violation,
-                    @max(lower - value, value - upper),
-                );
-            }
-            const compact_problem = problem.num_rows >= 16 and problem.num_rows <= 64;
-            const has_structural_coverage = self.stats.crash_structural_columns * 8 >= problem.num_rows;
-            const covers_enough_rows = self.stats.crash_structural_columns >= problem.num_rows * 3 / 4;
-            const conditioned_workset = self.stats.crash_condition_estimate >= 4.0 and
-                maximum_basic_violation >= 1.0 and maximum_basic_violation <= 1.0e6;
-            const low_risk_crash = problem.num_rows >= 16 and (compact_problem or
-                prefer_automatic_bixby or
-                prefer_sparse_near_square_crash or
-                prefer_dense_medium_rectangular_crash or
-                prefer_compact_wide_crash or
-                prefer_large_network_crash or
-                (has_structural_coverage and dual_infeasible_count == 0) or
-                (problem.num_rows >= 512 and
-                    @as(u128, problem.num_cols) >= @as(u128, problem.num_rows) * 3 and
-                    has_structural_coverage and self.stats.crash_condition_estimate <= 2.0) or
-                (problem.num_rows >= 450 and covers_enough_rows and
-                    self.stats.crash_condition_estimate >= 4.0 and
-                    self.stats.crash_condition_estimate <= 8.0) or
-                (has_structural_coverage and maximum_basic_violation <= self.numerical.primal_tolerance and
-                    dual_infeasible_count <= 8) or
-                (conditioned_workset and (dual_infeasible_count <= 8 or
-                    (covers_enough_rows and dual_infeasible_count <= 64))));
-            if (!low_risk_crash) {
-                const retry_with_bixby = shouldRetryAutomaticCrashWithBixby(
-                    problem.num_rows,
-                    self.stats.crash_structural_columns,
-                    self.stats.crash_condition_estimate,
-                );
-                self.stats.crash_fallbacks += 1;
-                crash_installed = false;
-                if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-                self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
-                self.numerical = logical_numerical_state;
-                self.pricing = logical_pricing_state;
-                self.dual_edge_weights_valid = true;
-                self.observeFactorizationStability();
-                if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
-                if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
-                if (retry_with_bixby) {
-                    crash_installed = self.installSparseCrashBasis(problem, crash_max_columns, .bixby);
-                    if (crash_installed) {
-                        // Bixby's pivot-quality ranking already supplies a
-                        // strong structural metric. Retain exact DSE instead
-                        // of allowing Phase-I flip counts to replace it with
-                        // a short Devex budget later in the solve.
-                        self.active_adaptive_dual_dse_budget = false;
-                        self.active_dual_dse_update_budget = 0;
-                        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
-                    } else {
-                        if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
-                        self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
-                        self.numerical = logical_numerical_state;
-                        self.pricing = logical_pricing_state;
-                        self.dual_edge_weights_valid = true;
-                        self.observeFactorizationStability();
-                        if (self.initializeLogicalBasicValues(problem) != .optimal) return .numerical_failure;
-                        if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
-                    }
-                }
-            }
-        }
-        // A retained structural crash on a large basis has already removed
-        // most logical columns. Its shorter Phase-I DSE framework reaches a
-        // stable Devex path earlier; explicit numeric budgets remain strict.
-        if (self.active_adaptive_dual_dse_budget and crash_installed and problem.num_rows >= 256)
-            self.active_dual_dse_update_budget = 32;
-        // On a compact but highly conditioned structural basis, exact DSE
-        // norms amplify basis geometry without improving the leaving-row
-        // ordering. Start directly with the Devex framework in this regime.
-        if (self.active_adaptive_dual_dse_budget and crash_installed and
-            problem.num_rows <= 64 and self.stats.crash_condition_estimate >= 1.0e3)
-            self.active_dual_edge_weight_strategy = .inherit;
         const crash_feasibility = self.classifyFeasibility(problem);
         // An explicitly requested dual path must not silently become primal
         // simplex merely because the logical basis is primal feasible. HiGHS
@@ -1250,7 +1032,8 @@ pub const SimplexEngine = struct {
             // pre-shift basis transactionally and give the original dual
             // Phase I one bounded retry before the primal cold fallback.
             if (self.active_dual_initialization_strategy == .baseline and
-                self.dual_work.checkpoint_valid) retry: {
+                self.dual_work.checkpoint_valid)
+            retry: {
                 self.numerical = numerical_before_dual_phase_one;
                 self.pricing = pricing_before_dual_phase_one;
                 self.failure_site = .none;
@@ -1268,13 +1051,6 @@ pub const SimplexEngine = struct {
                 const retry_status = self.solveDualPhaseOne(problem, control);
                 if (retry_status != .not_implemented and retry_status != .numerical_failure)
                     return retry_status;
-            }
-            if (crash_installed and control.crash_strategy == .automatic and
-                !prefer_dense_medium_rectangular_crash)
-            {
-                var logical_control = control;
-                logical_control.crash_strategy = .logical;
-                return self.solveProblem(problem, logical_control);
             }
             if (crash_installed) self.stats.crash_fallbacks += 1;
             self.stats.dual_phase_one_fallbacks += 1;
@@ -1634,16 +1410,4 @@ test "engine retains serial dual workspace for an unchanged model shape" {
     try engine.ensureDualIterationWorkspace(4, 2);
     try std.testing.expectEqual(@as(usize, 4), engine.dual_iteration.?.num_rows);
     try std.testing.expectEqual(@as(usize, 2), engine.dual_iteration.?.num_cols);
-}
-
-test "automatic crash Bixby retry isolates rejected coverage bands" {
-    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(271, 101, 384));
-    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(220, 41, 13.3));
-    try std.testing.expect(shouldRetryAutomaticCrashWithBixby(490, 367, 64));
-
-    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(197, 73, 4));
-    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(330, 123, 64));
-    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(174, 32, 16));
-    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(400, 300, 45));
-    try std.testing.expect(!shouldRetryAutomaticCrashWithBixby(497, 372, 128));
 }
