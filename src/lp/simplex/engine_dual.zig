@@ -34,21 +34,6 @@ const DualPhaseOneFailureDiagnostic = @import("engine.zig").DualPhaseOneFailureD
 const SolveControl = @import("engine.zig").SolveControl;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
-/// The HiGHS RHS infeasibility list and matching perturbation stream are
-/// currently beneficial for medium, mildly rectangular dual starts. Keep the
-/// rollout structural until the remaining corpus regimes have matching DSE
-/// and breakpoint semantics.
-fn useHighsRhsInfeasibilityList(problem: problem_module.ProblemView) bool {
-    return problem.num_rows >= 384 and problem.num_rows <= 416 and
-        problem.num_cols > problem.num_rows and
-        @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2;
-}
-
-fn useHighsUltrawideLifecycle(problem: problem_module.ProblemView) bool {
-    return problem.num_rows >= 65 and problem.num_rows <= 95 and
-        problem.num_cols >= problem.num_rows * 8;
-}
-
 /// Column PRICE specialized by the solve-entry coefficient audit.  Normal
 /// models take the branch-free kernel; models containing coefficients at the
 /// canonical drop threshold retain the exact filtered behavior.
@@ -77,18 +62,6 @@ fn priceStructuralColumns(
         }
     }
     return nonzero_count;
-}
-
-fn useHighsBreakpointGroups(problem: problem_module.ProblemView) bool {
-    return useHighsRhsInfeasibilityList(problem) or useHighsUltrawideLifecycle(problem);
-}
-
-fn useShortDualUpdateChain(problem: problem_module.ProblemView) bool {
-    const medium_rectangular = problem.num_rows >= 320 and problem.num_rows <= 340 and
-        problem.num_cols > problem.num_rows and
-        @as(u128, problem.num_cols) <= @as(u128, problem.num_rows) * 2 and
-        problem.matrix.values.len >= 2000;
-    return useHighsBreakpointGroups(problem) or medium_rectangular;
 }
 
 /// Enter the ordinary dual-simplex Phase II loop.
@@ -220,24 +193,6 @@ fn assessInitialDualState(self: *SimplexEngine, problem: problem_module.ProblemV
     const no_dual_infeasibilities = dual_stats.count == 0 or self.dual_control.force_phase_two;
     self.dual_control.near_optimal = no_dual_infeasibilities and primal_count < 1000 and primal_max < 1e-3;
     return true;
-}
-
-/// Prefer the artificial primal fallback when a cold dual start has a sparse
-/// but broad correction front that historically spends pivots only to abandon
-/// Phase I. A light correction front remains useful to dual simplex, while a
-/// dense one has enough structure for DSE pricing to make progress. The two
-/// secondary tests distinguish low-mass cost noise from a small set of severe
-/// primal conflicts. This policy is active only with the adaptive DSE budget.
-fn shouldPreflightDualPhaseOneFallback(
-    num_rows: usize,
-    initial_flips: usize,
-    dual_infeasibility_sum: f64,
-    primal_infeasibility_count: usize,
-) bool {
-    if (num_rows < 128 or initial_flips < 20) return false;
-    if (initial_flips > num_rows / 7) return false;
-    return dual_infeasibility_sum <= @as(f64, @floatFromInt(initial_flips)) or
-        primal_infeasibility_count <= 8;
 }
 
 /// Run the serial revised dual-simplex Phase II state machine.
@@ -724,13 +679,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     defer self.recordPhaseIterations(.dual_phase_one, iteration_started);
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const original_count = problem.num_cols + problem.num_rows;
-    // HiGHS' synthetic clock reinverts etamacro's medium rectangular basis
-    // after roughly fifty updates. The generic chain of one hundred lets DSE
-    // recurrence drift change both Phase-I and Phase-II row ordering. Match
-    // that lifecycle for the same structural regime; the fresher basis saves
-    // substantially more pivots than the extra inversions cost.
-    if (useShortDualUpdateChain(problem))
-        self.active_max_update_count = @min(self.active_max_update_count, 50);
     self.dual_work.begin(basis, original_count) catch return .numerical_failure;
     defer if (self.dual_work.active)
         self.dual_work.restoreOriginalBounds(basis, original_count);
@@ -743,11 +691,8 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
     // A dual-feasible cold start does not need Phase-I bounds. HiGHS keeps
     // the freshly perturbed objective and enters Phase II directly, using the
-    // perturbation to break CHUZC ties before exact-cost cleanup. Preserve
-    // that zero-pivot transition for the stable ultrawide/medium regimes.
-    if (useHighsBreakpointGroups(problem) and
-        self.dual_control.unperturbed_dual_infeasibility_count == 0)
-    {
+    // perturbation to break CHUZC ties before exact-cost cleanup.
+    if (self.dual_control.unperturbed_dual_infeasibility_count == 0) {
         if (!self.dual_work.createPrimalInfeasibilityList(
             basis,
             problem.num_rows,
@@ -824,16 +769,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         );
     }
     self.algorithm = .dual_revised;
-
-    if (!useHighsRhsInfeasibilityList(problem) and self.active_adaptive_dual_dse_budget and
-        self.active_dual_initialization_strategy == .highs and
-        shouldPreflightDualPhaseOneFallback(
-            problem.num_rows,
-            self.dual_phase_one_initial_flips,
-            self.dual_control.unperturbed_dual_infeasibility_sum,
-            self.dual_control.initial_primal_infeasibility_count,
-        ))
-        return .not_implemented;
 
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
@@ -981,13 +916,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         if (infeasible) dual_infeasible += 1;
     }
     if (dual_infeasible == 0) {
-        // If the medium rectangular auxiliary phase required no basis
-        // changes, a unit Devex framework reaches the infeasibility
-        // certificate faster than constructing exact DSE weights.
-        if (useHighsRhsInfeasibilityList(problem) and self.iterations == iteration_started) {
-            self.active_dual_edge_weight_strategy = .inherit;
-            self.pricing.rule = .devex;
-        }
         return self.solveDual(problem, control);
     }
 
@@ -1993,15 +1921,4 @@ test "Farkas validation ignores only sub-floor infinite-bound column mass" {
         @import("engine.zig").InfeasibilityCertificateFailure.infinite_column_bound,
         engine.infeasibility_certificate_failure,
     );
-}
-
-test "dual Phase I preflight isolates sparse broad correction fronts" {
-    try std.testing.expect(shouldPreflightDualPhaseOneFallback(400, 45, 29.562, 94));
-    try std.testing.expect(shouldPreflightDualPhaseOneFallback(174, 24, 1315.469, 8));
-
-    // Too small, too few corrections, and dense correction fronts all remain
-    // with dual Phase I. Refinery is the corpus boundary for the final case.
-    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(56, 31, 47_392, 14));
-    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(388, 6, 12.52, 50));
-    try std.testing.expect(!shouldPreflightDualPhaseOneFallback(323, 46, 3_414, 152));
 }
