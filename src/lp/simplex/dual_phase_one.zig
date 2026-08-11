@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const basis_module = @import("basis.zig");
+const dual_iteration_workspace = @import("dual_iteration_workspace.zig");
 const highs_random = @import("highs_random.zig");
 
 /// Changes made while correcting nonbasic dual infeasibilities at rebuild.
@@ -806,7 +807,7 @@ pub const DualPhaseOneWorkspace = struct {
         self: *DualPhaseOneWorkspace,
         row: usize,
         violation: f64,
-        tableau: []const f64,
+        tableau: dual_iteration_workspace.PivotalRowView(f64),
         flip_columns: []const u32,
         lower: []const f64,
         upper: []const f64,
@@ -815,8 +816,8 @@ pub const DualPhaseOneWorkspace = struct {
         var corrected: f64 = 0.0;
         for (flip_columns) |column_u32| {
             const column: usize = @intCast(column_u32);
-            if (column >= tableau.len or column >= lower.len or column >= upper.len) continue;
-            corrected += @abs(tableau[column]) * (upper[column] - lower[column]);
+            if (column >= tableau.len() or column >= lower.len or column >= upper.len) continue;
+            corrected += @abs(tableau.at(column)) * (upper[column] - lower[column]);
         }
         self.remaining_violation[row] = @max(violation - corrected, 0.0);
     }
@@ -1003,7 +1004,7 @@ test "dual Phase-I records violation left after bound flips" {
     workspace.recordRemainingViolation(
         0,
         10,
-        &.{ 2, -1 },
+        dual_iteration_workspace.PivotalRowView(f64).fromDense(&.{ 2, -1 }),
         &.{0},
         &.{ 0, 0 },
         &.{ 3, 4 },

@@ -91,9 +91,10 @@ fn benchmarkKernels(allocator: std.mem.Allocator, io: std.Io) !void {
     const ratio = zhighs.lp.simplex.ratio_test.RatioTest{};
     for (0..repetitions) |_| {
         const choice = ratio.chooseDualEntering(
-            &tableau,
+            zhighs.lp.simplex.ratio_test.DualTableauView.fromDense(&tableau),
             &reduced,
             &status,
+            &.{},
             &lower,
             &upper,
             &primal,
@@ -102,6 +103,7 @@ fn benchmarkKernels(allocator: std.mem.Allocator, io: std.Io) !void {
             &ratios,
             &directions,
             &candidates,
+            .{},
         );
         std.mem.doNotOptimizeAway(choice);
     }

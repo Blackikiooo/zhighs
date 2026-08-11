@@ -18,6 +18,7 @@ const highs_random = @import("highs_random.zig");
 const dual_phase_one_module = @import("dual_phase_one.zig");
 const crash_module = @import("crash.zig");
 const degeneracy_module = @import("degeneracy.zig");
+const simplex_nla_module = @import("simplex_nla.zig");
 const pricing_workspace_module = @import("pricing_workspace.zig");
 const problem_module = @import("problem.zig");
 const solution_module = @import("solution.zig");
@@ -55,8 +56,8 @@ fn priceStructuralColumns(
     comptime filter_small_coefficients: bool,
     problem: problem_module.ProblemView,
     basis: *basis_module.BasisState,
+    row_ap: *simplex_nla_module.Vector,
     zero_tolerance: f64,
-    ratio_tolerance: f64,
 ) usize {
     var nonzero_count: usize = 0;
     for (0..problem.num_cols) |column| {
@@ -68,11 +69,11 @@ fn priceStructuralColumns(
             unscaled_alpha += basis.rhs_work[matrix_row.toUsize()] * coefficient;
         }
         const alpha = unscaled_alpha * basis.column_scale[column];
-        basis.tableau[column] = alpha;
+        row_ap.values[column] = alpha;
         if (@abs(alpha) > zero_tolerance) nonzero_count += 1;
-        if (@abs(alpha) > ratio_tolerance) {
-            basis.flip_columns[basis.tableau_count] = @intCast(column);
-            basis.tableau_count += 1;
+        if (alpha != 0.0) {
+            row_ap.indices[row_ap.index_count] = @intCast(column);
+            row_ap.index_count += 1;
         }
     }
     return nonzero_count;
@@ -366,10 +367,11 @@ fn solveDualLoop(
             self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
             self.switchDualDseToDevex(.invalid);
         const original_cols = problem.num_cols + problem.num_rows;
+        const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
         var active_ratio_test = self.ratio_test;
         if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
         const entering = active_ratio_test.chooseDualEntering(
-            basis.tableau[0..original_cols],
+            iteration.pivotalRow(),
             work.dual,
             basis.col_status[0..original_cols],
             work.move,
@@ -380,7 +382,7 @@ fn solveDualLoop(
             leaving.violation,
             basis.dual_ratio[0..original_cols],
             basis.dual_direction[0..original_cols],
-            basis.flip_columns[0..original_cols],
+            iteration.pack_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
@@ -393,7 +395,7 @@ fn solveDualLoop(
                     &.{},
                 .update_count = self.nla.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
-                .packed_indices = basis.flip_columns[0..basis.tableau_count],
+                .packed_indices = iteration.packedIndices(),
                 .use_packed_indices = true,
             },
         );
@@ -578,6 +580,10 @@ pub fn buildAndValidateInfeasibilityRay(
         self.infeasibility_certificate_failure = .invalid_workspace;
         return false;
     };
+    const iteration = if (self.dual_iteration) |*value| value else {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    };
     if (basis.infeasibility_ray.len != problem.num_rows or basis.residual_work.len != problem.num_rows) {
         self.infeasibility_certificate_failure = .invalid_workspace;
         return false;
@@ -597,7 +603,7 @@ pub fn buildAndValidateInfeasibilityRay(
     const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
     var proof_lower: f64 = 0.0;
     var ray_max: f64 = 0.0;
-    for (basis.infeasibility_ray, basis.dual_row, basis.row_scale, basis.residual_work, problem.row_lower, problem.row_upper) |
+    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale, basis.residual_work, problem.row_lower, problem.row_upper) |
         *ray_value,
         scaled_ep,
         row_scale,
@@ -845,8 +851,9 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         var active_ratio_test = self.ratio_test;
         if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
         const work = self.dual_work.view(basis, original_count) orelse return .not_implemented;
+        const iteration = if (self.dual_iteration) |*value| value else return .not_implemented;
         const entering = active_ratio_test.chooseDualEntering(
-            basis.tableau[0..original_count],
+            iteration.pivotalRow(),
             work.dual,
             basis.col_status[0..original_count],
             work.move,
@@ -857,7 +864,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             leaving.violation,
             basis.dual_ratio[0..original_count],
             basis.dual_direction[0..original_count],
-            basis.flip_columns[0..original_count],
+            iteration.pack_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
@@ -869,15 +876,15 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     &.{},
                 .update_count = self.nla.factorization.update_count,
                 .dual_feasibility_tolerance = self.numerical.dual_tolerance,
-                .packed_indices = basis.flip_columns[0..basis.tableau_count],
+                .packed_indices = iteration.packedIndices(),
                 .use_packed_indices = true,
             },
         );
         self.dual_work.recordRemainingViolation(
             @intCast(leaving.row),
             leaving.violation,
-            basis.tableau[0..original_count],
-            basis.flip_columns[0..entering.flip_count],
+            iteration.pivotalRow(),
+            iteration.pack_indices[0..entering.flip_count],
             basis.col_lower[0..original_count],
             basis.col_upper[0..original_count],
         );
@@ -1034,6 +1041,8 @@ pub fn recordDualPhaseOneNoEntering(
 ) void {
     if (self.dual_phase_one_failure != null) return;
     const basis = if (self.basis) |*value| value else return;
+    const iteration = if (self.dual_iteration) |*value| value else return;
+    const tableau = iteration.pivotalRow();
     var diagnostic = DualPhaseOneFailureDiagnostic{
         .iteration = self.iterations,
         .leaving_row = leaving.row,
@@ -1053,7 +1062,7 @@ pub fn recordDualPhaseOneNoEntering(
         .accepted_bound_flips = 0,
         .eligible_unselected = 0,
     };
-    for (basis.dual_row, 0..) |value, row| {
+    for (iteration.row_ep.values, 0..) |value, row| {
         diagnostic.ep_max_abs = @max(diagnostic.ep_max_abs, @abs(value));
         if (@abs(value) <= self.numerical.zero_tolerance) continue;
         diagnostic.ep_nonzeros += 1;
@@ -1067,7 +1076,7 @@ pub fn recordDualPhaseOneNoEntering(
     }
 
     for (0..column_count) |column| {
-        const alpha = basis.tableau[column];
+        const alpha = tableau.at(column);
         const status = basis.col_status[column];
         var direction: f64 = 0.0;
         var signed_pivot: f64 = 0.0;
@@ -1100,7 +1109,7 @@ pub fn recordDualPhaseOneNoEntering(
                 break :blk .wrong_pivot_sign;
             }
             var was_flipped = false;
-            for (basis.flip_columns[0..flip_count]) |flipped| {
+            for (iteration.pack_indices[0..flip_count]) |flipped| {
                 if (@as(usize, @intCast(flipped)) == column) {
                     was_flipped = true;
                     break;
@@ -1263,10 +1272,11 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
         ) orelse return .optimal;
         if (self.computeDualTableauRow(problem, leaving.row) != .optimal) return .numerical_failure;
         const original_cols = problem.num_cols + problem.num_rows;
+        const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
         var active_ratio_test = self.ratio_test;
         if (self.numerical.anti_cycling_active) active_ratio_test.rule = .standard;
         const entering = active_ratio_test.chooseDualEntering(
-            basis.tableau[0..original_cols],
+            iteration.pivotalRow(),
             basis.reduced_cost[0..original_cols],
             basis.col_status[0..original_cols],
             &.{},
@@ -1277,7 +1287,7 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
             leaving.violation,
             basis.dual_ratio[0..original_cols],
             basis.dual_direction[0..original_cols],
-            basis.flip_columns[0..original_cols],
+            iteration.pack_indices,
             .{},
         );
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
@@ -1325,34 +1335,33 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
 /// selected row's exact steepest-edge weight, and prices that vector against
 /// every structural, logical, and artificial column. Row-wise pricing is used
 /// for sufficiently sparse BTRAN results; otherwise the column representation
-/// is scanned. On success `basis.dual_row`, `basis.tableau`, and
-/// `dual_row_index` describe the same leaving row.
+/// is scanned. On success the iteration workspace's `row_ep`, `row_ap`, pack,
+/// and `dual_row_index` describe the same leaving row.
 pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.ProblemView, leaving_row: u32) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
     if (row >= problem.num_rows) return .numerical_failure;
-    // The adaptive BTRAN publishes the exact positions materialized in this
-    // same workspace. Clear that producer-owned support instead of the whole
-    // row; fall back to a dense clear if a sparse FTRAN or dense BTRAN revoked
-    // ownership since the previous pivotal row.
-    const previous_dual_row = self.nla.factorization.lastSparseSolveIndices();
-    if (previous_dual_row.len == 0)
-        @memset(basis.dual_row, 0.0)
-    else for (previous_dual_row) |index| basis.dual_row[index] = 0.0;
-    basis.dual_row[row] = 1.0;
-    // Unit-vector BTRAN for pivotal row: wire sparse-index dispatch.
-    const ep_index = [_]u32{@intCast(row)};
-    self.nla.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
-    self.observeEpDensity(basis.dual_row);
+    iteration.row_ep.clear();
+    iteration.row_ap.clear();
+    iteration.pack_count = 0;
+    iteration.row_ep.values[row] = 1.0;
+    iteration.row_ep.appendIndex(@intCast(row)) catch return .numerical_failure;
+    self.nla.btran(&iteration.row_ep) catch return .numerical_failure;
+    // Dense factor backends truthfully revoke support in NLA. PRICE and CHUZC
+    // need deterministic natural-order support, so restore it once at the
+    // producer boundary rather than scanning independently in each consumer.
+    iteration.row_ep.reIndex();
+    self.observeEpDensity(iteration.row_ep.values);
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
-    const row_pricing = self.selectRowPricing(basis.dual_row);
+    const row_pricing = self.selectRowPricing(iteration.row_ep.values);
     var exact_weight: f64 = 0.0;
     var ep_nonzeros: usize = 0;
     if (needs_exact_weight and !row_pricing) {
         // Column PRICE consumes the scaled BTRAN row immediately below. Fuse
         // that materialization with the mandatory exact DSE scan so the row
         // is read only once while preserving the norm accumulation order.
-        for (basis.dual_row, basis.row_scale, basis.rhs_work) |entry, scale, *scaled_entry| {
+        for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |entry, scale, *scaled_entry| {
             exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
             scaled_entry.* = entry * scale;
@@ -1360,14 +1369,14 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
     } else if (needs_exact_weight) {
-        for (basis.dual_row) |entry| {
+        for (iteration.row_ep.values) |entry| {
             exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
         }
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
     } else {
-        for (basis.dual_row) |entry|
+        for (iteration.row_ep.values) |entry|
             if (@abs(entry) > self.numerical.zero_tolerance) {
                 ep_nonzeros += 1;
             };
@@ -1407,13 +1416,6 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         }
     }
     self.dual_row_index = leaving_row;
-    basis.tableau_count = 0;
-    // Row pricing scatters into structural entries and therefore needs a
-    // zeroed accumulation target. Column pricing overwrites every structural
-    // entry below, while the logical block is overwritten in both paths; do
-    // not clear the full tableau (including unused artificial columns) on
-    // every dual pivot.
-    if (row_pricing) @memset(basis.tableau[0..problem.num_cols], 0.0);
     const pricing_started = self.statisticsTimestamp();
     defer if (row_pricing)
         self.recordRowPricingElapsed(pricing_started)
@@ -1421,12 +1423,12 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         self.recordPricingElapsed(pricing_started);
     var nonzero_count: usize = 0;
     if (row_pricing) {
-        for (basis.dual_row, 0..) |dual_value, row_index| {
+        for (iteration.row_ep.values, 0..) |dual_value, row_index| {
             if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
             const scaled_dual = dual_value * basis.row_scale[row_index];
             for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
                 const column: usize = @intCast(column_u32);
-                basis.tableau[column] += scaled_dual * coefficient * basis.column_scale[column];
+                iteration.row_ap.values[column] += scaled_dual * coefficient * basis.column_scale[column];
             }
         }
     } else {
@@ -1434,36 +1436,28 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         // every matrix entry made column pricing pay an avoidable multiply per
         // nonzero; `rhs_work` is dead until the later BFRT/FTRAN stages.
         if (!needs_exact_weight) {
-            for (basis.dual_row, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
+            for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
                 scaled_dual.* = dual_value * scale;
         }
         nonzero_count = if (self.has_dropped_model_coefficient)
-            priceStructuralColumns(true, problem, basis, self.numerical.zero_tolerance, self.ratio_test.tolerance)
+            priceStructuralColumns(true, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance)
         else
-            priceStructuralColumns(false, problem, basis, self.numerical.zero_tolerance, self.ratio_test.tolerance);
+            priceStructuralColumns(false, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance);
     }
     // Row pricing accumulates structural entries, so their final density is
     // known only after the scatter. Add this block before logical columns so
     // the packed support preserves the dense scan's natural column order and
     // hence its deterministic CHUZC tie-breaking.
     if (row_pricing) {
-        for (basis.tableau[0..problem.num_cols], 0..) |value, column| {
+        for (iteration.row_ap.values, 0..) |value, column| {
             if (@abs(value) > self.numerical.zero_tolerance) nonzero_count += 1;
-            if (@abs(value) > self.ratio_test.tolerance) {
-                basis.flip_columns[basis.tableau_count] = @intCast(column);
-                basis.tableau_count += 1;
+            if (value != 0.0) {
+                iteration.row_ap.indices[iteration.row_ap.index_count] = @intCast(column);
+                iteration.row_ap.index_count += 1;
             }
         }
     }
-    for (0..problem.num_rows) |logical_row| {
-        const value = basis.dual_row[logical_row];
-        const column = problem.num_cols + logical_row;
-        basis.tableau[column] = value;
-        if (@abs(value) > self.ratio_test.tolerance) {
-            basis.flip_columns[basis.tableau_count] = @intCast(column);
-            basis.tableau_count += 1;
-        }
-    }
+    iteration.buildPivotalRowPack() catch return .numerical_failure;
     nonzero_count += ep_nonzeros;
     const tableau_count = problem.num_cols + problem.num_rows;
     self.current_dual_tableau_density = if (tableau_count == 0)
@@ -1577,7 +1571,7 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
 /// with one FTRAN, matching `HEkkDual::updateFtranBFRT`. No status, primal
 /// value, or infeasibility-list entry is published until that solve succeeds,
 /// so numerical failure cannot leave a partially committed flip batch.
-/// `flip_count` addresses the prefix of `basis.flip_columns` produced by the
+/// `flip_count` addresses the prefix of the iteration CHUZC pack produced by the
 /// ratio test. The entering-column FTRAN immediately following BFRT owns the
 /// iteration's residual/reinversion guard; repeating a full basis product here
 /// made every accepted flip batch pay for a second validation absent in HiGHS.
@@ -1587,6 +1581,7 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     self.stats.bound_flip_batches += 1;
     self.stats.bound_flip_ftran_savings += flip_count - 1;
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
 
     // Accumulate every bound displacement in equation space, then apply
     // B^-1 once. A pivotal tableau row cannot update the whole basic
@@ -1605,7 +1600,7 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     // Commit only after the aggregate solve succeeds. Thus an invalid
     // width, column, or numerical solve never publishes a partial batch.
     for (basis.basic_value, basis.rhs_work) |*value, displacement| value.* -= displacement;
-    for (basis.flip_columns[0..flip_count]) |column_u32| {
+    for (iteration.pack_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         const delta = switch (basis.col_status[column]) {
             .at_lower => basis.col_upper[column] - basis.col_lower[column],
@@ -1658,9 +1653,10 @@ pub fn accumulateBoundFlipRhs(
     output: []f64,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
-    if (output.len != problem.num_rows or flip_count > basis.flip_columns.len) return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
+    if (output.len != problem.num_rows or flip_count > iteration.pack_indices.len) return .numerical_failure;
     @memset(output, 0.0);
-    for (basis.flip_columns[0..flip_count]) |column_u32| {
+    for (iteration.pack_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         if (column >= problem.num_cols + problem.num_rows) return .numerical_failure;
         const delta = switch (basis.col_status[column]) {
@@ -1699,12 +1695,14 @@ pub fn updateReducedCostsAfterDualPivot(
     zero_dual_step: bool,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
     const original_count = problem.num_cols + problem.num_rows;
     if (row >= problem.num_rows or entering_col >= original_count) return .numerical_failure;
     const leaving_col = basis.basic_index[row];
     if (leaving_col >= original_count) return .numerical_failure;
-    const alpha_pq = basis.tableau[entering_col];
+    const tableau = iteration.pivotalRow();
+    const alpha_pq = tableau.at(entering_col);
     if (!std.math.isFinite(alpha_pq) or @abs(alpha_pq) <= self.numerical.pivot_tolerance)
         return .numerical_failure;
     if (zero_dual_step) {
@@ -1714,12 +1712,12 @@ pub fn updateReducedCostsAfterDualPivot(
     } else {
         const theta = basis.reduced_cost[entering_col] / alpha_pq;
         if (!std.math.isFinite(theta)) return .numerical_failure;
-        for (basis.reduced_cost[0..original_count], basis.tableau[0..original_count]) |*reduced, alpha|
-            reduced.* -= theta * alpha;
+        for (basis.reduced_cost[0..original_count], 0..) |*reduced, column|
+            reduced.* -= theta * tableau.at(column);
         const artificial_begin = original_count;
         for (0..problem.num_rows) |logical_row|
             basis.reduced_cost[artificial_begin + logical_row] -=
-                theta * basis.dual_row[logical_row] * basis.artificial_sign[logical_row];
+                theta * iteration.row_ep.values[logical_row] * basis.artificial_sign[logical_row];
     }
     basis.reduced_cost[entering_col] = 0.0;
     if (!self.dual_work.shiftBack(basis.reduced_cost, leaving_col)) return .numerical_failure;
@@ -1845,12 +1843,12 @@ test "dual rank one reduced cost update uses the old tableau row" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 2);
+    try engine.ensureDualIterationWorkspace(1, 2);
     engine.basis.?.reduced_cost[0] = 2;
     engine.basis.?.reduced_cost[1] = -1;
-    engine.basis.?.tableau[0] = 4;
-    engine.basis.?.tableau[1] = 3;
-    engine.basis.?.tableau[2] = 1;
-    engine.basis.?.dual_row[0] = 1;
+    engine.dual_iteration.?.row_ap.values[0] = 4;
+    engine.dual_iteration.?.row_ap.values[1] = 3;
+    engine.dual_iteration.?.row_ep.values[0] = 1;
     engine.basis.?.artificial_sign[0] = -1;
 
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0, false));
@@ -1902,8 +1900,9 @@ test "Farkas validation ignores only sub-floor infinite-bound column mass" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 2);
+    try engine.ensureDualIterationWorkspace(1, 2);
     engine.basis.?.row_scale[0] = 1;
-    engine.basis.?.dual_row[0] = 1;
+    engine.dual_iteration.?.row_ep.values[0] = 1;
 
     const accepted_problem = problem_module.ProblemView{
         .num_rows = 1,

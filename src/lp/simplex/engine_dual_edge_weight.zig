@@ -46,33 +46,14 @@ pub fn updateDualDevexWeights(self: *SimplexEngine, leaving_row: usize, pivot: f
 pub fn ensureExactDualEdgeWeights(self: *SimplexEngine) SolveStatus {
     if (self.dual_edge_weights_valid) return .optimal;
     const basis = if (self.basis) |*value| value else return .numerical_failure;
-    @memset(basis.dual_row, 0.0);
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     for (basis.row_edge_weight, 0..) |*weight, row| {
-        // The adaptive BTRAN publishes its sparse support. Clear only the
-        // previous result instead of the complete dense row for every unit
-        // RHS; fall back to a dense clear when the backend did not publish a
-        // support (the first iteration is already zeroed above).
-        if (row != 0) {
-            const previous_indices = self.nla.factorization.lastSparseSolveIndices();
-            if (previous_indices.len == 0)
-                @memset(basis.dual_row, 0.0)
-            else for (previous_indices) |index| basis.dual_row[index] = 0.0;
-        }
-        basis.dual_row[row] = 1.0;
-        // Unit-vector BTRAN: pass the single nonzero index for
-        // sparse-index adaptive dispatch (hyper-sparse L solve).
-        const ep_index = [_]u32{@intCast(row)};
-        self.nla.factorization.solveTransposeSparse(basis.dual_row, &ep_index) catch return .numerical_failure;
-        var norm_squared: f64 = 0.0;
-        const result_indices = self.nla.factorization.lastSparseSolveIndices();
-        if (result_indices.len == 0) {
-            for (basis.dual_row) |entry| norm_squared += entry * entry;
-        } else {
-            for (result_indices) |index| {
-                const entry = basis.dual_row[index];
-                norm_squared += entry * entry;
-            }
-        }
+        iteration.row_ep.clear();
+        iteration.row_ep.values[row] = 1.0;
+        iteration.row_ep.appendIndex(@intCast(row)) catch return .numerical_failure;
+        self.nla.btran(&iteration.row_ep) catch return .numerical_failure;
+        iteration.row_ep.reIndex();
+        const norm_squared = iteration.row_ep.norm2() catch return .numerical_failure;
         if (!std.math.isFinite(norm_squared)) return .numerical_failure;
         weight.* = @max(norm_squared, self.numerical.zero_tolerance);
     }
@@ -136,6 +117,7 @@ pub fn switchDualDseToDevex(self: *SimplexEngine, reason: DualDseFallbackReason)
 /// tau = B^-1 B^-T e_p before the factor update changes B.
 pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, pivot: f64) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     if (!self.dual_edge_weights_valid or leaving_row >= basis.row_edge_weight.len or
         @abs(pivot) <= self.numerical.pivot_tolerance)
         return .numerical_failure;
@@ -146,7 +128,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     {
         exact_pivot_weight = 0.0;
         ep_nonzeros = 0;
-        for (basis.dual_row) |entry| {
+        for (iteration.row_ep.values) |entry| {
             exact_pivot_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_nonzeros += 1;
         }
@@ -154,7 +136,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
         return .numerical_failure;
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
-    @memcpy(basis.residual_work, basis.dual_row);
+    @memcpy(basis.residual_work, iteration.row_ep.values);
     self.nla.factorization.solve(basis.residual_work) catch return .numerical_failure;
     var aq_nonzeros: usize = 0;
     var tau_nonzeros: usize = 0;
@@ -246,6 +228,7 @@ test "exact dual steepest-edge weights use BTRAN row norms" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.ensureDualIterationWorkspace(2, 0);
     engine.basis.?.basic_value[0] = -1.0;
     engine.basis.?.basic_value[1] = -2.0;
     @memset(engine.basis.?.basic_lower, 0.0);
@@ -270,12 +253,13 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.ensureDualIterationWorkspace(2, 0);
     try engine.nla.factorization.factorizeIdentity(2);
     engine.pricing.rule = .steepest_edge;
     engine.dual_edge_weights_valid = true;
     engine.dual_row_index = 0;
-    engine.basis.?.dual_row[0] = 1.0;
-    engine.basis.?.dual_row[1] = 0.0;
+    engine.dual_iteration.?.row_ep.values[0] = 1.0;
+    engine.dual_iteration.?.row_ep.values[1] = 0.0;
     engine.basis.?.pivot_direction[0] = 2.0;
     engine.basis.?.pivot_direction[1] = 1.0;
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
@@ -287,14 +271,16 @@ test "dual steepest-edge recurrence matches exact weights for a nontrivial basis
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
     engine.basis = try basis_module.BasisState.init(std.testing.allocator, 2, 0);
+    try engine.ensureDualIterationWorkspace(2, 0);
     try engine.nla.factorization.factorize(2, &[_]f64{ 2, 1, 1, 3 });
     engine.pricing.rule = .steepest_edge;
     engine.dual_edge_weights_valid = false;
     try std.testing.expectEqual(SolveStatus.optimal, engine.ensureExactDualEdgeWeights());
 
-    @memset(engine.basis.?.dual_row, 0);
-    engine.basis.?.dual_row[0] = 1;
-    try engine.nla.factorization.solveTranspose(engine.basis.?.dual_row);
+    engine.dual_iteration.?.row_ep.clear();
+    engine.dual_iteration.?.row_ep.values[0] = 1;
+    try engine.dual_iteration.?.row_ep.appendIndex(0);
+    try engine.nla.btran(&engine.dual_iteration.?.row_ep);
     engine.basis.?.pivot_direction[0] = 4;
     engine.basis.?.pivot_direction[1] = -2;
     try engine.nla.factorization.solve(engine.basis.?.pivot_direction);

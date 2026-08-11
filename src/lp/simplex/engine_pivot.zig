@@ -110,12 +110,13 @@ pub fn computeDualDirection(
     leaving_row: usize,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     if (entering_col >= problem.num_cols + problem.num_rows or
         leaving_row >= problem.num_rows or
         self.dual_row_index != @as(u32, @intCast(leaving_row)))
         return .numerical_failure;
     self.direction_requires_reinversion = false;
-    const alpha_row = basis.tableau[entering_col];
+    const alpha_row = iteration.pivotalRow().at(entering_col);
     if (!std.math.isFinite(alpha_row)) return .numerical_failure;
 
     if (solveEnteringDirection(self, problem, entering_col) != .optimal) {

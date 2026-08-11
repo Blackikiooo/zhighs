@@ -11,6 +11,38 @@ const indexed_vector = @import("indexed_vector.zig");
 
 pub const DualIterationError = error{ DenseIndexState, PackCapacityExceeded, Overflow };
 
+/// Allocation-free dense-addressable view of the pivotal row. HiGHS keeps
+/// structural `row_ap` and logical `row_ep` as separate HVector instances;
+/// this view preserves that ownership while giving scalar consumers one
+/// global column namespace.
+pub fn PivotalRowView(comptime Real: type) type {
+    return struct {
+        structural: []const Real,
+        logical: []const Real,
+
+        const Self = @This();
+
+        pub inline fn init(structural: []const Real, logical: []const Real) Self {
+            return .{ .structural = structural, .logical = logical };
+        }
+
+        pub inline fn fromDense(values: []const Real) Self {
+            return .{ .structural = values, .logical = &.{} };
+        }
+
+        pub inline fn len(self: Self) usize {
+            return self.structural.len + self.logical.len;
+        }
+
+        pub inline fn at(self: Self, column: usize) Real {
+            return if (column < self.structural.len)
+                self.structural[column]
+            else
+                self.logical[column - self.structural.len];
+        }
+    };
+}
+
 pub fn DualIterationWorkspace(comptime Real: type) type {
     const Vector = indexed_vector.IndexedVector(Real);
     return struct {
@@ -115,6 +147,10 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             return self.pack_values[0..self.pack_count];
         }
 
+        pub inline fn pivotalRow(self: *const Self) PivotalRowView(Real) {
+            return .init(self.row_ap.values, self.row_ep.values);
+        }
+
         /// Bytes represented by the complete retained iteration workspace.
         pub fn retainedBytes(self: *const Self) usize {
             return self.row_ep.retainedBytes() + self.row_ap.retainedBytes() +
@@ -157,4 +193,14 @@ test "dual iteration workspace clears only iteration-owned vector state" {
     try std.testing.expectEqual(@as(f128, 0), workspace.col_aq.values[4]);
     try std.testing.expectEqual(@as(f128, 0), workspace.col_bfrt.values[1]);
     try std.testing.expectEqual(@as(usize, 0), workspace.pack_count);
+}
+
+test "pivotal row view joins structural and logical values without copying" {
+    const View = PivotalRowView(f64);
+    const view = View.init(&.{ 2, -3 }, &.{ 5, 7, 11 });
+    try std.testing.expectEqual(@as(usize, 5), view.len());
+    try std.testing.expectEqual(@as(f64, 2), view.at(0));
+    try std.testing.expectEqual(@as(f64, -3), view.at(1));
+    try std.testing.expectEqual(@as(f64, 5), view.at(2));
+    try std.testing.expectEqual(@as(f64, 11), view.at(4));
 }

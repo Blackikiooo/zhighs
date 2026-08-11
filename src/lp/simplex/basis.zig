@@ -84,17 +84,14 @@ pub const BasisState = struct {
     devex_reference: []u8 = &.{},
 
     // --- Dual simplex workspace ---
-    /// Pivotal row solve `B^-T e_p`.
-    dual_row: []f64 = &.{},
     /// Pivotal tableau row `e_p^T B^-1 A` for all internal columns.
+    /// Retained only by primal pricing; dual simplex owns split row_ep/row_ap.
     tableau: []f64 = &.{},
-    /// Valid CHUZC support prefix in `flip_columns` before ratio testing.
-    tableau_count: usize = 0,
     /// Per-column ratios or group identifiers used by CHUZC.
     dual_ratio: []f64 = &.{},
     /// Temporary nonbasic movement direction selected by CHUZC.
     dual_direction: []f64 = &.{},
-    /// Ordered BFRT flip set produced by the dual ratio test.
+    /// Candidate storage used by primal ratio tests.
     flip_columns: []u32 = &.{},
     /// Sparse/hyper-sparse CHUZR candidate row indexes.
     dual_candidate_rows: []u32 = &.{},
@@ -144,7 +141,6 @@ pub const BasisState = struct {
         self.col_edge_weight = try allocator.alloc(f64, total_cols);
         self.row_edge_weight = try allocator.alloc(f64, rows);
         self.devex_reference = try allocator.alloc(u8, total_cols);
-        self.dual_row = try allocator.alloc(f64, rows);
         self.tableau = try allocator.alloc(f64, total_cols);
         self.dual_ratio = try allocator.alloc(f64, total_cols);
         self.dual_direction = try allocator.alloc(f64, total_cols);
@@ -180,7 +176,6 @@ pub const BasisState = struct {
         @memset(self.col_edge_weight, 1.0);
         @memset(self.row_edge_weight, 1.0);
         @memset(self.devex_reference, 0);
-        @memset(self.dual_row, 0.0);
         @memset(self.tableau, 0.0);
         @memset(self.dual_ratio, std.math.inf(f64));
         @memset(self.dual_direction, 0.0);
@@ -254,7 +249,6 @@ pub const BasisState = struct {
         self.allocator.free(self.col_edge_weight);
         self.allocator.free(self.row_edge_weight);
         self.allocator.free(self.devex_reference);
-        self.allocator.free(self.dual_row);
         self.allocator.free(self.tableau);
         self.allocator.free(self.dual_ratio);
         self.allocator.free(self.dual_direction);
@@ -296,7 +290,6 @@ pub const BasisState = struct {
         total += std.mem.sliceAsBytes(self.col_edge_weight).len;
         total += std.mem.sliceAsBytes(self.row_edge_weight).len;
         total += std.mem.sliceAsBytes(self.devex_reference).len;
-        total += std.mem.sliceAsBytes(self.dual_row).len;
         total += std.mem.sliceAsBytes(self.tableau).len;
         total += std.mem.sliceAsBytes(self.dual_ratio).len;
         total += std.mem.sliceAsBytes(self.dual_direction).len;

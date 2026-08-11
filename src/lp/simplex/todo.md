@@ -99,7 +99,7 @@ ReleaseFast 全测、forced-dual 40 模型 correctness **40/40** 且 committed p
 均覆盖该生命周期。复用/换形单测及 ReleaseFast 全测通过；forced-dual 40 模型 correctness
 **40/40 PASS**，committed pivots 合计仍为 **6833**，确认尚未改变 iteration 数值路径。
 
-### F0f — workspace-native BTRAN→PRICE→CHUZC chain（协议）
+### F0f — workspace-native BTRAN→PRICE→CHUZC chain（完成）
 
 一次性迁移完整的 pivotal-row 只读生命周期：`nla.btran(row_ep)` 产生 BTRAN 结果，PRICE 直接写
 `row_ap`，workspace 按 structural 后 logical 的顺序建立唯一 CHUZC pack。ratio test 改收
@@ -110,6 +110,16 @@ Phase-I 诊断、row/column pivot verify 和 dual reduced-cost update 全部读�
 辅助 DSE 路径迁移后删除，后者仅保留 primal pricing。CHUZC candidate/flip prefix 由 workspace pack
 存储，BFRT 不再借用 primal 的 `flip_columns`。验收顺序为 view/pack 单测、ReleaseFast 全测、
 `blend/bore3d/etamacro` pivot trace 前缀、forced-dual 40 模型 correctness 及 **6833** aggregate pivots。
+
+`computeDualTableauRow` 现由 `nla.btran(row_ep)` 和直接写入 `row_ap` 的 PRICE 构成，分段
+`PivotalRowView` 为 scalar consumer 提供 inline global-column lookup，CHUZC/BFRT 只使用 workspace
+pack。证书、Phase-I 诊断、pivot verify、DSE 和 dual reduced-cost update 已迁移至同一权威行；
+`BasisState.dual_row/tableau_count` 已删除，`BasisState.tableau/flip_columns` 仅供 primal 使用。
+
+ReleaseFast 全测与完整构建通过，forced-dual correctness **40/40 PASS**、aggregate pivots
+**6833**。与 F0e 提交逐模型对比的结构 trace 完全一致：`blend 105` digest `15d11cf0…`、
+`bore3d 173` digest `c9af8318…`、`etamacro 484` digest `db4e80c0…`。这确认迁移同时保持了
+数值结果、迭代数和 pivot 顺序。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

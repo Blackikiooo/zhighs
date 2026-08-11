@@ -843,7 +843,7 @@ pub const SimplexEngine = struct {
     /// Retain the serial-dual workspace across solves of the same shape.
     /// A differently shaped replacement is fully allocated before the old
     /// workspace is released, so allocation failure leaves the engine valid.
-    fn ensureDualIterationWorkspace(self: *SimplexEngine, num_rows: usize, num_cols: usize) !void {
+    pub fn ensureDualIterationWorkspace(self: *SimplexEngine, num_rows: usize, num_cols: usize) !void {
         if (self.dual_iteration) |*workspace| {
             if (workspace.num_rows == num_rows and workspace.num_cols == num_cols) return;
         }
