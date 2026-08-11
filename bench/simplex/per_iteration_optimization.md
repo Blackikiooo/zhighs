@@ -117,3 +117,13 @@ every pivot count, but produced mixed noise rather than a general gain:
 `scrs8 -0.37%`, `grow7 -1.78%`, `sc105 -0.02%`, `shell +0.33%`,
 `capri +1.69%`, and `seba +1.98%`.  The added per-element branch offsets the
 saved read pass on this corpus, so the implementation was removed.
+
+### H1c — sparse-support DSE norm (rejected)
+
+The adaptive BTRAN output support was reused for exact DSE norm and density
+instead of scanning the dense row.  Pivot counts remained unchanged, but
+31-run A/B showed that indirect support reads lose to the short sequential
+vector loop: `shell +1.94%`, `scrs8 +2.34%`, `seba +2.49%`,
+`capri +11.74%`, `sc105 +0.47%`, and only `grow7 -1.03%`.  The code was
+removed.  Future sparse traversal gates must include dimension and touched
+bytes, not density alone.
