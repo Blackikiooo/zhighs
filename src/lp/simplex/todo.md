@@ -349,6 +349,17 @@ phase/rebuild 语义，不得恢复形状阈值。
 HiGHS `computeDual → correctDualInfeasibilities → computePrimal → rebuild RHS` 顺序，而不是 phase
 选择错误。下一阶段在该统一入口补齐 rebuild，不回滚模型分流。
 
+### F0s — zero-pivot Phase-II rebuild（协议）
+
+源码核对确认 F0r 的 regression 边界：HiGHS 决定 Phase II 后，`solvePhase2` 首先执行完整 `rebuild`，
+顺序为 perturbed `computeDual → correctDualInfeasibilities(force_phase2) → computePrimal → RHS list`。
+Zig zero-pivot 分支仅 `createPrimalInfeasibilityList` 后直接 iterate，漏掉 fixed/boxed flip 和 one-sided
+cost shift，导致 Phase II 虽选择正确却不是 dual-feasible work state。
+
+zero-pivot 分支改用现有 `rebuildDualState(use_work_costs=true, correct_dual=true)`，禁止复制另一套 correction；
+只有 correction 后 free infeasibility 为零且 basis dual feasible 才进入 Phase II，否则沿统一失败边界返回。
+验收重点为 shell/scorpion/brandy，另跑 ReleaseFast 全测与 forced-dual 40/40。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
