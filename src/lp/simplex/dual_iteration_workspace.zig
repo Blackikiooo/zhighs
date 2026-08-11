@@ -58,6 +58,8 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
         col_aq: Vector,
         /// FTRAN of the accumulated bound-flip RHS.
         col_bfrt: Vector,
+        /// DSE tau vector `B^-1 B^-T e_p` before the basis update.
+        col_dse: Vector,
 
         /// CHUZC row: structural row_ap entries followed by logical row_ep.
         pack_indices: []u32,
@@ -79,6 +81,8 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             errdefer col_aq.deinit();
             var col_bfrt = try Vector.init(allocator, num_rows);
             errdefer col_bfrt.deinit();
+            var col_dse = try Vector.init(allocator, num_rows);
+            errdefer col_dse.deinit();
             const pack_indices = try allocator.alloc(u32, total_columns);
             errdefer allocator.free(pack_indices);
             const pack_values = try allocator.alloc(Real, total_columns);
@@ -93,6 +97,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 .row_ap = row_ap,
                 .col_aq = col_aq,
                 .col_bfrt = col_bfrt,
+                .col_dse = col_dse,
                 .pack_indices = pack_indices,
                 .pack_values = pack_values,
             };
@@ -104,6 +109,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             self.row_ap.deinit();
             self.col_aq.deinit();
             self.col_bfrt.deinit();
+            self.col_dse.deinit();
             self.allocator.free(self.pack_indices);
             self.allocator.free(self.pack_values);
             self.* = undefined;
@@ -116,6 +122,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             self.row_ap.clear();
             self.col_aq.clear();
             self.col_bfrt.clear();
+            self.col_dse.clear();
             self.pack_count = 0;
         }
 
@@ -154,7 +161,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
         /// Bytes represented by the complete retained iteration workspace.
         pub fn retainedBytes(self: *const Self) usize {
             return self.row_ep.retainedBytes() + self.row_ap.retainedBytes() +
-                self.col_aq.retainedBytes() + self.col_bfrt.retainedBytes() +
+                self.col_aq.retainedBytes() + self.col_bfrt.retainedBytes() + self.col_dse.retainedBytes() +
                 std.mem.sliceAsBytes(self.pack_indices).len +
                 std.mem.sliceAsBytes(self.pack_values).len;
         }
@@ -188,10 +195,13 @@ test "dual iteration workspace clears only iteration-owned vector state" {
     try workspace.col_aq.appendIndex(4);
     workspace.col_bfrt.values[1] = -3;
     try workspace.col_bfrt.appendIndex(1);
+    workspace.col_dse.values[3] = 6;
+    try workspace.col_dse.appendIndex(3);
     workspace.pack_count = 2;
     workspace.beginIteration();
     try std.testing.expectEqual(@as(f128, 0), workspace.col_aq.values[4]);
     try std.testing.expectEqual(@as(f128, 0), workspace.col_bfrt.values[1]);
+    try std.testing.expectEqual(@as(f128, 0), workspace.col_dse.values[3]);
     try std.testing.expectEqual(@as(usize, 0), workspace.pack_count);
 }
 

@@ -137,8 +137,8 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     if (!std.math.isFinite(exact_pivot_weight) or exact_pivot_weight <= self.numerical.zero_tolerance)
         return .numerical_failure;
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
-    @memcpy(basis.residual_work, iteration.row_ep.values);
-    self.nla.factorization.solve(basis.residual_work) catch return .numerical_failure;
+    iteration.col_dse.copyFrom(&iteration.row_ep) catch return .numerical_failure;
+    self.nla.ftran(&iteration.col_dse) catch return .numerical_failure;
     var aq_nonzeros: usize = 0;
     var tau_nonzeros: usize = 0;
     const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
@@ -146,7 +146,7 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     const highs_evaluation_order = basis.row_edge_weight.len >= 65 and
         basis.row_edge_weight.len <= 95 and
         basis.col_status.len >= basis.row_edge_weight.len * 9;
-    for (basis.row_edge_weight, iteration.col_aq.values, basis.residual_work, 0..) |*weight, alpha, tau, row| {
+    for (basis.row_edge_weight, iteration.col_aq.values, iteration.col_dse.values, 0..) |*weight, alpha, tau, row| {
         if (@abs(alpha) > self.numerical.zero_tolerance) aq_nonzeros += 1;
         if (@abs(tau) > self.numerical.zero_tolerance) tau_nonzeros += 1;
         if (row == leaving_row) continue;
@@ -261,6 +261,7 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     engine.dual_row_index = 0;
     engine.dual_iteration.?.row_ep.values[0] = 1.0;
     engine.dual_iteration.?.row_ep.values[1] = 0.0;
+    try engine.dual_iteration.?.row_ep.appendIndex(0);
     engine.dual_iteration.?.col_aq.values[0] = 2.0;
     engine.dual_iteration.?.col_aq.values[1] = 1.0;
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
