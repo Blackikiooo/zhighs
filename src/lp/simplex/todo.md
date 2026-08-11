@@ -446,6 +446,18 @@ Phase I、Phase II 或 zero-cost repair controller 在各自 work state 中 rebu
 保留为 source-equivalent transaction boundary；下一步处理 primal 路径中 HiGHS 不存在的每 8 update
 全列残差 gate。
 
+### F0x — HiGHS primal pivot verification（协议）
+
+HiGHS primal 不每 8 updates 构造 `B*x-a_q`；它在 CHUZR 确定 row 后执行一次 unit BTRAN + PRICE，并用
+`alpha_col` 对比 `alpha_row`，阈值同 dual 为 `1e-7`。mismatch 只请求 rebuild，禁止提交旧 pivot。
+Zig 当前的 whole-column `1e-10` gate 既早于 CHUZR，又立即 refactor 后复用旧 entering candidate；grow7
+F0v 后的 3 次 solve-residual 正来自这里。
+
+删除 periodic dense residual/refinement state，在现有 primal reduced-cost pivotal-row producer 中加入 O(nnz
+entering column) 的 alpha-row 独立校验，并返回 typed `ready/rebuild_required/failure`；Phase I/II controller
+各自 exact reprice 后重新选择。终局 residual validation 不变。验收 ReleaseFast、grow7 路径和 40-model
+correctness/aggregate；数值 trouble 不得通过调宽模型阈值规避。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
