@@ -349,7 +349,7 @@ phase/rebuild 语义，不得恢复形状阈值。
 HiGHS `computeDual → correctDualInfeasibilities → computePrimal → rebuild RHS` 顺序，而不是 phase
 选择错误。下一阶段在该统一入口补齐 rebuild，不回滚模型分流。
 
-### F0s — zero-pivot Phase-II rebuild（协议）
+### F0s — zero-pivot Phase-II rebuild（完成）
 
 源码核对确认 F0r 的 regression 边界：HiGHS 决定 Phase II 后，`solvePhase2` 首先执行完整 `rebuild`，
 顺序为 perturbed `computeDual → correctDualInfeasibilities(force_phase2) → computePrimal → RHS list`。
@@ -359,6 +359,12 @@ cost shift，导致 Phase II 虽选择正确却不是 dual-feasible work state�
 zero-pivot 分支改用现有 `rebuildDualState(use_work_costs=true, correct_dual=true)`，禁止复制另一套 correction；
 只有 correction 后 free infeasibility 为零且 basis dual feasible 才进入 Phase II，否则沿统一失败边界返回。
 验收重点为 shell/scorpion/brandy，另跑 ReleaseFast 全测与 forced-dual 40/40。
+
+zero-pivot 分支现复用 `rebuildDualState`，并在 free infeasibility/dual feasibility 检查后进入 Phase II。
+ReleaseFast 全测和 forced-dual correctness **40/40 PASS**，aggregate 及 shell/scorpion/brandy pivot
+数均不变。这一否定结果说明这些逻辑基在 perturbed cost 下无需 correction，缺失 rebuild 不是长路径
+根因；调用仍保留，因为它补齐了 source-equivalent phase boundary 和未来非逻辑 warm basis 的正确性。
+下一步比较 Phase-II DSE recurrence/切换，而不是继续修改初始化。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

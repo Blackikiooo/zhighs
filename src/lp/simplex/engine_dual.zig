@@ -693,11 +693,9 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // the freshly perturbed objective and enters Phase II directly, using the
     // perturbation to break CHUZC ties before exact-cost cleanup.
     if (self.dual_control.unperturbed_dual_infeasibility_count == 0) {
-        if (!self.dual_work.createPrimalInfeasibilityList(
-            basis,
-            problem.num_rows,
-            self.numerical.primal_tolerance,
-        )) return .not_implemented;
+        const correction = rebuildDualState(self, problem, true, null, true) orelse return .not_implemented;
+        if (correction.free_infeasibility_count != 0 or !self.classifyFeasibility(problem).dual)
+            return .not_implemented;
         self.dual_control.enterPhase(.phase_two);
         return solveDualLoop(self, problem, control, true);
     }
