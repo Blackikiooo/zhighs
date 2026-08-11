@@ -411,8 +411,7 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
     for (basis.row_scale) |*scale|
         scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
 
-    if (ultrawide_model and original_matrix_min >= 0.2 and original_matrix_max <= 5.0)
-    {
+    if (ultrawide_model and original_matrix_min >= 0.2 and original_matrix_max <= 5.0) {
         @memset(basis.row_scale, 1.0);
         @memset(basis.column_scale[0..problem.num_cols], 1.0);
     }
