@@ -766,6 +766,10 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `workDual[pivot]*move<=0` 时提交 `theta_dual=0`、清空 BFRT flip set、执行 `shiftCost`。F2a 失败簇
   的 fresh Farkas 全部无效，与该伪 no-entering 完全一致。D3a 将删除过早退出并用“reduced cost 位于
   -Td 边界仍选中 zero-dual-step”单测锁定；然后重测 bore3d/capri/etamacro/finnis/klein1/vtp-base。
+  隔离结果：允许所有负 ratio 后前述八模型完全不变，但全量运行在 gas11 的负 `workTheta` CHUZC3
+  扩张中不终止，证明 gas11 当前 work dual 尚违反 HiGHS 的 CHUZC dual-feasible 前置条件。D3a 因此
+  收窄为只删除 `ratio == 0` 的错误退出并保留 `ratio < 0` 状态保护；边界单测通过。负值保护只能在
+  F1b cleanup/rebuild 对齐并证明 CHUZC 入口 dual feasible 后删除，不能靠热循环 iteration cap 掩盖。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 

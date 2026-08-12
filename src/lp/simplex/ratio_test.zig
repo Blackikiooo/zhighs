@@ -286,7 +286,12 @@ pub const RatioTest = struct {
                 .fixed => unreachable,
                 else => unreachable,
             };
-            if (chuzc.highs_choose_possible and ratio <= 0.0) return .{};
+            // A zero relaxed ratio is the valid shiftCost path retained by
+            // HiGHS. A genuinely negative ratio means the caller violated
+            // CHUZC's dual-feasible precondition; keep it out of the
+            // multiplicative CHUZC3 expansion until that controller state is
+            // rebuilt, otherwise a negative theta moves away from termination.
+            if (chuzc.highs_choose_possible and ratio < 0.0) return .{};
             ratio_work[column] = ratio;
             direction_work[column] = direction;
             candidate_work[candidate_count] = @intCast(column);
@@ -747,5 +752,36 @@ test "HiGHS CHUZC4 large-alpha search can move to an earlier group" {
         },
     );
     try std.testing.expectEqual(@as(?u32, 0), choice.column);
+    try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
+}
+
+test "HiGHS CHUZC keeps a zero relaxed-ratio candidate" {
+    const test_rule = RatioTest{ .rule = .bound_flipping, .tolerance = 1e-9 };
+    var ratios: [1]f64 = undefined;
+    var directions: [1]f64 = undefined;
+    var candidates: [1]u32 = undefined;
+    const choice = test_rule.chooseDualEntering(
+        DualTableauView.fromDense(&.{-1}),
+        &.{-1e-7},
+        &.{.at_lower},
+        &.{1},
+        &.{0},
+        &.{std.math.inf(f64)},
+        &.{0},
+        .at_lower,
+        1,
+        &ratios,
+        &directions,
+        &candidates,
+        .{
+            .highs_choose_possible = true,
+            .highs_large_step = true,
+            .highs_breakpoint_groups = true,
+            .dual_feasibility_tolerance = 1e-7,
+        },
+    );
+    try std.testing.expectEqual(@as(?u32, 0), choice.column);
+    try std.testing.expect(choice.zero_dual_step);
+    try std.testing.expectEqual(@as(f64, 0.0), choice.theta);
     try std.testing.expectEqual(@as(usize, 0), choice.flip_count);
 }
