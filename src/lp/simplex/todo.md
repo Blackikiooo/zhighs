@@ -760,6 +760,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   vtp-base 在 `phase_two_no_entering` 后叠加旧回退，aggregate 暂由 `9926→11258`（HiGHS 8774）。
   这是控制器对齐后的待修内核问题，禁止撤回正确的 cost/bounds 生命周期再用低但不可比的 primal
   fallback 数字掩盖；下一步按 fresh no-entering 的首次分叉回到 D3/E3。
+  D3/F2 首次失败核对：Zig CHUZC2 在 relaxed ratio
+  `(workDual*move + Td)/effectiveAlpha <= 0` 时直接返回 no-entering；HiGHS `choosePossible` 只把该值
+  更新到 `workTheta`，从不在这里退出，随后 CHUZC3/4 仍可选中候选，并在
+  `workDual[pivot]*move<=0` 时提交 `theta_dual=0`、清空 BFRT flip set、执行 `shiftCost`。F2a 失败簇
+  的 fresh Farkas 全部无效，与该伪 no-entering 完全一致。D3a 将删除过早退出并用“reduced cost 位于
+  -Td 边界仍选中 zero-dual-step”单测锁定；然后重测 bore3d/capri/etamacro/finnis/klein1/vtp-base。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 
