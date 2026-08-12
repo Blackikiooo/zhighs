@@ -465,6 +465,17 @@ periodic whole-column residual/refinement 及其跨 pivot 状态已删除；prim
 aggregate `11725→11729`（HiGHS 8774）。4-pivot 增量来自唯一真实 mismatch 后重新选择，是正确 transaction
 语义；下一步清除 pivot commit 中剩余的模型形状分支，并继续对齐 basis move/status lifecycle。
 
+### F0y — bound-derived leaving status（协议）
+
+HiGHS `updatePivots` 对所有模型先检查 outgoing variable 的 `workLower == workUpper`：相等时 value 取唯一
+bound、nonbasic move 为 0；否则才按 `move_out` 选择 lower/upper。Zig 仅对 65–95 row 且超宽模型把相等
+bounds 提交为 `.fixed`，其他模型错误保留 `.at_lower/.at_upper`，使后续 pricing/flip 把 fixed variable 当作
+可移动 nonbasic。
+
+删除尺寸判断，对任意 finite/infinite 表示下的相等 bound 统一提交 `.fixed`；非 fixed 继续使用 ratio test
+给出的 leaving side。复用 `nonbasicStatusForBounds` 的状态语义，不增加 hot-loop 动态分派。验收
+ReleaseFast、40-model correctness/aggregate 和 fixed-bound unit coverage。
+
 ## 1. HiGHS serial dual simplex 算法路径
 
 1. `HEkkDual::solve`
