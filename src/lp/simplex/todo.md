@@ -727,6 +727,15 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 ### F. Phase exit、cleanup 和结论
 
 - [ ] F1 对齐 Phase-I objective assessment、remove perturbation 和 Phase-I re-entry。
+  2026-08-12 源码协议核对（HiGHS `HEkkDual::solvePhase1`、`rebuild`、
+  `assessPhase1Optimality`）：CHUZR 返回 no-row 只产生 `possibly_optimal` rebuild reason，不能直接
+  退出 Phase I。控制器必须先以当前 Phase-I bounds/cost 完成一次完整 fresh rebuild（必要时
+  reinvert、重算 dual/base value/infeasibility list 和 dual objective），然后再次 CHUZR；仅 fresh
+  状态仍无 leaving row 才允许移除 cost perturbation 并判断 Phase-I objective。Zig 当前在首次
+  no-row 后立即恢复原始 bounds，随后把双/原可行性组合映射成 cold primal fallback，是
+  `refinery 1087 vs 396` 和 `gas11 1127 vs 699` 的主要控制器差异。F1a 将先引入独立
+  `possibly_optimal` 数值 rebuild reason 和“首次 no-row 请求 rebuild、fresh no-row 才提交”的
+  原子边界；定向验收 refinery/gas11/grow7，随后跑 forced-dual 40-model correctness 和 aggregate。
 - [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
