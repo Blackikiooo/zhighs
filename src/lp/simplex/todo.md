@@ -483,7 +483,7 @@ test side，并增加纯状态单测。ReleaseFast 全测和 forced-dual correct
 `lotfi 254→229`、`etamacro 514→495`。这确认 fixed move 的模型补丁是三条最大长路径的共同根因；下一步
 删除 setup scaling 中同形状的 unit-scale override，恢复统一 HiGHS scaling policy。
 
-### F0z — range-derived scaling decision（协议）
+### F0z — range-derived scaling decision（完成）
 
 HiGHS `scaleLp` 的默认入口先对所有模型计算 matrix range；若全部绝对值位于 `[0.2, 5]`，直接跳过
 matrix scaling，否则执行 forced equilibration。Zig 已复现六轮 equilibration，却只对 65–95 row 且
@@ -492,6 +492,12 @@ matrix scaling，否则执行 forced equilibration。Zig 已复现六轮 equilib
 把原始 matrix min/max audit 提升为所有模型共享的 setup decision，完全删除 ultrawide 条件；range 内统一
 保留 unit row/column scale，range 外运行现有 HiGHS 六轮 power-of-two equilibration。该分支只在 solve
 setup 执行，不进入 hot loop。验收 ReleaseFast、40-model correctness/aggregate，并逐模型记录路径变化。
+
+matrix range audit 现对所有模型执行，`[0.2,5]` 内跳过 scaling，范围外才运行六轮 equilibration；原
+ultrawide 条件及先计算后覆盖的无效 setup 工作均已删除。ReleaseFast 全测和 forced-dual correctness
+**40/40 PASS**，aggregate `9930→9926`（HiGHS 8774），`forest6 80→77`、`sc50b 49→48` 均与
+HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例选择行为的分支，区分合法 work-estimate 与
+模型 patch，并继续删除后者。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

@@ -358,62 +358,58 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
     @memset(basis.column_scale[0..problem.num_cols], 1.0);
     var original_matrix_min = std.math.inf(f64);
     var original_matrix_max: f64 = 0.0;
-    const ultrawide_model = problem.num_rows >= 65 and problem.num_rows <= 95 and
-        problem.num_cols >= problem.num_rows * 8;
-    if (ultrawide_model) for (problem.matrix.values) |coefficient| {
+    for (problem.matrix.values) |coefficient| {
         const magnitude = @abs(coefficient);
         if (magnitude == 0.0) continue;
         original_matrix_min = @min(original_matrix_min, magnitude);
         original_matrix_max = @max(original_matrix_max, magnitude);
-    };
-    var minimum_nonzero_cost = std.math.inf(f64);
-    for (problem.col_cost) |cost| if (cost != 0.0) {
-        minimum_nonzero_cost = @min(minimum_nonzero_cost, @abs(cost));
-    };
-    const include_cost = minimum_nonzero_cost < 0.1;
-    const minimum_scale = @exp2(-20.0);
-    const maximum_scale = @exp2(20.0);
-    for (0..6) |_| {
-        @memset(basis.basic_lower, 1e200);
-        @memset(basis.basic_upper, 1e-200);
-        for (0..problem.num_cols) |column| {
-            var minimum: f64 = 1e200;
-            var maximum: f64 = 1e-200;
-            const cost = @abs(problem.col_cost[column]);
-            if (include_cost and cost != 0.0) {
-                minimum = @min(minimum, cost);
-                maximum = @max(maximum, cost);
-            }
-            const begin = problem.matrix.col_starts[column];
-            const end = problem.matrix.col_starts[column + 1];
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const value = @abs(coefficient) * basis.row_scale[row.toUsize()];
-                minimum = @min(minimum, value);
-                maximum = @max(maximum, value);
-            }
-            const equilibration = 1.0 / @sqrt(minimum * maximum);
-            basis.column_scale[column] = std.math.clamp(equilibration, minimum_scale, maximum_scale);
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-                const row_index = row.toUsize();
-                const value = @abs(coefficient) * basis.column_scale[column];
-                basis.basic_lower[row_index] = @min(basis.basic_lower[row_index], value);
-                basis.basic_upper[row_index] = @max(basis.basic_upper[row_index], value);
-            }
-        }
-        for (basis.row_scale, basis.basic_lower, basis.basic_upper) |*scale, minimum, maximum| {
-            scale.* = std.math.clamp(1.0 / @sqrt(minimum * maximum), minimum_scale, maximum_scale);
-        }
     }
-    for (basis.column_scale[0..problem.num_cols]) |*scale|
-        scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
-    for (basis.row_scale) |*scale|
-        scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
-
-    if (ultrawide_model and original_matrix_min >= 0.2 and original_matrix_max <= 5.0) {
-        @memset(basis.row_scale, 1.0);
-        @memset(basis.column_scale[0..problem.num_cols], 1.0);
+    const matrix_requires_scaling = original_matrix_min < 0.2 or original_matrix_max > 5.0;
+    if (matrix_requires_scaling) {
+        var minimum_nonzero_cost = std.math.inf(f64);
+        for (problem.col_cost) |cost| if (cost != 0.0) {
+            minimum_nonzero_cost = @min(minimum_nonzero_cost, @abs(cost));
+        };
+        const include_cost = minimum_nonzero_cost < 0.1;
+        const minimum_scale = @exp2(-20.0);
+        const maximum_scale = @exp2(20.0);
+        for (0..6) |_| {
+            @memset(basis.basic_lower, 1e200);
+            @memset(basis.basic_upper, 1e-200);
+            for (0..problem.num_cols) |column| {
+                var minimum: f64 = 1e200;
+                var maximum: f64 = 1e-200;
+                const cost = @abs(problem.col_cost[column]);
+                if (include_cost and cost != 0.0) {
+                    minimum = @min(minimum, cost);
+                    maximum = @max(maximum, cost);
+                }
+                const begin = problem.matrix.col_starts[column];
+                const end = problem.matrix.col_starts[column + 1];
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const value = @abs(coefficient) * basis.row_scale[row.toUsize()];
+                    minimum = @min(minimum, value);
+                    maximum = @max(maximum, value);
+                }
+                const equilibration = 1.0 / @sqrt(minimum * maximum);
+                basis.column_scale[column] = std.math.clamp(equilibration, minimum_scale, maximum_scale);
+                for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    const row_index = row.toUsize();
+                    const value = @abs(coefficient) * basis.column_scale[column];
+                    basis.basic_lower[row_index] = @min(basis.basic_lower[row_index], value);
+                    basis.basic_upper[row_index] = @max(basis.basic_upper[row_index], value);
+                }
+            }
+            for (basis.row_scale, basis.basic_lower, basis.basic_upper) |*scale, minimum, maximum| {
+                scale.* = std.math.clamp(1.0 / @sqrt(minimum * maximum), minimum_scale, maximum_scale);
+            }
+        }
+        for (basis.column_scale[0..problem.num_cols]) |*scale|
+            scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
+        for (basis.row_scale) |*scale|
+            scale.* = @exp2(@floor(@log2(scale.*) + 0.5));
     }
 
     for (problem.row_lower, problem.row_upper, 0..) |lower, upper, row| {
