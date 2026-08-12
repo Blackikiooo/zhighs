@@ -743,6 +743,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `1127/486`，全语料 aggregate 仍为 `9926 vs 8774`。因此旧状态提前提交已被排除，F1 的下一根因
   是 fresh no-row 后缺少 `assessPhase1Optimality` 的 objective/去扰动/重入协议，而不是 rebuild
   本身。
+  F1b 按 `HEkkDual::cleanup` 拆成两个可验证提交边界：第一步在 fresh perturbed objective 非零时，
+  保持 Phase-I bounds/nonbasic values，恢复原始 scaled `workCost`、清空 shift/perturbation、exact reprice，
+  并记录 unperturbed Phase-I objective 与 dual infeasibility；不得在该边界恢复 Phase-II bounds。
+  第二步仅在实测 Phase-I dual infeasibility 非零时重新初始化 Phase-I nonbasic value/move 并回到 rebuild/
+  iterate 外循环。这样先验证 gas11 是否复现 HiGHS cleanup 的 `objective≈-12266、dual infeas=15`，再引入
+  re-entry，避免同时改变 objective、bounds 和 basis 三类状态。
 - [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
   2026-08-12 F1a 后用本地同 commit HiGHS 的开发日志确认：`refinery` 正确路径为
   `DuPh1 96 + DuPh2 300 = 396`。HiGHS 在 fresh Phase-I objective 恰为零时保留已扰动的
