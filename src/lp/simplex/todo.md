@@ -744,6 +744,14 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   是 fresh no-row 后缺少 `assessPhase1Optimality` 的 objective/去扰动/重入协议，而不是 rebuild
   本身。
 - [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
+  2026-08-12 F1a 后用本地同 commit HiGHS 的开发日志确认：`refinery` 正确路径为
+  `DuPh1 96 + DuPh2 300 = 396`。HiGHS 在 fresh Phase-I objective 恰为零时保留已扰动的
+  `workCost`，只恢复 Phase-II bounds/nonbasic values，随后由 Phase-II rebuild 重新计算
+  workDual/baseValue；Zig 当前在 90 次 Phase-I pivot 后立即恢复原始 cost，发现原始 dual infeasible
+  就冷启动 artificial primal Phase I，额外产生 997 pivots。F2a 将把“零 objective”转移改为同一
+  `DualWorkState` 所有权下的 bounds transition，并直接进入 `solveDualLoop(use_work_costs=true)`；
+  原始 cost 仍只允许在 Phase-II no-row cleanup 中恢复。该改动不绑定模型，只由 fresh objective 和
+  controller phase 决定。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 
