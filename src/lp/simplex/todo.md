@@ -752,6 +752,14 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `DualWorkState` 所有权下的 bounds transition，并直接进入 `solveDualLoop(use_work_costs=true)`；
   原始 cost 仍只允许在 Phase-II no-row cleanup 中恢复。该改动不绑定模型，只由 fresh objective 和
   controller phase 决定。
+  F2a 实现后 ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。`grow7 486→316`
+  （HiGHS 339）、`israel 155→143`（HiGHS 146），adlittle/agg/blend 等转为与 HiGHS exact；同时修复
+  shifted Phase-II 在 fresh Farkas 校验失败后仍无条件返回 infeasible 的错误，现在与 exact-cost path
+  一样先尝试 Devex framework，仍不能形成证书则以 numerical reason 返回控制器。该阶段也真实暴露
+  了此前被 cold primal fallback 遮住的 Phase-II CHUZC 差异：bore3d/capri/etamacro/finnis/klein1/
+  vtp-base 在 `phase_two_no_entering` 后叠加旧回退，aggregate 暂由 `9926→11258`（HiGHS 8774）。
+  这是控制器对齐后的待修内核问题，禁止撤回正确的 cost/bounds 生命周期再用低但不可比的 primal
+  fallback 数字掩盖；下一步按 fresh no-entering 的首次分叉回到 D3/E3。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 

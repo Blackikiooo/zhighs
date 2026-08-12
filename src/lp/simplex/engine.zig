@@ -695,6 +695,8 @@ pub const SimplexEngine = struct {
     dual_phase_one_initial_flips: usize = 0,
     /// Working dual objective immediately after Phase-I initialization.
     dual_phase_one_initial_objective: f64 = 0.0,
+    /// Fresh working dual objective at the final perturbed Phase-I assessment.
+    dual_phase_one_final_objective: f64 = 0.0,
     /// Largest basic-bound violation immediately after Phase-I initialization.
     dual_phase_one_initial_max_basic_violation: f64 = 0.0,
     /// First leaving row selected by dual Phase I, if any.
@@ -849,6 +851,7 @@ pub const SimplexEngine = struct {
         self.infeasibility_certificate_infinite_column_mass = 0.0;
         self.dual_phase_one_initial_flips = 0;
         self.dual_phase_one_initial_objective = 0.0;
+        self.dual_phase_one_final_objective = 0.0;
         self.dual_phase_one_initial_max_basic_violation = 0.0;
         self.dual_phase_one_initial_leaving_row = null;
         self.numerical.resetAntiCycling();

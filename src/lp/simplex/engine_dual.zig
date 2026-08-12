@@ -408,6 +408,19 @@ fn solveDualLoop(
                     self.shifted_dual_exit = .phase_two_fresh_infeasible;
                     return .infeasible;
                 }
+                if (!no_entering_devex_recovery_used and
+                    self.active_dual_edge_weight_strategy == .steepest_devex and
+                    self.pricing.rule == .steepest_edge)
+                {
+                    // A failed certificate cannot publish infeasibility. Give
+                    // the alternate HiGHS edge-weight framework one fresh
+                    // CHUZR/CHUZC pass, just as the exact-cost path does.
+                    no_entering_devex_recovery_used = true;
+                    self.dual_dse_certificate_fallback_active = true;
+                    self.switchDualDseToDevex(.invalid);
+                    fresh_no_entering_basis = false;
+                    continue;
+                }
                 self.shifted_dual_exit = .phase_two_no_entering;
                 // Reuse the allocation-free candidate diagnostic for the
                 // shifted Phase-II row. Capturing it before Phase I starts is
@@ -415,7 +428,8 @@ fn solveDualLoop(
                 // actual cold-start CHUZC failure site.
                 self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_cols);
             }
-            return .infeasible;
+            self.failure_site = .ratio_test;
+            return .numerical_failure;
         };
         const entering_index: usize = @intCast(entering_col);
         fresh_no_entering_basis = false;
@@ -887,7 +901,21 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // Assess the Phase-I objective while the special bounds and values are
     // still installed. HiGHS then reinstalls the original (Phase-II) bounds
     // before performing any Phase-II iteration.
-    if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+    self.dual_phase_one_final_objective = self.dual_work.rebuild_dual_objective;
+    if (self.dual_phase_one_final_objective == 0.0) {
+        // Zero auxiliary objective is the normal Phase-I exit. Keep the
+        // perturbed work costs alive: HEkkDual restores only Phase-II bounds
+        // here and removes perturbations after Phase II reaches no-row. An
+        // eager exact-cost reprice can make this same basis dual infeasible
+        // and incorrectly trigger a cold artificial Phase I.
+        self.dual_work.restoreOriginalBounds(basis, original_count);
+        self.dual_control.enterPhase(.phase_two);
+        const correction = rebuildDualState(self, problem, true, null, true) orelse
+            return .not_implemented;
+        if (correction.free_infeasibility_count != 0) return .not_implemented;
+        self.algorithm = .dual_revised;
+        return solveDualLoop(self, problem, control, true);
+    }
 
     // Always restore the original model state before classifying feasibility
     // or entering either Phase-II algorithm. Boxed columns are placed on the
