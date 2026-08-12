@@ -355,8 +355,15 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
                 self.countPrimalRatioTies(leaving.step)
             else
                 0;
-            if (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?) != .optimal)
-                return .numerical_failure;
+            switch (self.updateReducedCostsAfterPrimalPivot(problem, entering.column, entering.direction, leaving.row.?)) {
+                .ready => {},
+                .rebuild_required => {
+                    if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
+                    if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
+                    continue;
+                },
+                .numerical_failure => return .numerical_failure,
+            }
             if (self.performPivot(problem, entering.column, entering.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal) {
                 if (self.failure_site == .none) self.failure_site = .pivot_update;
                 return .numerical_failure;
@@ -643,8 +650,15 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
                 self.countPrimalRatioTies(leaving.step)
             else
                 0;
-            if (self.updateReducedCostsAfterPrimalPivot(problem, entering_choice.column, entering_choice.direction, leaving.row.?) != .optimal)
-                return .numerical_failure;
+            switch (self.updateReducedCostsAfterPrimalPivot(problem, entering_choice.column, entering_choice.direction, leaving.row.?)) {
+                .ready => {},
+                .rebuild_required => {
+                    if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
+                    if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+                    continue;
+                },
+                .numerical_failure => return .numerical_failure,
+            }
             if (self.performPivot(problem, entering_choice.column, entering_choice.direction, leaving.row.?, leaving.bound, leaving.step) != .optimal)
                 return .numerical_failure;
             self.observeIterationStep(
@@ -748,7 +762,6 @@ pub fn restartPhaseOneWithoutPerturbation(
     self.degeneracy.resetSolve();
     self.active_degeneracy_strategy = .baseline;
     self.numerical.clearAntiCyclingFallback();
-    self.direction_requires_reinversion = false;
     self.fresh_factorization_pivots_remaining = 0;
     self.reduced_cost_update_count = 0;
     if (self.initializeProblemStorage(problem) != .optimal) return .numerical_failure;

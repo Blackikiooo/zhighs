@@ -26,6 +26,7 @@ const matrix = @import("matrix");
 const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
 const DualDirectionStatus = @import("engine.zig").DualDirectionStatus;
+const PrimalPivotRowStatus = @import("engine.zig").PrimalPivotRowStatus;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
 fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
@@ -69,41 +70,9 @@ fn solveDualEnteringDirection(self: *SimplexEngine, problem: problem_module.Prob
 /// engine-owned SoA workspace without allocating or copying model data.
 pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
-    self.direction_requires_reinversion = false;
     if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
         self.failure_site = .direction_column;
         return .numerical_failure;
-    }
-    // HiGHS validates primal FTRAN through the pivotal row/column pair rather
-    // than forming B*x-a_q on every iteration. Keep the stronger whole-column
-    // guard periodically while the FT chain ages; a fresh factorization does
-    // not need an immediate residual reconstruction.
-    const check_full_residual = self.nla.factorization.update_count != 0 and
-        self.nla.factorization.update_count % 8 == 0;
-    if (check_full_residual and !self.directionResidualAcceptable(problem, entering_col)) {
-        self.nla.factorization.recordReinversion(.solve_residual);
-        if (self.refactorizeBasis(problem, .solve_residual) != .optimal) {
-            self.failure_site = .direction_refactor;
-            return .numerical_failure;
-        }
-        if (solveEnteringDirection(self, problem, entering_col) != .optimal) return .numerical_failure;
-        var refinement_step: usize = 0;
-        while (!self.directionResidualAcceptable(problem, entering_col)) : (refinement_step += 1) {
-            if (refinement_step >= self.numerical.max_refinement_steps) {
-                self.failure_site = .direction_refinement;
-                return .numerical_failure;
-            }
-            self.nla.factorization.solve(basis.residual_work) catch {
-                self.failure_site = .direction_refinement;
-                return .numerical_failure;
-            };
-            for (basis.pivot_direction, basis.residual_work) |*value, correction| value.* += correction;
-            self.numerical.refinement_count += 1;
-            // The captured partial aq predates refinement. Force a fresh
-            // base factorization after this pivot instead of publishing an
-            // FT update from inconsistent capture state.
-            self.direction_requires_reinversion = true;
-        }
     }
     self.observeAqDensity(basis.pivot_direction);
     self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
@@ -133,7 +102,6 @@ pub fn computeDualDirection(
         leaving_row >= problem.num_rows or
         self.dual_row_index != @as(u32, @intCast(leaving_row)))
         return .numerical_failure;
-    self.direction_requires_reinversion = false;
     const alpha_row = iteration.pivotalRow().at(entering_col);
     if (!std.math.isFinite(alpha_row)) return .numerical_failure;
 
@@ -168,34 +136,6 @@ pub fn computeDualDirection(
         );
     }
     return .ready;
-}
-
-/// Validate an updated FTRAN before its direction reaches ratio testing.
-/// A drifting FT chain can otherwise select an invalid leaving row and
-/// permanently corrupt the basis before the periodic growth gate fires.
-pub fn directionResidualAcceptable(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) bool {
-    const basis = if (self.basis) |*value| value else return false;
-    if (self.fillInternalColumn(problem, entering_col, basis.residual_work) != .optimal) return false;
-    for (basis.rhs_work, basis.residual_work) |*magnitude, rhs| magnitude.* = @abs(rhs);
-    self.subtractBasisProductWithMagnitude(
-        problem,
-        basis.pivot_direction,
-        basis.residual_work,
-        basis.rhs_work,
-    ) catch return false;
-    var residual_max: f64 = 0.0;
-    var equation_scale: f64 = 0.0;
-    for (basis.residual_work) |value| residual_max = @max(residual_max, @abs(value));
-    for (basis.rhs_work) |value| equation_scale = @max(equation_scale, value);
-    // Measure normwise backward error. Dividing only by |a_q| rejects a
-    // backward-stable solve whenever a poorly scaled basis produces a
-    // large x whose B*x terms cancel. |a_q| + |B|*|x| is the natural
-    // scale of the equations and is also what iterative refinement can
-    // meaningfully improve.
-    const relative = residual_max / @max(1.0, equation_scale);
-    self.numerical.last_ftran_relative_residual = relative;
-    self.numerical.max_ftran_relative_residual = @max(self.numerical.max_ftran_relative_residual, relative);
-    return std.math.isFinite(relative) and relative <= self.numerical.residual_tolerance;
 }
 
 /// Commit a primal pivot using the primal-owned direction vector.
@@ -270,10 +210,6 @@ fn performPivotWithDirection(
     self.dual_row_index = null;
     var forced_rebuild_reason: ?RebuildReason = null;
     const update_succeeded = blk: {
-        if (self.direction_requires_reinversion) {
-            forced_rebuild_reason = .direction_refinement;
-            break :blk false;
-        }
         if (self.fresh_factorization_pivots_remaining != 0) {
             forced_rebuild_reason = .fresh_mode;
             break :blk false;
@@ -304,7 +240,6 @@ fn performPivotWithDirection(
         };
         break :blk true;
     };
-    self.direction_requires_reinversion = false;
     self.numerical.observePivot(pivot);
     for (basis.basic_value, direction) |*basic_value, direction_value|
         basic_value.* -= step * direction_value;
@@ -441,7 +376,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
     entering_col: usize,
     entering_direction: f64,
     leaving_row: u32,
-) SolveStatus {
+) PrimalPivotRowStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
     if (row >= problem.num_rows or entering_col >= basis.reduced_cost.len) return .numerical_failure;
@@ -470,8 +405,6 @@ pub fn updateReducedCostsAfterPrimalPivot(
                 basis.tableau[column] += scaled_dual * coefficient * basis.column_scale[column];
             }
         }
-        for (basis.reduced_cost[0..problem.num_cols], basis.tableau[0..problem.num_cols]) |*reduced, tableau_entry|
-            reduced.* -= theta * tableau_entry;
     } else {
         for (0..problem.num_cols) |column| {
             const begin = problem.matrix.col_starts[column];
@@ -483,24 +416,34 @@ pub fn updateReducedCostsAfterPrimalPivot(
                 tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
             }
             basis.tableau[column] = tableau_entry;
-            basis.reduced_cost[column] -= theta * tableau_entry;
         }
     }
     const artificial_begin = problem.num_cols + problem.num_rows;
     for (0..problem.num_rows) |logical_row| {
-        const multiplier = theta * basis.residual_work[logical_row];
         basis.tableau[problem.num_cols + logical_row] = basis.residual_work[logical_row];
         basis.tableau[artificial_begin + logical_row] = basis.residual_work[logical_row] * basis.artificial_sign[logical_row];
-        basis.reduced_cost[problem.num_cols + logical_row] -= multiplier;
-        basis.reduced_cost[artificial_begin + logical_row] -= multiplier * basis.artificial_sign[logical_row];
     }
+    const alpha_row = basis.tableau[entering_col];
+    const minimum_alpha = @min(@abs(actual_pivot), @abs(alpha_row));
+    const relative_difference = if (minimum_alpha == 0.0)
+        (if (actual_pivot == alpha_row) 0.0 else std.math.inf(f64))
+    else
+        @abs(@abs(actual_pivot) - @abs(alpha_row)) / minimum_alpha;
+    if ((!std.math.isFinite(relative_difference) or relative_difference > 1e-7) and
+        self.nla.factorization.update_count > 0)
+    {
+        self.nla.factorization.recordReinversion(.solve_residual);
+        return .rebuild_required;
+    }
+    for (basis.reduced_cost, basis.tableau) |*reduced, tableau_entry|
+        reduced.* -= theta * tableau_entry;
     basis.reduced_cost[entering_col] = 0.0;
     for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
     if (self.pricing.rule == .devex and self.active_devex_strategy == .framework and
         self.updatePrimalDevexFramework(entering_col, row, actual_pivot) != .optimal)
         return .numerical_failure;
     self.reduced_cost_update_count += 1;
-    return .optimal;
+    return .ready;
 }
 
 /// Recompute reduced costs exactly from the original scaled objective.

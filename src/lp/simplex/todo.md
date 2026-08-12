@@ -446,7 +446,7 @@ Phase I、Phase II 或 zero-cost repair controller 在各自 work state 中 rebu
 保留为 source-equivalent transaction boundary；下一步处理 primal 路径中 HiGHS 不存在的每 8 update
 全列残差 gate。
 
-### F0x — HiGHS primal pivot verification（协议）
+### F0x — HiGHS primal pivot verification（完成）
 
 HiGHS primal 不每 8 updates 构造 `B*x-a_q`；它在 CHUZR 确定 row 后执行一次 unit BTRAN + PRICE，并用
 `alpha_col` 对比 `alpha_row`，阈值同 dual 为 `1e-7`。mismatch 只请求 rebuild，禁止提交旧 pivot。
@@ -457,6 +457,13 @@ F0v 后的 3 次 solve-residual 正来自这里。
 entering column) 的 alpha-row 独立校验，并返回 typed `ready/rebuild_required/failure`；Phase I/II controller
 各自 exact reprice 后重新选择。终局 residual validation 不变。验收 ReleaseFast、grow7 路径和 40-model
 correctness/aggregate；数值 trouble 不得通过调宽模型阈值规避。
+
+periodic whole-column residual/refinement 及其跨 pivot 状态已删除；primal pivotal-row producer 现在先完整
+生成 BTRAN/PRICE row，按 HiGHS `1e-7` 比较 `alpha_col/alpha_row`，通过后才更新 reduced costs，失败则
+由 Phase I/II controller rebuild、exact reprice 并重新选择。ReleaseFast 全测和 forced-dual correctness
+**40/40 PASS**。grow7 `482→486`（HiGHS 339），solve-residual `3→1`、总 reinversion `5→4`；全 corpus
+aggregate `11725→11729`（HiGHS 8774）。4-pivot 增量来自唯一真实 mismatch 后重新选择，是正确 transaction
+语义；下一步清除 pivot commit 中剩余的模型形状分支，并继续对齐 basis move/status lifecycle。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

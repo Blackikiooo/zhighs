@@ -78,6 +78,8 @@ pub const LogLevel = enum { off, iterations };
 pub const SolveStatus = solution_module.SolveStatus;
 /// Internal result of the dual pivotal-column producer.
 pub const DualDirectionStatus = enum { ready, rebuild_required, numerical_failure };
+/// Internal result of producing and verifying a primal pivotal row.
+pub const PrimalPivotRowStatus = enum { ready, rebuild_required, numerical_failure };
 /// Internal stage at which an unrecovered numerical failure occurred.
 pub const FailureSite = enum {
     none,
@@ -695,8 +697,6 @@ pub const SimplexEngine = struct {
     dual_phase_one_initial_leaving_row: ?u32 = null,
     /// Public progress phase currently reported by callbacks.
     current_phase: SolvePhase = .phase_two,
-    /// Entering-column refinement requested reinversion instead of FT update.
-    direction_requires_reinversion: bool = false,
     /// Pivots still forced to use a fresh factorization after an accuracy warning.
     fresh_factorization_pivots_remaining: usize = 0,
     /// Incremental reduced-cost updates since the last exact reprice.
@@ -1008,7 +1008,6 @@ pub const SimplexEngine = struct {
                 self.numerical = numerical_before_dual_phase_one;
                 self.pricing = pricing_before_dual_phase_one;
                 self.failure_site = .none;
-                self.direction_requires_reinversion = false;
                 self.reduced_cost_update_count = 0;
                 self.dual_edge_weights_valid = true;
                 const checkpoint_view = basis_snapshot_module.BasisView{
@@ -1032,7 +1031,6 @@ pub const SimplexEngine = struct {
             self.numerical = numerical_before_dual_phase_one;
             self.pricing = pricing_before_dual_phase_one;
             self.failure_site = .none;
-            self.direction_requires_reinversion = false;
             self.fresh_factorization_pivots_remaining = 0;
             self.reduced_cost_update_count = 0;
             self.dual_candidate_count = 0;
@@ -1073,7 +1071,6 @@ pub const SimplexEngine = struct {
     pub const computeDirection = @import("engine_pivot.zig").computeDirection;
     pub const computeDualDirection = @import("engine_pivot.zig").computeDualDirection;
     pub const performDualPivot = @import("engine_pivot.zig").performDualPivot;
-    pub const directionResidualAcceptable = @import("engine_pivot.zig").directionResidualAcceptable;
     pub const performPivot = @import("engine_pivot.zig").performPivot;
     pub const recomputeReducedCostsFromWork = @import("engine_pivot.zig").recomputeReducedCostsFromWork;
 
