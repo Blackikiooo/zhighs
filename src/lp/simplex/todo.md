@@ -465,7 +465,7 @@ periodic whole-column residual/refinement 及其跨 pivot 状态已删除；prim
 aggregate `11725→11729`（HiGHS 8774）。4-pivot 增量来自唯一真实 mismatch 后重新选择，是正确 transaction
 语义；下一步清除 pivot commit 中剩余的模型形状分支，并继续对齐 basis move/status lifecycle。
 
-### F0y — bound-derived leaving status（协议）
+### F0y — bound-derived leaving status（完成）
 
 HiGHS `updatePivots` 对所有模型先检查 outgoing variable 的 `workLower == workUpper`：相等时 value 取唯一
 bound、nonbasic move 为 0；否则才按 `move_out` 选择 lower/upper。Zig 仅对 65–95 row 且超宽模型把相等
@@ -475,6 +475,13 @@ bounds 提交为 `.fixed`，其他模型错误保留 `.at_lower/.at_upper`，使
 删除尺寸判断，对任意 finite/infinite 表示下的相等 bound 统一提交 `.fixed`；非 fixed 继续使用 ratio test
 给出的 leaving side。复用 `nonbasicStatusForBounds` 的状态语义，不增加 hot-loop 动态分派。验收
 ReleaseFast、40-model correctness/aggregate 和 fixed-bound unit coverage。
+
+模型尺寸分支已删除，所有 outgoing fixed variable 统一提交 `.fixed` 和唯一 bound；非 fixed 仍保留 ratio
+test side，并增加纯状态单测。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。aggregate
+`11729→9930`（HiGHS 8774，差距 `33.7%→13.2%`）；`shell 1367→558`（HiGHS 623）、
+`scorpion 824→322`（精确等于 HiGHS）、`brandy 695→304`（精确等于 HiGHS），另有
+`lotfi 254→229`、`etamacro 514→495`。这确认 fixed move 的模型补丁是三条最大长路径的共同根因；下一步
+删除 setup scaling 中同形状的 unit-scale override，恢复统一 HiGHS scaling policy。
 
 ## 1. HiGHS serial dual simplex 算法路径
 

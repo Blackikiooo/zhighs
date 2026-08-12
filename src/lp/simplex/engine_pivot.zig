@@ -29,6 +29,14 @@ const DualDirectionStatus = @import("engine.zig").DualDirectionStatus;
 const PrimalPivotRowStatus = @import("engine.zig").PrimalPivotRowStatus;
 const RebuildReason = @import("engine.zig").RebuildReason;
 
+inline fn committedLeavingStatus(
+    lower: f64,
+    upper: f64,
+    requested: basis_module.BasisStatus,
+) basis_module.BasisStatus {
+    return if (lower == upper) .fixed else requested;
+}
+
 fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     if (self.nla.factorization.supportsSparseUpdateRhs()) {
@@ -248,13 +256,11 @@ fn performPivotWithDirection(
     basis.basic_lower[leaving_row] = basis.col_lower[entering_col];
     basis.basic_upper[leaving_row] = basis.col_upper[entering_col];
     basis.primal[entering_col] = entering_value;
-    const ultrawide_fixed_move_semantics = problem.num_rows >= 65 and problem.num_rows <= 95 and
-        problem.num_cols >= problem.num_rows * 8;
-    const committed_leaving_status: basis_module.BasisStatus = if (ultrawide_fixed_move_semantics and
-        basis.col_lower[leaving_col] == basis.col_upper[leaving_col])
-        .fixed
-    else
-        leaving_bound;
+    const committed_leaving_status = committedLeavingStatus(
+        basis.col_lower[leaving_col],
+        basis.col_upper[leaving_col],
+        leaving_bound,
+    );
     basis.primal[leaving_col] = if (committed_leaving_status == .at_upper)
         basis.col_upper[leaving_col]
     else
@@ -575,6 +581,17 @@ test "reinversion preserves DSE validity only in original-objective Phase II" {
     engine.dual_dse_updates_since_start = 1;
     try std.testing.expectEqual(SolveStatus.optimal, engine.finishRefactorization());
     try std.testing.expect(!engine.dual_edge_weights_valid);
+}
+
+test "leaving status is fixed whenever bounds coincide" {
+    try std.testing.expectEqual(
+        basis_module.BasisStatus.fixed,
+        committedLeavingStatus(2.0, 2.0, .at_upper),
+    );
+    try std.testing.expectEqual(
+        basis_module.BasisStatus.at_lower,
+        committedLeavingStatus(0.0, 2.0, .at_lower),
+    );
 }
 
 /// Feed the current factor pivot spread into the numerical warning policy.
