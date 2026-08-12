@@ -736,6 +736,13 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `refinery 1087 vs 396` 和 `gas11 1127 vs 699` 的主要控制器差异。F1a 将先引入独立
   `possibly_optimal` 数值 rebuild reason 和“首次 no-row 请求 rebuild、fresh no-row 才提交”的
   原子边界；定向验收 refinery/gas11/grow7，随后跑 forced-dual 40-model correctness 和 aggregate。
+  F1a 实现结果：新增的 reason 已贯通数值 rebuild 分类和 benchmark 诊断；Phase-I no-row 在
+  `has_fresh_rebuild=false` 时请求完整 rebuild，只有 fresh no-row 才提交。ReleaseFast 全测通过，
+  定向 3/3 和 forced-dual 40-model correctness **40/40 PASS**。refinery 确实新增 1 次
+  `possibly_optimal` reinversion，但 committed iterations 保持 `1087`；gas11/grow7 仍为
+  `1127/486`，全语料 aggregate 仍为 `9926 vs 8774`。因此旧状态提前提交已被排除，F1 的下一根因
+  是 fresh no-row 后缺少 `assessPhase1Optimality` 的 objective/去扰动/重入协议，而不是 rebuild
+  本身。
 - [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。

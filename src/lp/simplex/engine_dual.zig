@@ -754,7 +754,23 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         var leaving_choice: ?pricing_module.DualLeavingChoice = null;
         if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal)
             return .not_implemented;
-        const leaving = leaving_choice orelse break;
+        const leaving = leaving_choice orelse {
+            // HEkkDual treats no-row as only "possibly optimal": an updated
+            // basis must cross the complete rebuild boundary before Phase I
+            // may consume that result. A basis already rebuilt by the pivot
+            // path has update_count == 0 and may commit the fresh decision.
+            if (!self.dual_control.has_fresh_rebuild) {
+                self.dual_control.requestRebuild(.possibly_optimal);
+                const refactor_reason: ?RebuildReason = if (self.nla.factorization.update_count != 0)
+                    .possibly_optimal
+                else
+                    null;
+                if (rebuildDualState(self, problem, true, refactor_reason, true) == null)
+                    return .not_implemented;
+                continue;
+            }
+            break;
+        };
         if (self.dual_phase_one_initial_leaving_row == null)
             self.dual_phase_one_initial_leaving_row = leaving.row;
         if (self.active_dual_edge_weight_strategy == .steepest_devex and

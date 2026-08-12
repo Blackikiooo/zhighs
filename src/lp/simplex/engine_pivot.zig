@@ -510,6 +510,7 @@ pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemVie
     }
     switch (reason) {
         .phase_one_setup => self.stats.rebuild_phase_one_setup += 1,
+        .possibly_optimal => self.stats.rebuild_possibly_optimal += 1,
         .solve_residual => self.stats.rebuild_solve_residual += 1,
         .small_pivot => self.stats.rebuild_small_pivot += 1,
         .update_limit => self.stats.rebuild_update_limit += 1,

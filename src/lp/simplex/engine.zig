@@ -490,6 +490,8 @@ pub const SimplexStats = struct {
     column_pricing_dispatches: usize = 0,
     /// Rebuilds requested to set up Phase I.
     rebuild_phase_one_setup: usize = 0,
+    /// Rebuilds requested to confirm a possibly optimal basis from fresh state.
+    rebuild_possibly_optimal: usize = 0,
     /// Rebuilds requested by solve residual validation.
     rebuild_solve_residual: usize = 0,
     /// Rebuilds requested after a small pivot.
@@ -521,7 +523,8 @@ pub const SimplexStats = struct {
 
     /// Sum rebuild counters classified by reason.
     pub fn classifiedRebuilds(self: SimplexStats) usize {
-        return self.rebuild_phase_one_setup + self.rebuild_solve_residual + self.rebuild_small_pivot +
+        return self.rebuild_phase_one_setup + self.rebuild_possibly_optimal +
+            self.rebuild_solve_residual + self.rebuild_small_pivot +
             self.rebuild_update_limit + self.rebuild_update_growth + self.rebuild_direction_refinement +
             self.rebuild_fresh_mode + self.rebuild_update_rejected + self.rebuild_cleanup +
             self.rebuild_edge_weight_reset + self.rebuild_numerical_policy;
@@ -574,6 +577,7 @@ pub const IterationCounters = struct {
 /// Reason the numerical factorization layer requests a basis rebuild.
 pub const RebuildReason = enum {
     phase_one_setup,
+    possibly_optimal,
     solve_residual,
     small_pivot,
     update_limit,
