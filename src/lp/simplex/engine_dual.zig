@@ -311,12 +311,18 @@ fn solveDualLoop(
                 fresh_no_entering_basis = true;
                 continue;
             }
-            // Exact-cost dual infeasibility after the perturbed Phase II
-            // re-enters dual Phase I with the restored basis, matching
-            // HEkkDual::assessPhase1Optimality. Never cold-fall-back to the
-            // artificial primal Phase I from this boundary: the warm basis is
-            // the productive continuation. The depth guard keeps the legacy
-            // fallback for re-entry sequences that cannot terminate.
+            // Exact-cost dual infeasibility after the perturbed Phase II:
+            // a primal-feasible basis finishes through HiGHS' warm
+            // dual-to-primal cleanup, while a still-primal-infeasible basis
+            // re-enters dual Phase I per assessPhase1Optimality. Never
+            // cold-fall-back from this boundary.
+            if (!original_feasibility.dual and original_feasibility.primal) {
+                self.shifted_dual_exit = .original_dual_infeasible;
+                self.failure_site = .none;
+                self.algorithm = .primal_revised;
+                self.pricing.rule = saved_pricing_rule;
+                return self.solvePrimal(problem, control);
+            }
             if (self.dual_control.phase_one_reentries < 3) {
                 self.dual_control.phase_one_reentries += 1;
                 self.shifted_dual_exit = .original_dual_infeasible;
@@ -460,6 +466,18 @@ fn solveDualLoop(
                             self.shifted_dual_exit = .phase_two_fresh_infeasible;
                             return .infeasible;
                         }
+                    }
+                    if (!cleaned.dual and cleaned.primal) {
+                        // HiGHS dual-to-primal cleanup: the perturbed dual
+                        // pass reached primal feasibility, so finish the few
+                        // remaining exact-cost dual violations with warm
+                        // primal simplex instead of cold-falling-back or
+                        // cycling through a futile Phase-I re-entry.
+                        self.shifted_dual_exit = .original_dual_infeasible;
+                        self.failure_site = .none;
+                        self.algorithm = .primal_revised;
+                        self.pricing.rule = saved_pricing_rule;
+                        return self.solvePrimal(problem, control);
                     }
                     if (!cleaned.dual and self.dual_control.phase_one_reentries < 3) {
                         self.dual_control.phase_one_reentries += 1;
@@ -762,6 +780,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // A dual-feasible cold start does not need Phase-I bounds. HiGHS keeps
     // the freshly perturbed objective and enters Phase II directly, using the
     // perturbation to break CHUZC ties before exact-cost cleanup.
+
     if (self.dual_control.unperturbed_dual_infeasibility_count == 0) {
         const correction = rebuildDualState(self, problem, true, null, true) orelse return .not_implemented;
         if (correction.free_infeasibility_count != 0 or !self.classifyFeasibility(problem).dual)
@@ -784,12 +803,29 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // measures remaining infeasibility.
     self.dual_work.installWorkingBounds(basis, original_count);
     if (self.active_dual_initialization_strategy == .highs) {
-        self.dual_phase_one.initial_flips = self.dual_work.correctInitialDualInfeasibilities(
-            basis,
-            original_count,
-            self.numerical.dual_tolerance,
-        );
-        self.dual_phase_one.initial_objective = self.dual_work.dualObjective(basis, original_count);
+        if (self.dual_control.phase_one_reentries > 0) {
+            // Warm re-entry: HiGHS' first rebuild applies the complete
+            // correctDualInfeasibilities (boxed flips and one-sided cost
+            // shifts), so the remaining dual infeasibilities are encoded
+            // into the Phase-I work state. The initial-only variant skips
+            // collapsed boxed columns and would leave the re-entry without
+            // any Phase-I work.
+            const correction = self.dual_work.correctDualInfeasibilities(
+                basis,
+                original_count,
+                self.numerical.dual_tolerance,
+                false,
+            );
+            self.dual_phase_one.initial_flips = correction.flip_count;
+            self.dual_phase_one.initial_objective = self.dual_work.dualObjective(basis, original_count);
+        } else {
+            self.dual_phase_one.initial_flips = self.dual_work.correctInitialDualInfeasibilities(
+                basis,
+                original_count,
+                self.numerical.dual_tolerance,
+            );
+            self.dual_phase_one.initial_objective = self.dual_work.dualObjective(basis, original_count);
+        }
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.active_dual_initialization_strategy == .highs and
