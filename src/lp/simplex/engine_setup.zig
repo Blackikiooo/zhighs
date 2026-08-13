@@ -63,33 +63,41 @@ pub fn installArtificialPhaseOneBasis(self: *SimplexEngine, problem: problem_mod
         const logical_col = problem.num_cols + row;
         const artificial_col = problem.num_cols + problem.num_rows + row;
         if (!std.math.isFinite(value.*)) return .numerical_failure;
+        const old_basic: usize = @intCast(basis.basic_index[row]);
+        // A warm basis may retire a structural basic; the cold logical case
+        // is identical since old_basic == logical_col there.
         if (value.* < lower - self.numerical.primal_tolerance) {
-            basis.primal[logical_col] = lower;
-            basis.col_status[logical_col] = .at_lower;
-            basis.basic_pos[logical_col] = std.math.maxInt(u32);
-            basis.artificial_sign[row] = -1.0;
+            basis.primal[old_basic] = lower;
+            basis.col_status[old_basic] = .at_lower;
+            basis.basic_pos[old_basic] = std.math.maxInt(u32);
+            // The artificial column points along the violation so its
+            // nonnegative value repairs the row: +e_row for a structural
+            // replacement, the logical-orientation sign otherwise.
+            basis.artificial_sign[row] = if (old_basic == logical_col) -1.0 else 1.0;
             value.* = lower - value.*;
             basis.basic_index[row] = @intCast(artificial_col);
             basis.basic_pos[artificial_col] = @intCast(row);
             basis.col_status[artificial_col] = .basic;
+            basis.col_lower[artificial_col] = 0.0;
             basis.col_upper[artificial_col] = std.math.inf(f64);
             basis.basic_lower[row] = 0.0;
             basis.basic_upper[row] = std.math.inf(f64);
             self.phase1_needed = true;
         } else if (value.* > upper + self.numerical.primal_tolerance) {
-            basis.primal[logical_col] = upper;
-            basis.col_status[logical_col] = .at_upper;
-            basis.basic_pos[logical_col] = std.math.maxInt(u32);
-            basis.artificial_sign[row] = 1.0;
+            basis.primal[old_basic] = upper;
+            basis.col_status[old_basic] = .at_upper;
+            basis.basic_pos[old_basic] = std.math.maxInt(u32);
+            basis.artificial_sign[row] = if (old_basic == logical_col) 1.0 else -1.0;
             value.* -= upper;
             basis.basic_index[row] = @intCast(artificial_col);
             basis.basic_pos[artificial_col] = @intCast(row);
             basis.col_status[artificial_col] = .basic;
+            basis.col_lower[artificial_col] = 0.0;
             basis.col_upper[artificial_col] = std.math.inf(f64);
             basis.basic_lower[row] = 0.0;
             basis.basic_upper[row] = std.math.inf(f64);
             self.phase1_needed = true;
-        } else {
+        } else if (old_basic == logical_col) {
             basis.primal[logical_col] = value.*;
         }
     }

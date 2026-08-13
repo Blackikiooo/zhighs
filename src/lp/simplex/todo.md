@@ -752,6 +752,18 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 ### F. Phase exit、cleanup 和结论
 
 - [ ] F1 对齐 Phase-I objective assessment、remove perturbation 和 Phase-I re-entry。
+  2026-08-12 gas11 差分收口（gdb 捕获 HiGHS (iter, in, out, theta_dual, theta_primal, update_count,
+  flip_count) 与 zig trace 逐项对比）：pivot 序列 0-225 完全一致，primal step 在 117 处出现
+  1-ulp 漂移并在 120 被小 alpha 放大（轨迹仍一致）；组合分叉在 226（CHUZR 选行 194 vs 28，
+  HiGHS 的 row-28 pivot 出现在其 262）。结构性根因修复已提交：Phase-I CHUZC no-entering 且
+  flip_count==0 从硬退出改为 possibly-optimal rebuild+重选、小 pivot 从硬退出改为 small_pivot
+  rebuild+重选、zero-objective 分支 free infeasibility 温重入 Phase I。gas11 现在以 HiGHS 的
+  精确 possibly-optimal 态退出（objective -12266.4、483 vs 485 pivots、15 dual infeasibilities），
+  aggregate 暂 9324→9354。否定实验（已撤销）：从 dual 可能最优态直接暖换 artificial 的
+  暖 primal Phase I——对结构性旧基的直接列交换使基奇异（refactorize pivot_factorization 失败），
+  需要 HiGHS 式的 basis crossover/Phase-I 转换设计（下一轮）；installArtificialPhaseOneBasis
+  的旧基退役泛化（冷路径等价）保留。
+
   2026-08-12 源码协议核对（HiGHS `HEkkDual::solvePhase1`、`rebuild`、
   `assessPhase1Optimality`）：CHUZR 返回 no-row 只产生 `possibly_optimal` rebuild reason，不能直接
   退出 Phase I。控制器必须先以当前 Phase-I bounds/cost 完成一次完整 fresh rebuild（必要时

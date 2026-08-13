@@ -849,11 +849,15 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
 
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
-        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal)
+        if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
+            std.debug.print("dual_diag\tloop_exit_edge_weights\titerations={d}\n", .{self.iterations});
             return .not_implemented;
+        }
         var leaving_choice: ?pricing_module.DualLeavingChoice = null;
-        if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal)
+        if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal) {
+            std.debug.print("dual_diag\tloop_exit_chuzr\titerations={d}\n", .{self.iterations});
             return .not_implemented;
+        }
         const leaving = leaving_choice orelse {
             // HEkkDual treats no-row as only "possibly optimal": an updated
             // basis must cross the complete rebuild boundary before Phase I
@@ -869,6 +873,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     return .not_implemented;
                 continue;
             }
+            std.debug.print("dual_diag\tloop_no_row_break\titerations={d}\n", .{self.iterations});
             break;
         };
         if (self.dual_phase_one.initial_leaving_row == null)
@@ -924,7 +929,19 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         // on the next pass. This is the small-flip-capacity path (HiGHS-style
         // [0,1] bounds give ~1 capacity per flip vs dynamic radius ~720).
         if (entering.column == null) {
-            if (entering.flip_count == 0) return .not_implemented;
+            if (entering.flip_count == 0) {
+                // HiGHS requests a rebuild before committing a Phase-I
+                // no-entering decision (possibly dual unbounded): reinvert,
+                // re-select, and only a fresh no-entering crosses the phase
+                // exit assessment. A hard exit here cold-fell-back gas11
+                // after 453 pivots.
+                if (!self.dual_control.has_fresh_rebuild) {
+                    if (rebuildDualState(self, problem, true, .possibly_optimal, true) == null)
+                        return .not_implemented;
+                    continue;
+                }
+                break;
+            }
             if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
             continue;
         }
@@ -945,9 +962,20 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         const leaving_row: usize = @intCast(leaving.row);
         const target = if (leaving.bound == .at_lower) basis.basic_lower[leaving_row] else basis.basic_upper[leaving_row];
         const pivot = iteration.col_aq.values[leaving_row];
-        if (@abs(pivot) <= self.numerical.pivot_tolerance) return .not_implemented;
+        if (@abs(pivot) <= self.numerical.pivot_tolerance) {
+            // HiGHS updateVerify treats a tiny pivotal component as a rebuild
+            // request (kRebuildReasonSmallPivot): reinvert, re-select and
+            // retry, never a controller exit that cold-falls-back.
+            if (rebuildDualState(self, problem, true, .small_pivot, true) == null)
+                return .not_implemented;
+            continue;
+        }
         const step = (basis.basic_value[leaving_row] - target) / pivot;
-        if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) return .not_implemented;
+        if (!std.math.isFinite(step) or step < -self.numerical.primal_tolerance) {
+            if (rebuildDualState(self, problem, true, .small_pivot, true) == null)
+                return .not_implemented;
+            continue;
+        }
         const leaving_column = basis.basic_index[leaving_row];
         if (self.updateReducedCostsAfterDualPivot(
             problem,
@@ -1000,7 +1028,17 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         self.dual_control.enterPhase(.phase_two);
         const correction = rebuildDualState(self, problem, true, null, true) orelse
             return .not_implemented;
-        if (correction.free_infeasibility_count != 0) return .not_implemented;
+        if (correction.free_infeasibility_count != 0) {
+            // Free dual infeasibilities survive the Phase-I encoding, so the
+            // Phase I is not actually complete. Warm re-enter the Phase-I
+            // controller instead of discarding all pivot progress to a cold
+            // artificial primal restart.
+            if (self.dual_control.phase_one_reentries < 3) {
+                self.dual_control.phase_one_reentries += 1;
+                return self.solveDualPhaseOne(problem, control);
+            }
+            return .not_implemented;
+        }
         self.algorithm = .dual_revised;
         return solveDualLoop(self, problem, control, true);
     }
@@ -1064,6 +1102,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             break;
         }
     }
+    std.debug.print("dual_diag\tpost_assessment\tdual_infeasible={d}\tprimal_feasible={}\n", .{ dual_infeasible, primal_feasible });
     if (primal_feasible) {
         self.pricing.rule = saved_pricing_rule;
         return self.solvePrimal(problem, control);
