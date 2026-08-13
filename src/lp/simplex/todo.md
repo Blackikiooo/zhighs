@@ -665,6 +665,15 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `114/293/1738/1079/413/105/358/104/670` 与安全基线完全一致。诊断 trace 证实 `bore3d`
   没有 bound-active missing move。CHUZC1 pack 顺序与 row scale 仍待逐项 trace 对齐。
 - [ ] D2 对齐 CHUZC2 dynamic Ta/Td 和 CHUZC3 large-step 的输入/输出。
+  2026-08-12 CHUZC2 非正 workTheta 前置检查已实现：候选保留负松弛比率，CHUZC2 最小值 <=0
+  时在 CHUZC3 扩张前返回 no-entering（对应 HiGHS `workTheta<=0 → PossiblyDualUnbounded`
+  rebuild 边界），替换原 per-candidate 负 ratio 早退。forced-dual 40/40、aggregate 9892
+  不变——gas11 的当前分叉在 CHUZR no-row 而非 CHUZC。gas11 差分复核：Phase-I 目标轨迹与
+  HiGHS 偏移 1 个退化 pivot 后重合，zig 在 453 处 CHUZR no-row 提前退出（HiGHS DuPh1 485、
+  objective≈-12266、Du: 14(10987.7) Possibly optimal）；随后 zig 冷回退 primal Ph1 520 +
+  Ph2 154，HiGHS 从当前基热切 PrPh1 97 + PrPh2 109 + PrSwap 88 = 691。下一根因指向 C1
+  的 RHS infeasibility list/CHUZR 生命周期（F0n 曾记录 workCount 103 vs 209 的 list 差异），
+  而非 CHUZC 或 phase exit。
 - [ ] D3 启用已实现的 CHUZC4 grouping/large-alpha/strict flip set/permutation tie。
 - [ ] D4 实现 small-pivot iterative refinement、quad PRICE、删除 pivot后重跑。
 - 验收：四模型前 20 次 entering column、alpha、theta、flip set 一致。

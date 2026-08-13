@@ -289,12 +289,9 @@ pub const RatioTest = struct {
                 .fixed => unreachable,
                 else => unreachable,
             };
-            // A zero relaxed ratio is the valid shiftCost path retained by
-            // HiGHS. A genuinely negative ratio means the caller violated
-            // CHUZC's dual-feasible precondition; keep it out of the
-            // multiplicative CHUZC3 expansion until that controller state is
-            // rebuilt, otherwise a negative theta moves away from termination.
-            if (chuzc.highs_choose_possible and ratio < 0.0) return .{};
+            // HiGHS retains every candidate here, including negative relaxed
+            // ratios: the CHUZC2 minimum decides the rebuild below, and a
+            // nonpositive workTheta never reaches CHUZC3 expansion.
             ratio_work[column] = ratio;
             direction_work[column] = direction;
             candidate_work[candidate_count] = @intCast(column);
@@ -303,6 +300,22 @@ pub const RatioTest = struct {
         if (candidate_count == 0) {
             if (chuzc.trace_chuzc) std.debug.print("chuzc_exit\treason=no_candidate\n", .{});
             return .{};
+        }
+
+        // HiGHS checks the CHUZC2 minimum relaxed ratio before any CHUZC3
+        // expansion: a nonpositive workTheta requests a possibly-dual-
+        // unbounded rebuild instead of a candidate selection.
+        if (chuzc.highs_choose_possible) {
+            var work_theta = std.math.inf(f64);
+            for (candidate_work[0..candidate_count]) |column_u32|
+                work_theta = @min(work_theta, ratio_work[column_u32]);
+            if (work_theta <= 0.0) {
+                if (chuzc.trace_chuzc) std.debug.print(
+                    "chuzc_exit\treason=nonpositive_work_theta\ttheta={e:.17}\tcandidates={d}\n",
+                    .{ work_theta, candidate_count },
+                );
+                return .{};
+            }
         }
 
         // HiGHS CHUZC3 grows a relaxed step until the selected subset has
