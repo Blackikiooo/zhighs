@@ -109,6 +109,8 @@ pub const DualRHSState = struct {
     candidate_row: []u32 = &.{},
     /// Weighted CHUZR merits parallel to `candidate_row`.
     candidate_score: []f64 = &.{},
+    /// Scratch merits for the hyper-sparse cutoff selection; row-sized.
+    merit_work: []f64 = &.{},
 };
 
 /// Solution-state measurements recorded at the most recent dual rebuild.
@@ -207,6 +209,7 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.rhs.changed_row_index);
         self.allocator.free(self.rhs.candidate_row);
         self.allocator.free(self.rhs.candidate_score);
+        self.allocator.free(self.rhs.merit_work);
         self.allocator.free(self.checkpoint.status);
         self.allocator.free(self.checkpoint.basic_index);
         self.* = .{ .allocator = self.allocator };
@@ -248,6 +251,8 @@ pub const DualPhaseOneWorkspace = struct {
         errdefer self.allocator.free(candidate_row);
         const candidate_score = try self.allocator.alloc(f64, count);
         errdefer self.allocator.free(candidate_score);
+        const merit_work = try self.allocator.alloc(f64, count);
+        errdefer self.allocator.free(merit_work);
         const checkpoint_status = try self.allocator.alloc(basis_module.BasisStatus, count);
         errdefer self.allocator.free(checkpoint_status);
         const checkpoint_basic_index = try self.allocator.alloc(u32, count);
@@ -269,6 +274,7 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.rhs.changed_row_index);
         self.allocator.free(self.rhs.candidate_row);
         self.allocator.free(self.rhs.candidate_score);
+        self.allocator.free(self.rhs.merit_work);
         self.allocator.free(self.checkpoint.status);
         self.allocator.free(self.checkpoint.basic_index);
         self.saved_lower = lower;
@@ -287,6 +293,7 @@ pub const DualPhaseOneWorkspace = struct {
         self.rhs.changed_row_index = changed_row_index;
         self.rhs.candidate_row = candidate_row;
         self.rhs.candidate_score = candidate_score;
+        self.rhs.merit_work = merit_work;
         self.checkpoint.status = checkpoint_status;
         self.checkpoint.basic_index = checkpoint_basic_index;
         self.checkpoint.valid = false;
@@ -312,9 +319,11 @@ pub const DualPhaseOneWorkspace = struct {
         basis: *const basis_module.BasisState,
         num_rows: usize,
         tolerance: f64,
+        column_density: f64,
     ) bool {
         if (num_rows > basis.basic_value.len or num_rows > self.rhs.primal_infeasibility.len or
             num_rows > self.rhs.infeasibility_index.len or num_rows > self.rhs.infeasibility_mark.len) return false;
+        if (basis.row_edge_weight.len < num_rows or self.rhs.merit_work.len < num_rows) return false;
         @memset(self.rhs.infeasibility_mark[0..num_rows], 0);
         self.rhs.infeasibility_count = 0;
         self.rhs.infeasibility_cutoff = 0.0;
@@ -332,6 +341,55 @@ pub const DualPhaseOneWorkspace = struct {
             self.rhs.infeasibility_index[self.rhs.infeasibility_count] = @intCast(row);
             self.rhs.infeasibility_count += 1;
         }
+        // HiGHS trims a long candidate list with a sparse entering column to
+        // its highest-merit entries: `workCount > max(numRow*0.01, 500) &&
+        // col_aq_density < 0.05`. The cutoff persists into updateInfeasList
+        // until the next list rebuild.
+        const row_fraction: f64 = @as(f64, @floatFromInt(num_rows)) * 0.01;
+        if (@as(f64, @floatFromInt(self.rhs.infeasibility_count)) > @max(row_fraction, 500.0) and
+            column_density < 0.05)
+        {
+            const icutoff: usize = @max(
+                @as(usize, @intFromFloat(@as(f64, @floatFromInt(self.rhs.infeasibility_count)) * 0.001)),
+                @as(usize, 500),
+            );
+            var max_merit: f64 = 0.0;
+            var put: usize = 0;
+            for (0..num_rows) |row| {
+                if (self.rhs.infeasibility_mark[row] == 0) continue;
+                const merit = self.rhs.primal_infeasibility[row] / basis.row_edge_weight[row];
+                if (max_merit < merit) max_merit = merit;
+                self.rhs.merit_work[put] = -merit;
+                put += 1;
+            }
+            // HiGHS uses std::nth_element here; a full ascending sort of the
+            // negated merits yields the same order statistic at `icutoff`.
+            std.sort.pdq(f64, self.rhs.merit_work[0..put], {}, std.sort.asc(f64));
+            const cut_merit = -self.rhs.merit_work[icutoff];
+            self.rhs.infeasibility_cutoff = @min(max_merit * 0.99999, cut_merit * 1.00001);
+            @memset(self.rhs.infeasibility_mark[0..num_rows], 0);
+            self.rhs.infeasibility_count = 0;
+            for (0..num_rows) |row| {
+                if (self.rhs.primal_infeasibility[row] >= basis.row_edge_weight[row] * self.rhs.infeasibility_cutoff) {
+                    self.rhs.infeasibility_index[self.rhs.infeasibility_count] = @intCast(row);
+                    self.rhs.infeasibility_mark[row] = 1;
+                    self.rhs.infeasibility_count += 1;
+                }
+            }
+            if (@as(f64, @floatFromInt(self.rhs.infeasibility_count)) > @as(f64, @floatFromInt(icutoff)) * 1.5) {
+                const full_count = self.rhs.infeasibility_count;
+                self.rhs.infeasibility_count = icutoff;
+                for (icutoff..full_count) |position| {
+                    const row = self.rhs.infeasibility_index[position];
+                    if (self.rhs.primal_infeasibility[row] > basis.row_edge_weight[row] * cut_merit) {
+                        self.rhs.infeasibility_index[self.rhs.infeasibility_count] = @intCast(row);
+                        self.rhs.infeasibility_count += 1;
+                    } else {
+                        self.rhs.infeasibility_mark[row] = 0;
+                    }
+                }
+            }
+        }
         if (self.rhs.infeasibility_count * 5 > num_rows) self.rhs.infeasibility_dense = true;
         self.rhs.infeasibility_list_active = true;
         return true;
@@ -339,7 +397,9 @@ pub const DualPhaseOneWorkspace = struct {
 
     /// Update values for the FTRAN output rows, then append newly infeasible
     /// rows in the solver-provided HVector-equivalent order. Existing marks
-    /// are never cleared here, matching `HEkkDualRHS::updateInfeasList`.
+    /// are never cleared here, matching `HEkkDualRHS::updateInfeasList`;
+    /// with an active hyper-sparse cutoff only rows above the merit
+    /// threshold join the list.
     pub fn updatePrimalInfeasibilityList(
         self: *DualPhaseOneWorkspace,
         basis: *const basis_module.BasisState,
@@ -358,6 +418,9 @@ pub const DualPhaseOneWorkspace = struct {
             );
             self.rhs.primal_infeasibility[row] = infeasibility;
             if (self.rhs.infeasibility_dense or infeasibility == 0.0 or self.rhs.infeasibility_mark[row] != 0) continue;
+            if (self.rhs.infeasibility_cutoff > 0.0 and
+                (row >= basis.row_edge_weight.len or
+                    infeasibility <= basis.row_edge_weight[row] * self.rhs.infeasibility_cutoff)) continue;
             if (self.rhs.infeasibility_count >= self.rhs.infeasibility_index.len) continue;
             self.rhs.infeasibility_index[self.rhs.infeasibility_count] = row_u32;
             self.rhs.infeasibility_mark[row] = 1;
@@ -366,10 +429,24 @@ pub const DualPhaseOneWorkspace = struct {
     }
 
     /// Choose a CHUZR row using HiGHS list order and weighted squared merit.
+    /// With an active hyper-sparse cutoff, a best merit at or below the
+    /// threshold triggers the same list rebuild and recursive re-choice as
+    /// `HEkkDualRHS::chooseNormal`; the depth guard bounds the recursion.
     pub fn choosePrimalInfeasibleRow(
         self: *DualPhaseOneWorkspace,
         basis: *const basis_module.BasisState,
         num_rows: usize,
+        tolerance: f64,
+    ) ?u32 {
+        return self.choosePrimalInfeasibleRowDepth(basis, num_rows, tolerance, 0);
+    }
+
+    fn choosePrimalInfeasibleRowDepth(
+        self: *DualPhaseOneWorkspace,
+        basis: *const basis_module.BasisState,
+        num_rows: usize,
+        tolerance: f64,
+        depth: usize,
     ) ?u32 {
         if (!self.rhs.infeasibility_list_active or num_rows == 0) return null;
         const scan_count = if (self.rhs.infeasibility_dense) num_rows else self.rhs.infeasibility_count;
@@ -390,9 +467,15 @@ pub const DualPhaseOneWorkspace = struct {
                 best_row = row_u32;
             }
         }
-        // A positive cutoff can require a recursive full-list rebuild in
-        // HiGHS. The cutoff path is not enabled until its >500-row selection
-        // workspace is present, so cutoff is currently always zero.
+        // Sparse mode with a hyper-sparse cutoff: rebuild the list when no
+        // row survived or the best merit has fallen below the threshold,
+        // exactly as `HEkkDualRHS::chooseNormal` recurses.
+        if (!self.rhs.infeasibility_dense and self.rhs.infeasibility_cutoff > 0.0 and depth < 4 and
+            (best_row == null or best_merit <= self.rhs.infeasibility_cutoff * 0.99))
+        {
+            if (!self.createPrimalInfeasibilityList(basis, num_rows, tolerance, 0.0)) return null;
+            return self.choosePrimalInfeasibleRowDepth(basis, num_rows, tolerance, depth + 1);
+        }
         return best_row;
     }
 
@@ -917,6 +1000,7 @@ pub const DualPhaseOneWorkspace = struct {
             std.mem.sliceAsBytes(self.rhs.changed_row_index).len +
             std.mem.sliceAsBytes(self.rhs.candidate_row).len +
             std.mem.sliceAsBytes(self.rhs.candidate_score).len +
+            std.mem.sliceAsBytes(self.rhs.merit_work).len +
             std.mem.sliceAsBytes(self.checkpoint.status).len +
             std.mem.sliceAsBytes(self.checkpoint.basic_index).len;
     }
@@ -1012,7 +1096,7 @@ test "dual RHS sparse infeasibility list retains insertion order" {
     work.updatePrimalInfeasibilityList(&basis, &.{ 2, 4 }, 1e-7);
     try std.testing.expectEqual(@as(usize, 2), work.rhs.infeasibility_count);
     try std.testing.expectEqualSlices(u32, &.{ 2, 4 }, work.rhs.infeasibility_index[0..2]);
-    try std.testing.expectEqual(@as(?u32, 4), work.choosePrimalInfeasibleRow(&basis, 5));
+    try std.testing.expectEqual(@as(?u32, 4), work.choosePrimalInfeasibleRow(&basis, 5, 1e-7));
 }
 
 test "dual infeasibility statistics use explicit move and ignore fixed" {

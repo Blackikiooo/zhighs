@@ -159,7 +159,7 @@ fn rebuildDualState(
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return null;
     if (!self.dual_work.recordRebuildState(basis, count, self.numerical.primal_tolerance)) return null;
     if (self.active_dual_initialization_strategy == .highs and
-        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance)) return null;
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance, self.col_aq_density)) return null;
     self.dual_control.finishRebuild();
     return correction;
 }
@@ -528,6 +528,7 @@ fn solveDualLoop(
                     basis,
                     problem.num_rows,
                     self.numerical.primal_tolerance,
+                    self.col_aq_density,
                 )) return .numerical_failure;
             }
             const rebuild_dual = if (use_work_costs)
@@ -792,7 +793,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.active_dual_initialization_strategy == .highs and
-        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance, self.col_aq_density))
         return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
         self.dual_phase_one.initial_max_basic_violation = @max(
@@ -923,6 +924,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     basis,
                     problem.num_rows,
                     self.numerical.primal_tolerance,
+                    self.col_aq_density,
                 )) return .not_implemented;
             }
         }
@@ -994,7 +996,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // CHUZR does not score stale Phase-I rows or initialize an unused DSE
     // framework before discovering that the basis is already primal feasible.
     if (self.active_dual_initialization_strategy == .highs and
-        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
+        !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance, self.col_aq_density))
         return .not_implemented;
 
     var dual_infeasible: usize = 0;
@@ -1531,7 +1533,7 @@ fn chooseDualLeavingWithExactDseValidation(
         const leaving = if (self.active_dual_initialization_strategy == .highs and
             self.dual_work.rhs.infeasibility_list_active)
         blk: {
-            const row_u32 = self.dual_work.choosePrimalInfeasibleRow(basis, problem.num_rows) orelse return .optimal;
+            const row_u32 = self.dual_work.choosePrimalInfeasibleRow(basis, problem.num_rows, self.numerical.primal_tolerance) orelse return .optimal;
             const row: usize = @intCast(row_u32);
             const value = basis.basic_value[row];
             if (value < basis.basic_lower[row] - self.numerical.primal_tolerance) {

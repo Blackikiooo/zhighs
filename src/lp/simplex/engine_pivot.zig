@@ -71,6 +71,10 @@ fn solveDualEnteringDirection(self: *SimplexEngine, problem: problem_module.Prob
     ) orelse return .numerical_failure;
     iteration.col_aq.index_count = count;
     self.nla.ftranForUpdate(&iteration.col_aq) catch return .numerical_failure;
+    self.col_aq_density = if (iteration.col_aq.activeIndices()) |support|
+        @as(f64, @floatFromInt(support.len)) / @as(f64, @floatFromInt(problem.num_rows))
+    else
+        -1.0;
     return .optimal;
 }
 

@@ -631,11 +631,19 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 
 ### C. CHUZR 和 edge weights
 
-- [ ] C1 对齐 DSE 初始化、scaled-space norm、1/4 低估拒绝和候选重选。数值 recurrence 和低估重选
+- [x] C1 对齐 DSE 初始化、scaled-space norm、1/4 低估拒绝和候选重选。数值 recurrence 和低估重选
   已完成。`HEkkDualRHS` 的 serial-corpus sparse infeasibility `workIndex/workMark/workCount`、平方
   infeasibility、20% dense 切换、动态追加、连续 RNG 随机起点已实现；FTRAN 输出索引按 HiGHS
   `ftranU` 的 reverse-U-pivot 顺序发布，而不是对 dense 结果做自然行号扫描。尚缺 `workCutoff`
   的 >500-candidate hyper-sparse nth-element 路径，故 C1 暂不整项勾选。
+  2026-08-12 C1 完成：`workCutoff` 的 >500-candidate hyper-sparse 路径已实现（`count >
+  max(numRow*0.01, 500) && col_aq_density < 0.05` 时按 merit 序统计量裁 list、cutoff 持久化到
+  updateInfeasList、`bestMerit <= cutoff*0.99` 时按 chooseNormal 语义重建并递归重选，深度护栏 4）；
+  engine 新增原始 `col_aq_density`（dense 时 -1.0，镜像 HiGHS 负 count）。forced-dual 40/40、
+  aggregate 9892 不变——本语料无模型同时满足 >500 候选与 <5% 密度，路径暂未被触发。gas11
+  分叉定位：迭代 ~57 处 dense-DSE CHUZR 少选一个微步长 pivot（HiGHS 在 57/58 之间多做一次
+  目标几乎不变的 pivot），后续轨迹整体偏移直至 453 处提前 no-row；下一步需 gdb 对比 HiGHS
+  chooseRow 的 DSE 权重拒绝循环与 RNG 流消耗。
 - [ ] C2 对齐 DSE recurrence、Devex framework reset、phase/reinvert 生命周期。
 - 验收：四模型前 20 次 leaving row、weight、computed weight 一致。
 

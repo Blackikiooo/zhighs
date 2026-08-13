@@ -718,6 +718,10 @@ pub const SimplexEngine = struct {
     dual_dse_ep_density: f64 = 0.0,
     dual_dse_ap_density: f64 = 0.0,
     dual_dse_tau_density: f64 = 0.0,
+    /// Raw density of the most recent entering-column FTRAN, matching
+    /// HiGHS `info_.col_aq_density`; negative mirrors a dense HVector
+    /// count. Consumed by the hyper-sparse RHS list cutoff.
+    col_aq_density: f64 = 0.0,
     /// DSE iterations classified as costly in the current framework.
     dual_dse_costly_iterations: usize = 0,
     /// Running log deviations of updated DSE weights from exact CHUZR values.
