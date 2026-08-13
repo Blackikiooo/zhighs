@@ -776,6 +776,15 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   扩张中不终止，证明 gas11 当前 work dual 尚违反 HiGHS 的 CHUZC dual-feasible 前置条件。D3a 因此
   收窄为只删除 `ratio == 0` 的错误退出并保留 `ratio < 0` 状态保护；边界单测通过。负值保护只能在
   F1b cleanup/rebuild 对齐并证明 CHUZC 入口 dual feasible 后删除，不能靠热循环 iteration cap 掩盖。
+  随后对 `phase_two_no_entering` 做 dense-vs-pack 审计发现两个 Zig 所有权错误：(1) CHUZC2 的只读
+  `packed_indices` 与原位排序/发布 BFRT prefix 的 `candidate_work` 传入同一切片，producer support 会
+  被 consumer 覆盖；(2) Phase-I collapsed boxed variable 的 move=0 在恢复原始 bounds/status/primal
+  后未同步回 ±1，导致 CHUZC 跳过合法 bound-active 变量。现已给 `DualIterationWorkspace` 增加独立
+  `candidate_indices`，并在 `restoreOriginalBounds` 原子恢复 move。ReleaseFast 全测、forced-dual
+  correctness **40/40 PASS**；aggregate `11258→10889`，逐模型 Zig 胜/平/负为 **10/25/5**。
+  `bore3d/capri/vtp-base` 与 HiGHS exact，`finnis 353 vs 354`、`grow7 296 vs 339`。剩余落后仅
+  `refinery 1359 vs 396 / etamacro 1094 vs 532 / gas11 1127 vs 699 / klein1 434 vs 134 /
+  scsd1 87 vs 86`；前四项必须从新的真实路径首次分叉继续追踪。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 

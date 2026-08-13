@@ -343,7 +343,7 @@ fn solveDualLoop(
             leaving.violation,
             iteration.work_ratio,
             iteration.work_direction,
-            iteration.pack_indices,
+            iteration.candidate_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
@@ -806,7 +806,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             leaving.violation,
             iteration.work_ratio,
             iteration.work_direction,
-            iteration.pack_indices,
+            iteration.candidate_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
                 .highs_large_step = self.active_dual_initialization_strategy == .highs,
@@ -826,7 +826,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             @intCast(leaving.row),
             leaving.violation,
             iteration.pivotalRow(),
-            iteration.pack_indices[0..entering.flip_count],
+            iteration.candidate_indices[0..entering.flip_count],
             basis.col_lower[0..original_count],
             basis.col_upper[0..original_count],
         );
@@ -1076,7 +1076,7 @@ pub fn recordDualPhaseOneNoEntering(
                 break :blk .wrong_pivot_sign;
             }
             var was_flipped = false;
-            for (iteration.pack_indices[0..flip_count]) |flipped| {
+            for (iteration.candidate_indices[0..flip_count]) |flipped| {
                 if (@as(usize, @intCast(flipped)) == column) {
                     was_flipped = true;
                     break;
@@ -1255,7 +1255,7 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
             leaving.violation,
             iteration.work_ratio,
             iteration.work_direction,
-            iteration.pack_indices,
+            iteration.candidate_indices,
             .{},
         );
         if (self.applyBoundFlips(problem, entering.flip_count) != .optimal) return .numerical_failure;
@@ -1554,8 +1554,8 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
 /// with one FTRAN, matching `HEkkDual::updateFtranBFRT`. No status, primal
 /// value, or infeasibility-list entry is published until that solve succeeds,
 /// so numerical failure cannot leave a partially committed flip batch.
-/// `flip_count` addresses the prefix of the iteration CHUZC pack produced by the
-/// ratio test. The entering-column FTRAN immediately following BFRT owns the
+/// `flip_count` addresses the mutable CHUZC candidate prefix produced by the
+/// ratio test; the read-only pivotal-row pack remains intact. The entering-column FTRAN immediately following BFRT owns the
 /// iteration's residual/reinversion guard; repeating a full basis product here
 /// made every accepted flip batch pay for a second validation absent in HiGHS.
 pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
@@ -1582,7 +1582,7 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     // Commit only after the aggregate solve succeeds. Thus an invalid
     // width, column, or numerical solve never publishes a partial batch.
     for (basis.basic_value, iteration.col_bfrt.values) |*value, displacement| value.* -= displacement;
-    for (iteration.pack_indices[0..flip_count]) |column_u32| {
+    for (iteration.candidate_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         const delta = switch (basis.col_status[column]) {
             .at_lower => basis.col_upper[column] - basis.col_lower[column],
@@ -1634,11 +1634,11 @@ pub fn accumulateBoundFlipRhs(
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
-    if (iteration.col_bfrt.values.len != problem.num_rows or flip_count > iteration.pack_indices.len)
+    if (iteration.col_bfrt.values.len != problem.num_rows or flip_count > iteration.candidate_indices.len)
         return .numerical_failure;
     iteration.col_bfrt.clear();
     @memset(iteration.col_bfrt.byte_work[0..problem.num_rows], 0);
-    for (iteration.pack_indices[0..flip_count]) |column_u32| {
+    for (iteration.candidate_indices[0..flip_count]) |column_u32| {
         const column: usize = @intCast(column_u32);
         if (column >= problem.num_cols + problem.num_rows) return .numerical_failure;
         const delta = switch (basis.col_status[column]) {
@@ -1759,8 +1759,8 @@ test "dual bound flips share one aggregate FTRAN" {
     engine.basis.?.basic_value[1] = 10;
     engine.basis.?.primal[2] = 10;
     engine.basis.?.primal[3] = 10;
-    engine.dual_iteration.?.pack_indices[0] = 0;
-    engine.dual_iteration.?.pack_indices[1] = 1;
+    engine.dual_iteration.?.candidate_indices[0] = 0;
+    engine.dual_iteration.?.candidate_indices[1] = 1;
     try engine.nla.factorization.factorizeIdentity(2);
 
     try std.testing.expectEqual(SolveStatus.optimal, engine.accumulateBoundFlipRhs(problem, 2));
@@ -1799,8 +1799,8 @@ test "BFRT support remains unique when accumulated rows cancel" {
     try engine.ensureDualIterationWorkspace(1, 2);
     engine.basis.?.col_upper[0] = 1;
     engine.basis.?.col_upper[1] = 1;
-    engine.dual_iteration.?.pack_indices[0] = 0;
-    engine.dual_iteration.?.pack_indices[1] = 1;
+    engine.dual_iteration.?.candidate_indices[0] = 0;
+    engine.dual_iteration.?.candidate_indices[1] = 1;
 
     try std.testing.expectEqual(SolveStatus.optimal, engine.accumulateBoundFlipRhs(problem, 2));
     try std.testing.expectEqualSlices(u32, &.{0}, engine.dual_iteration.?.col_bfrt.activeIndices().?);

@@ -759,31 +759,39 @@ pub const DualPhaseOneWorkspace = struct {
             const upper_finite = std.math.isFinite(upper);
             const move = self.nonbasic_move[column];
             if (lower == upper) {
+                self.nonbasic_move[column] = 0;
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = lower;
             } else if (!lower_finite and !upper_finite) {
+                self.nonbasic_move[column] = 0;
                 basis.col_status[column] = .free;
                 basis.primal[column] = 0.0;
             } else if (!lower_finite) {
+                self.nonbasic_move[column] = -1;
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
             } else if (!upper_finite) {
+                self.nonbasic_move[column] = 1;
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
             } else if (move != 0) {
                 // Boxed column that was collapsed: use the Phase-I-tracked
                 // direction. move > 0 → at_lower, move < 0 → at_upper.
                 if (move > 0) {
+                    self.nonbasic_move[column] = 1;
                     basis.col_status[column] = .at_lower;
                     basis.primal[column] = lower;
                 } else {
+                    self.nonbasic_move[column] = -1;
                     basis.col_status[column] = .at_upper;
                     basis.primal[column] = upper;
                 }
             } else if (basis.reduced_cost[column] >= 0.0) {
+                self.nonbasic_move[column] = 1;
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
             } else {
+                self.nonbasic_move[column] = -1;
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
             }
@@ -1026,6 +1034,12 @@ test "dual Phase-I initial correction flips infeasibilities to objective endpoin
     try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[3]);
     workspace.restoreOriginalBounds(&basis, 4);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -std.math.inf(f64), -std.math.inf(f64), -2.0 }, basis.col_lower[0..4]);
+    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 0, -1 }, workspace.nonbasic_move[0..4]);
+    try std.testing.expectEqualSlices(
+        basis_module.BasisStatus,
+        &.{ .at_lower, .at_upper, .free, .at_upper },
+        basis.col_status[0..4],
+    );
 }
 
 test "dual Phase-I records violation left after bound flips" {

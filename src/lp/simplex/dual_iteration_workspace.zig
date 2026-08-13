@@ -65,6 +65,9 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
         pack_indices: []u32,
         pack_values: []Real,
         pack_count: usize = 0,
+        /// Mutable CHUZC work order and published BFRT flip prefix. This must
+        /// not alias the producer-owned pivotal-row pack scanned by CHUZC2.
+        candidate_indices: []u32,
         /// CHUZC ratio or breakpoint group keyed by global column.
         work_ratio: []Real,
         /// CHUZC selected nonbasic move keyed by global column.
@@ -91,12 +94,15 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             errdefer allocator.free(pack_indices);
             const pack_values = try allocator.alloc(Real, total_columns);
             errdefer allocator.free(pack_values);
+            const candidate_indices = try allocator.alloc(u32, total_columns);
+            errdefer allocator.free(candidate_indices);
             const work_ratio = try allocator.alloc(Real, total_columns);
             errdefer allocator.free(work_ratio);
             const work_direction = try allocator.alloc(Real, total_columns);
             errdefer allocator.free(work_direction);
             @memset(pack_indices, 0);
             @memset(pack_values, 0);
+            @memset(candidate_indices, 0);
             @memset(work_ratio, std.math.inf(Real));
             @memset(work_direction, 0);
             return .{
@@ -110,6 +116,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 .col_dse = col_dse,
                 .pack_indices = pack_indices,
                 .pack_values = pack_values,
+                .candidate_indices = candidate_indices,
                 .work_ratio = work_ratio,
                 .work_direction = work_direction,
             };
@@ -124,6 +131,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             self.col_dse.deinit();
             self.allocator.free(self.pack_indices);
             self.allocator.free(self.pack_values);
+            self.allocator.free(self.candidate_indices);
             self.allocator.free(self.work_ratio);
             self.allocator.free(self.work_direction);
             self.* = undefined;
@@ -178,6 +186,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 self.col_aq.retainedBytes() + self.col_bfrt.retainedBytes() + self.col_dse.retainedBytes() +
                 std.mem.sliceAsBytes(self.pack_indices).len +
                 std.mem.sliceAsBytes(self.pack_values).len +
+                std.mem.sliceAsBytes(self.candidate_indices).len +
                 std.mem.sliceAsBytes(self.work_ratio).len +
                 std.mem.sliceAsBytes(self.work_direction).len;
         }
@@ -201,6 +210,9 @@ test "dual iteration workspace preserves HiGHS CHUZC producer order" {
     try workspace.buildPivotalRowPack();
     try std.testing.expectEqualSlices(u32, &.{ 3, 1, 6, 4 }, workspace.packedIndices());
     try std.testing.expectEqualSlices(f64, &.{ 30, 10, 2, -1 }, workspace.packedValues());
+    workspace.candidate_indices[0] = 6;
+    workspace.candidate_indices[1] = 1;
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1, 6, 4 }, workspace.packedIndices());
 }
 
 test "dual iteration workspace clears only iteration-owned vector state" {
