@@ -853,6 +853,16 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 - klein1（434 vs 126，infeasible）：phase 选择已按 HiGHS 对齐（扰动后 duals 判定 + force_phase2，
   本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
   ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
+  HiGHS 的完整证书，随后冷回退 primal Ph1 299。gdb 差分（break HEkkDual::updateDual 捕获
+  (iteration, variable_in, variable_out)）定位首次分叉在 **pivot 1**：leaving row 62 相同、
+  entering 33(HiGHS) vs 30(zig)，CHUZC4 均单组、large-alpha 逻辑逐项等价，差异来自 klein1
+  极微系数（dual ~1e-12）下的 1-ulp 级候选集/比率敏感。否定实验（已撤销）：ray 失败后从
+  dual-feasible-primal-infeasible 基暖切 primal（仿 kSolvePhasePrimalInfeasibleCleanup）使
+  klein1 `434→611`（shifted 405 + primal 206），暖 primal 不比冷回退便宜，撤销并记录。
+  下一轮：全 y 向量 Farkas ray 或对 klein1 的 ulp 敏感路径做 HCD/扩展精度审计。
+（扰动后 duals 判定 + force_phase2，
+  本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
+  ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
   HiGHS 的完整证书，随后冷回退 primal Ph1 299。下一轮：按 HiGHS 语义构建全 y 向量 Farkas ray，
   或先对齐 Phase II 轨迹使 no-entering 基与 HiGHS 一致。
 - scsd1（87 vs 86）：仅差 1，忽略。
