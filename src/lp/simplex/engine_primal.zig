@@ -561,6 +561,16 @@ pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_m
 /// the baseline policy first. Success leaves artificials fixed at zero and
 /// prepares the surviving original/logical basis for Phase II.
 pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    return solvePhaseOneGeneric(self, problem, control, false);
+}
+
+/// Cost-based Phase I from the retained basis (no artificial columns),
+/// mirroring HiGHS' warm primal Phase I after a dual exit.
+pub fn solveWarmPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    return solvePhaseOneGeneric(self, problem, control, true);
+}
+
+fn solvePhaseOneGeneric(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, comptime warm: bool) SolveStatus {
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.pricing.rule;
@@ -579,7 +589,11 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
     defer self.recordPhaseIterations(.phase_one, iteration_started);
     if (self.pricing.rule == .devex and self.active_devex_strategy == .framework)
         self.initializePrimalDevexFramework();
-    if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+    const entry_reprice = if (warm)
+        self.recomputeWarmPhaseOneReducedCosts(problem)
+    else
+        self.recomputePhaseOneReducedCosts(problem);
+    if (entry_reprice != .optimal) return .numerical_failure;
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .phase_one)) |status| return status;
         const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -612,7 +626,11 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
             if (self.nla.factorization.update_count != 0) {
                 self.nla.factorization.recordReinversion(.solve_residual);
                 if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
-                if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+                const no_entering_reprice = if (warm)
+                    self.recomputeWarmPhaseOneReducedCosts(problem)
+                else
+                    self.recomputePhaseOneReducedCosts(problem);
+                if (no_entering_reprice != .optimal) return .numerical_failure;
                 continue;
             }
             break;
@@ -654,7 +672,11 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
                 .ready => {},
                 .rebuild_required => {
                     if (self.refactorizeBasis(problem, .solve_residual) != .optimal) return .numerical_failure;
-                    if (self.recomputePhaseOneReducedCosts(problem) != .optimal) return .numerical_failure;
+                    const rebuild_reprice = if (warm)
+                        self.recomputeWarmPhaseOneReducedCosts(problem)
+                    else
+                        self.recomputePhaseOneReducedCosts(problem);
+                    if (rebuild_reprice != .optimal) return .numerical_failure;
                     continue;
                 },
                 .numerical_failure => return .numerical_failure,
@@ -679,7 +701,9 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
         else
             self.reduced_cost_refresh_period;
         if (self.fresh_factorization_pivots_remaining != 0 or self.reduced_cost_update_count >= refresh_period) {
-            const refresh_status = if (self.active_adaptive_reprice)
+            const refresh_status = if (warm)
+                self.recomputeWarmPhaseOneReducedCosts(problem)
+            else if (self.active_adaptive_reprice)
                 self.recomputePhaseOneReducedCostsWithDrift(problem)
             else
                 self.recomputePhaseOneReducedCosts(problem);
@@ -687,6 +711,16 @@ pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, 
         }
     }
     if (self.iterations >= control.max_iterations) return .iteration_limit;
+    if (warm) {
+        // A cost-based Phase I exits with every basic value inside its
+        // bounds; anything else hands back to the caller's fallback.
+        const basis = if (self.basis) |*value| value else return .numerical_failure;
+        for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
+            if (value < lower - self.numerical.primal_tolerance or
+                value > upper + self.numerical.primal_tolerance) return .not_implemented;
+        }
+        return .optimal;
+    }
     if (self.recomputeBasicValues(problem) != .optimal) {
         // A bounded perturbation may leave the terminal basis just beyond
         // an original bound. That invalidates the perturbed path, not the
@@ -864,6 +898,79 @@ pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_modu
     for (0..problem.num_rows) |row| {
         basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
         basis.reduced_cost[artificial_begin + row] = 1.0 - basis.artificial_sign[row] * basis.dual[row];
+    }
+    self.reduced_cost_update_count = 0;
+    return .optimal;
+}
+
+/// Map `(row, basis epoch)` to a reproducible sample in `(0, 1]` for the
+/// warm Phase-I cost perturbation.
+fn deterministicUnit(index: usize, epoch: u64) f64 {
+    var value = @as(u64, @intCast(index)) +% epoch *% 0x9e3779b97f4a7c15;
+    value = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
+    value = (value ^ (value >> 27)) *% 0x94d049bb133111eb;
+    value ^= value >> 31;
+    return (@as(f64, @floatFromInt(value >> 11)) + 1.0) * 0x1.0p-53;
+}
+
+/// Cost-based Phase-I repricing for a warm basis, mirroring
+/// `HEkkPrimal::phase1ComputeDual`: infeasible basics receive costs of
+/// +/-1 along their violation direction, a BTRAN forms the row duals, and
+/// the reduced costs are `-A^T y` with no artificial columns involved.
+pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+    const basis = if (self.basis) |*value| value else return .numerical_failure;
+    @memset(basis.dual, 0.0);
+    var infeasible_rows: usize = 0;
+    // HiGHS perturbs the +/-1 Phase-I costs by 5e-7 * random so a ray that
+    // improves the unperturbed Phase-I objective is not mistaken for a
+    // Phase-I unbounded direction (gas11). The dual perturbation array is
+    // cleared during cost cleanup, so use the deterministic per-row sample
+    // instead.
+    const perturbation_base = 5e-7;
+    for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |value, lower, upper, row| {
+        if (value < lower - self.numerical.primal_tolerance) {
+            const perturb = 1.0 + perturbation_base * deterministicUnit(row, self.dual_work.basis_epoch);
+            basis.dual[row] = -perturb;
+            infeasible_rows += 1;
+        } else if (value > upper + self.numerical.primal_tolerance) {
+            const perturb = 1.0 + perturbation_base * deterministicUnit(row, self.dual_work.basis_epoch);
+            basis.dual[row] = perturb;
+            infeasible_rows += 1;
+        }
+    }
+    if (infeasible_rows == 0) return .optimal;
+    self.nla.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
+    const row_pricing = self.selectRowPricing(basis.dual);
+    const pricing_started = self.statisticsTimestamp();
+    defer if (row_pricing)
+        self.recordRowPricingElapsed(pricing_started)
+    else
+        self.recordPricingElapsed(pricing_started);
+    if (row_pricing) {
+        @memset(basis.reduced_cost[0..problem.num_cols], 0.0);
+        for (basis.dual, 0..) |dual_value, row_index| {
+            if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
+            const scaled_dual = dual_value * basis.row_scale[row_index];
+            for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {
+                const column: usize = @intCast(column_u32);
+                basis.reduced_cost[column] -= scaled_dual * coefficient * basis.column_scale[column];
+            }
+        }
+    } else {
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            var reduced: f64 = 0.0;
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
+                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                const row_index = row.toUsize();
+                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+            }
+            basis.reduced_cost[column] = reduced;
+        }
+    }
+    for (0..problem.num_rows) |row| {
+        basis.reduced_cost[problem.num_cols + row] = -basis.dual[row];
     }
     self.reduced_cost_update_count = 0;
     return .optimal;

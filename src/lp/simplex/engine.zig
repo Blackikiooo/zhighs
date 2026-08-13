@@ -1067,6 +1067,31 @@ pub const SimplexEngine = struct {
             }
             if (crash_installed) self.stats.crash_fallbacks += 1;
             self.stats.dual_phase_one_fallbacks += 1;
+            // Warm cost-based primal Phase I on the retained basis mirrors
+            // HiGHS' PrPh1 after a possibly-optimal dual exit: no artificial
+            // swap, just +/-1 costs on the violating basics. Success hands
+            // the feasible basis to primal Phase II; failure restores state
+            // and continues into the frozen cold path below.
+            if (self.iterations != 0) {
+                const warm_numerical = self.numerical;
+                const warm_pricing = self.pricing;
+                self.failure_site = .none;
+                self.cleanup_active = false;
+                self.iterations = 0;
+                const warm_status = self.solveWarmPhaseOne(problem, control);
+                if (warm_status == .optimal) {
+                    const warm_phase_two = self.solvePrimal(problem, control);
+                    if (warm_phase_two != .not_implemented and warm_phase_two != .numerical_failure and
+                        warm_phase_two != .unbounded)
+                        return warm_phase_two;
+                } else if (warm_status != .not_implemented and warm_status != .numerical_failure and
+                    warm_status != .unbounded)
+                {
+                    return warm_status;
+                }
+                self.numerical = warm_numerical;
+                self.pricing = warm_pricing;
+            }
             // A failed explicit experiment falls back to the frozen logical
             // crash and artificial Phase I, preserving the correctness path.
             if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
@@ -1250,6 +1275,8 @@ pub const SimplexEngine = struct {
     pub const choosePrimalEnteringWeightedTimed = @import("engine_primal.zig").choosePrimalEnteringWeightedTimed;
     pub const chooseColdPhaseOneStrategy = @import("engine_primal.zig").chooseColdPhaseOneStrategy;
     pub const solvePhaseOne = @import("engine_primal.zig").solvePhaseOne;
+    pub const solveWarmPhaseOne = @import("engine_primal.zig").solveWarmPhaseOne;
+    pub const recomputeWarmPhaseOneReducedCosts = @import("engine_primal.zig").recomputeWarmPhaseOneReducedCosts;
     pub const restartPhaseOneWithoutPerturbation = @import("engine_primal.zig").restartPhaseOneWithoutPerturbation;
 
     pub const restartSolveWithoutPerturbation = @import("engine_degeneracy.zig").restartSolveWithoutPerturbation;

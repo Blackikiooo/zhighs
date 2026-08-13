@@ -751,6 +751,14 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 
 ### F. Phase exit、cleanup 和结论
 
+  2026-08-12 暖成本型 primal Phase I 机制已实现并提交：`solveWarmPhaseOne`（±1 基成本 +
+  5e-7 确定性扰动 + BTRAN，镜像 `HEkkPrimal::phase1ComputeDual`）在 dual 失败后从保留基运行，
+  成功则直接进 primal Phase II；unbounded 视为失败安全回退冷路径（证书不损坏）。gas11 的暖
+  Phase I 在 63 pivots 处撞到幽灵 unbounded 方向（entering 762、rc=-1、[0,inf) 单侧列）：ray
+  验证失败后回退，净 +63 pivots（aggregate 9354→9417）。HiGHS 对照：其 PrPh2 unbounded 且
+  bounds 扰动时走 cleanup→重入 Phase 1 循环，仅未扰动 Phase 2 unbounded 才存 ray；zig 的
+  63-pivot 态与 HiGHS 97-pivot 态的轨迹差异产生幽灵方向，下一轮按该 cleanup-loop 协议对齐
+  暖 Phase I 的 unbounded 处理（546-pivot 路径的解锁点）。
 - [ ] F1 对齐 Phase-I objective assessment、remove perturbation 和 Phase-I re-entry。
   2026-08-12 gas11 差分收口（gdb 捕获 HiGHS (iter, in, out, theta_dual, theta_primal, update_count,
   flip_count) 与 zig trace 逐项对比）：pivot 序列 0-225 完全一致，primal step 在 117 处出现
