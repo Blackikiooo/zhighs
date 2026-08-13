@@ -590,12 +590,36 @@ pub const RebuildReason = enum {
     numerical_policy,
 };
 
+/// Objective and dual-infeasibility measurements taken at dual Phase-I fresh
+/// rebuild boundaries. Mirrors the assessment protocol of
+/// `HEkkDual::assessPhase1Optimality` and `HEkkDual::cleanup`; grouped so the
+/// per-solve metric scalars stay separate from engine lifecycle state.
+pub const DualPhaseOneAssessment = struct {
+    /// Boxed columns flipped during initial dual infeasibility correction.
+    initial_flips: usize = 0,
+    /// Working dual objective immediately after Phase-I initialization.
+    initial_objective: f64 = 0.0,
+    /// Fresh working dual objective at the final perturbed Phase-I assessment.
+    final_objective: f64 = 0.0,
+    /// Exact Phase-I objective after removing cost perturbation.
+    unperturbed_objective: f64 = 0.0,
+    /// Dual infeasibilities against Phase-I bounds after cost cleanup.
+    unperturbed_dual_infeasibilities: usize = 0,
+    /// Largest cleaned Phase-I dual infeasibility.
+    unperturbed_dual_infeasibility_max: f64 = 0.0,
+    /// Sum of cleaned Phase-I dual infeasibilities.
+    unperturbed_dual_infeasibility_sum: f64 = 0.0,
+    /// Largest basic-bound violation immediately after Phase-I initialization.
+    initial_max_basic_violation: f64 = 0.0,
+    /// First leaving row selected by dual Phase I, if any.
+    initial_leaving_row: ?u32 = null,
+};
+
 /// Owning revised-simplex solver instance and reusable workspace.
 pub const SimplexEngine = struct {
     /// Allocator owning the basis and every reusable sub-workspace.
     allocator: std.mem.Allocator,
-    /// Revised-simplex direction currently executing.
-    algorithm: Algorithm = .dual_revised,
+    // ── Resources ─ model-shaped workspaces released by `deinit` ─────────────
     /// Model-shaped mutable basis, allocated at the start of a solve.
     basis: ?basis_module.BasisState = null,
     /// Vector-native numerical linear algebra owner and factor update chain.
@@ -612,12 +636,16 @@ pub const SimplexEngine = struct {
     degeneracy: degeneracy_module.Workspace,
     /// Optional CSR companion used by row-oriented pricing.
     pricing_row_view: pricing_workspace_module.RowView,
+    // ── Policy ─ algorithm choice and pricing/ratio/numerical rules ──────────
+    /// Revised-simplex direction currently executing.
+    algorithm: Algorithm = .dual_revised,
     /// Pricing rule and partial-pricing cursor state.
     pricing: pricing_module.Pricing = .{},
     /// Active primal/dual ratio-test policy.
     ratio_test: ratio_module.RatioTest = .{},
     /// Tolerances, residual observations and reinversion policy.
     numerical: numerical_module.NumericalState = .{},
+    // ── Lifecycle ─ per-solve progress, phase and failure scalars ────────────
     /// Attempted iterations in the current internal solve path.
     iterations: usize = 0,
     /// Monotonic public-solve pivot accounting across fallback paths.
@@ -631,6 +659,29 @@ pub const SimplexEngine = struct {
     /// Whether the current model still needs coefficient filtering in hot
     /// matrix kernels after the solve-entry audit.
     has_dropped_model_coefficient: bool = false,
+    /// Whether artificial primal Phase I is required after initialization.
+    phase1_needed: bool = false,
+    /// Deterministic work units consumed by the public solve.
+    work_used: u64 = 0,
+    /// Public progress phase currently reported by callbacks.
+    current_phase: SolvePhase = .phase_two,
+    /// Pivots still forced to use a fresh factorization after an accuracy warning.
+    fresh_factorization_pivots_remaining: usize = 0,
+    /// Incremental reduced-cost updates since the last exact reprice.
+    reduced_cost_update_count: usize = 0,
+    /// Fixed/adaptive maximum incremental updates between exact reprices.
+    reduced_cost_refresh_period: usize = 8,
+    /// Per-solve FT update-chain limit resolved from start diagnostics.
+    active_max_update_count: usize = 100,
+    /// Internal stage of the most recent unrecovered failure.
+    failure_site: FailureSite = .none,
+    /// Exit route taken by shifted-cost dual Phase II.
+    shifted_dual_exit: ShiftedDualExit = .none,
+    /// Failure stage saved before shifted-path fallback overwrites it.
+    shifted_dual_failure_site: FailureSite = .none,
+    /// Whether the current primal/dual pass is original-objective cleanup.
+    cleanup_active: bool = false,
+    // ── Certificates ─ validated ray and Farkas proof state ──────────────────
     /// Whether `basis.unbounded_ray` contains a validated certificate.
     unbounded_ray_valid: bool = false,
     /// Whether `basis.infeasibility_ray` contains a validated certificate.
@@ -643,14 +694,7 @@ pub const SimplexEngine = struct {
     infeasibility_certificate_infinite_row_mass: f64 = 0.0,
     /// Ray mass touching infinite column bounds during validation.
     infeasibility_certificate_infinite_column_mass: f64 = 0.0,
-    /// Whether artificial primal Phase I is required after initialization.
-    phase1_needed: bool = false,
-    /// Monotonic start timestamp, absent when no time source is configured.
-    solve_start_ns: ?i96 = null,
-    /// Borrowed clock backend used for stop checks.
-    solve_clock_io: ?std.Io = null,
-    /// Deterministic work units consumed by the public solve.
-    work_used: u64 = 0,
+    // ── Dual observations ─ CHUZR selectors and DSE/Devex streams ────────────
     /// Whether row dual edge weights match the current basis.
     dual_edge_weights_valid: bool = false,
     /// Basis row whose `dual_row`/tableau workspace is currently valid.
@@ -664,6 +708,56 @@ pub const SimplexEngine = struct {
     dual_candidate_cutoff: f64 = 0.0,
     /// Whether CHUZR currently uses its sparse candidate representation.
     dual_hyper_sparse_active: bool = false,
+    /// Successful DSE recurrences since the current dual phase began.
+    dual_dse_updates_since_start: usize = 0,
+    /// HiGHS-style running densities used for automatic DSE cost control.
+    dual_dse_aq_density: f64 = 0.0,
+    dual_dse_ep_density: f64 = 0.0,
+    dual_dse_ap_density: f64 = 0.0,
+    dual_dse_tau_density: f64 = 0.0,
+    /// DSE iterations classified as costly in the current framework.
+    dual_dse_costly_iterations: usize = 0,
+    /// Running log deviations of updated DSE weights from exact CHUZR values.
+    dual_dse_average_log_low_error: f64 = 0.0,
+    dual_dse_average_log_high_error: f64 = 0.0,
+    /// Density of the pivotal tableau row most recently priced.
+    /// Running-average input for HiGHS' structural `row_ap.count / num_col`.
+    current_dual_row_ap_density: f64 = 0.0,
+    /// A fresh no-entering decision failed certificate validation; retain
+    /// Devex across subsequent helper phase boundaries for this solve only.
+    dual_dse_certificate_fallback_active: bool = false,
+    /// Pivots performed in the current primal Devex reference framework.
+    devex_framework_iterations: usize = 0,
+    /// Invalid/nonpositive Devex weights observed in the current framework.
+    devex_bad_weight_count: usize = 0,
+    /// Request to rebuild the Devex reference set after committing the pivot.
+    devex_reset_after_pivot: bool = false,
+    // ── Strategy knobs ─ resolved at solve entry, read-only during pivots ────
+    /// Resolved degeneracy policy for the current solve.
+    active_degeneracy_strategy: DegeneracyStrategy = .baseline,
+    /// Resolved reduced-cost drift repricing policy.
+    active_adaptive_reprice: bool = false,
+    /// Largest reduced-cost drift observed at an exact reprice.
+    maximum_reduced_cost_drift: f64 = 0.0,
+    /// Number of exact reprices performed in the current solve.
+    exact_reprices: usize = 0,
+    /// Resolved row/column pricing traversal.
+    active_pricing_kernel: PricingKernel = .column,
+    /// Resolved primal Devex implementation.
+    active_devex_strategy: DevexStrategy = .legacy,
+    /// Resolved segmented primal pricing policy.
+    active_primal_pricing_strategy: PrimalPricingStrategy = .inherit,
+    /// Resolved dual DSE-to-Devex lifecycle.
+    active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
+    /// Resolved DSE update budget before Devex fallback.
+    active_dual_dse_update_budget: usize = 64,
+    active_adaptive_dual_dse_budget: bool = true,
+    /// Resolved dual initialization formulas.
+    active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
+    // ── Phase-I metrics ─ fresh-boundary assessment snapshot ─────────────────
+    /// Dual Phase-I fresh-boundary measurements; see `DualPhaseOneAssessment`.
+    dual_phase_one: DualPhaseOneAssessment = .{},
+    // ── Diagnostics ─ traces, failure records, timers and statistics ─────────
     /// Structural basic columns replaced by logical columns while repairing a
     /// singular imported basis during the current solve.
     rank_repair_count: usize = 0,
@@ -691,91 +785,14 @@ pub const SimplexEngine = struct {
     dual_phase_one_ep_trace_count: usize = 0,
     /// Borrowed pivotal-row trace storage for the current solve.
     active_dual_phase_one_ep_trace: []DualPhaseOneEpTraceEvent = &.{},
-    /// Boxed columns flipped during initial dual infeasibility correction.
-    dual_phase_one_initial_flips: usize = 0,
-    /// Working dual objective immediately after Phase-I initialization.
-    dual_phase_one_initial_objective: f64 = 0.0,
-    /// Fresh working dual objective at the final perturbed Phase-I assessment.
-    dual_phase_one_final_objective: f64 = 0.0,
-    /// Exact Phase-I objective after removing cost perturbation.
-    dual_phase_one_unperturbed_objective: f64 = 0.0,
-    /// Dual infeasibilities against Phase-I bounds after cost cleanup.
-    dual_phase_one_unperturbed_dual_infeasibilities: usize = 0,
-    /// Largest cleaned Phase-I dual infeasibility.
-    dual_phase_one_unperturbed_dual_infeasibility_max: f64 = 0.0,
-    /// Sum of cleaned Phase-I dual infeasibilities.
-    dual_phase_one_unperturbed_dual_infeasibility_sum: f64 = 0.0,
-    /// Largest basic-bound violation immediately after Phase-I initialization.
-    dual_phase_one_initial_max_basic_violation: f64 = 0.0,
-    /// First leaving row selected by dual Phase I, if any.
-    dual_phase_one_initial_leaving_row: ?u32 = null,
-    /// Public progress phase currently reported by callbacks.
-    current_phase: SolvePhase = .phase_two,
-    /// Pivots still forced to use a fresh factorization after an accuracy warning.
-    fresh_factorization_pivots_remaining: usize = 0,
-    /// Incremental reduced-cost updates since the last exact reprice.
-    reduced_cost_update_count: usize = 0,
-    /// Fixed/adaptive maximum incremental updates between exact reprices.
-    reduced_cost_refresh_period: usize = 8,
-    /// Per-solve FT update-chain limit resolved from start diagnostics.
-    active_max_update_count: usize = 100,
-    /// Internal stage of the most recent unrecovered failure.
-    failure_site: FailureSite = .none,
-    /// Exit route taken by shifted-cost dual Phase II.
-    shifted_dual_exit: ShiftedDualExit = .none,
-    /// Failure stage saved before shifted-path fallback overwrites it.
-    shifted_dual_failure_site: FailureSite = .none,
     /// Solve statistics; timing fields remain zero when collection is disabled.
     stats: SimplexStats = .{},
     /// Borrowed clock backend used only for optional statistics.
     statistics_io: ?std.Io = null,
-    /// Whether the current primal/dual pass is original-objective cleanup.
-    cleanup_active: bool = false,
-    /// Resolved degeneracy policy for the current solve.
-    active_degeneracy_strategy: DegeneracyStrategy = .baseline,
-    /// Resolved reduced-cost drift repricing policy.
-    active_adaptive_reprice: bool = false,
-    /// Largest reduced-cost drift observed at an exact reprice.
-    maximum_reduced_cost_drift: f64 = 0.0,
-    /// Number of exact reprices performed in the current solve.
-    exact_reprices: usize = 0,
-    /// Resolved row/column pricing traversal.
-    active_pricing_kernel: PricingKernel = .column,
-    /// Resolved primal Devex implementation.
-    active_devex_strategy: DevexStrategy = .legacy,
-    /// Resolved segmented primal pricing policy.
-    active_primal_pricing_strategy: PrimalPricingStrategy = .inherit,
-    /// Resolved dual DSE-to-Devex lifecycle.
-    active_dual_edge_weight_strategy: DualEdgeWeightStrategy = .inherit,
-    /// Resolved DSE update budget before Devex fallback.
-    active_dual_dse_update_budget: usize = 64,
-    active_adaptive_dual_dse_budget: bool = true,
-    /// Resolved dual initialization formulas.
-    active_dual_initialization_strategy: DualInitializationStrategy = .baseline,
-    /// Successful DSE recurrences since the current dual phase began.
-    dual_dse_updates_since_start: usize = 0,
-    /// HiGHS-style running densities used for automatic DSE cost control.
-    dual_dse_aq_density: f64 = 0.0,
-    dual_dse_ep_density: f64 = 0.0,
-    dual_dse_ap_density: f64 = 0.0,
-    dual_dse_tau_density: f64 = 0.0,
-    /// DSE iterations classified as costly in the current framework.
-    dual_dse_costly_iterations: usize = 0,
-    /// Running log deviations of updated DSE weights from exact CHUZR values.
-    dual_dse_average_log_low_error: f64 = 0.0,
-    dual_dse_average_log_high_error: f64 = 0.0,
-    /// Density of the pivotal tableau row most recently priced.
-    /// Running-average input for HiGHS' structural `row_ap.count / num_col`.
-    current_dual_row_ap_density: f64 = 0.0,
-    /// A fresh no-entering decision failed certificate validation; retain
-    /// Devex across subsequent helper phase boundaries for this solve only.
-    dual_dse_certificate_fallback_active: bool = false,
-    /// Pivots performed in the current primal Devex reference framework.
-    devex_framework_iterations: usize = 0,
-    /// Invalid/nonpositive Devex weights observed in the current framework.
-    devex_bad_weight_count: usize = 0,
-    /// Request to rebuild the Devex reference set after committing the pivot.
-    devex_reset_after_pivot: bool = false,
+    /// Monotonic start timestamp, absent when no time source is configured.
+    solve_start_ns: ?i96 = null,
+    /// Borrowed clock backend used for stop checks.
+    solve_clock_io: ?std.Io = null,
 
     /// Construct an empty engine; model-shaped storage is allocated lazily.
     pub fn init(a: std.mem.Allocator) SimplexEngine {
@@ -857,15 +874,15 @@ pub const SimplexEngine = struct {
         self.infeasibility_certificate_failure = .none;
         self.infeasibility_certificate_infinite_row_mass = 0.0;
         self.infeasibility_certificate_infinite_column_mass = 0.0;
-        self.dual_phase_one_initial_flips = 0;
-        self.dual_phase_one_initial_objective = 0.0;
-        self.dual_phase_one_final_objective = 0.0;
-        self.dual_phase_one_unperturbed_objective = 0.0;
-        self.dual_phase_one_unperturbed_dual_infeasibilities = 0;
-        self.dual_phase_one_unperturbed_dual_infeasibility_max = 0.0;
-        self.dual_phase_one_unperturbed_dual_infeasibility_sum = 0.0;
-        self.dual_phase_one_initial_max_basic_violation = 0.0;
-        self.dual_phase_one_initial_leaving_row = null;
+        self.dual_phase_one.initial_flips = 0;
+        self.dual_phase_one.initial_objective = 0.0;
+        self.dual_phase_one.final_objective = 0.0;
+        self.dual_phase_one.unperturbed_objective = 0.0;
+        self.dual_phase_one.unperturbed_dual_infeasibilities = 0;
+        self.dual_phase_one.unperturbed_dual_infeasibility_max = 0.0;
+        self.dual_phase_one.unperturbed_dual_infeasibility_sum = 0.0;
+        self.dual_phase_one.initial_max_basic_violation = 0.0;
+        self.dual_phase_one.initial_leaving_row = null;
         self.numerical.resetAntiCycling();
         self.degeneracy.resetSolve();
         self.active_degeneracy_strategy = control.degeneracy_strategy;

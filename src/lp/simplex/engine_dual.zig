@@ -742,20 +742,20 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // measures remaining infeasibility.
     self.dual_work.installWorkingBounds(basis, original_count);
     if (self.active_dual_initialization_strategy == .highs) {
-        self.dual_phase_one_initial_flips = self.dual_work.correctInitialDualInfeasibilities(
+        self.dual_phase_one.initial_flips = self.dual_work.correctInitialDualInfeasibilities(
             basis,
             original_count,
             self.numerical.dual_tolerance,
         );
-        self.dual_phase_one_initial_objective = self.dual_work.dualObjective(basis, original_count);
+        self.dual_phase_one.initial_objective = self.dual_work.dualObjective(basis, original_count);
     }
     if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .not_implemented;
     if (self.active_dual_initialization_strategy == .highs and
         !self.dual_work.createPrimalInfeasibilityList(basis, problem.num_rows, self.numerical.primal_tolerance))
         return .not_implemented;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
-        self.dual_phase_one_initial_max_basic_violation = @max(
-            self.dual_phase_one_initial_max_basic_violation,
+        self.dual_phase_one.initial_max_basic_violation = @max(
+            self.dual_phase_one.initial_max_basic_violation,
             @max(lower - value, value - upper),
         );
     }
@@ -785,8 +785,8 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             }
             break;
         };
-        if (self.dual_phase_one_initial_leaving_row == null)
-            self.dual_phase_one_initial_leaving_row = leaving.row;
+        if (self.dual_phase_one.initial_leaving_row == null)
+            self.dual_phase_one.initial_leaving_row = leaving.row;
         if (self.active_dual_edge_weight_strategy == .steepest_devex and
             self.pricing.rule == .steepest_edge and !self.dual_edge_weights_valid)
             self.switchDualDseToDevex(.invalid);
@@ -901,8 +901,8 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // Assess the Phase-I objective while the special bounds and values are
     // still installed. HiGHS then reinstalls the original (Phase-II) bounds
     // before performing any Phase-II iteration.
-    self.dual_phase_one_final_objective = self.dual_work.rebuild_dual_objective;
-    if (self.dual_phase_one_final_objective == 0.0) {
+    self.dual_phase_one.final_objective = self.dual_work.rebuild_dual_objective;
+    if (self.dual_phase_one.final_objective == 0.0) {
         // Zero auxiliary objective is the normal Phase-I exit. Keep the
         // perturbed work costs alive: HEkkDual restores only Phase-II bounds
         // here and removes perturbations after Phase II reaches no-row. An
@@ -933,10 +933,10 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             original_count,
             self.numerical.dual_tolerance,
         );
-        self.dual_phase_one_unperturbed_objective = self.dual_work.dualObjective(basis, original_count);
-        self.dual_phase_one_unperturbed_dual_infeasibilities = unperturbed.count;
-        self.dual_phase_one_unperturbed_dual_infeasibility_max = unperturbed.maximum;
-        self.dual_phase_one_unperturbed_dual_infeasibility_sum = unperturbed.sum;
+        self.dual_phase_one.unperturbed_objective = self.dual_work.dualObjective(basis, original_count);
+        self.dual_phase_one.unperturbed_dual_infeasibilities = unperturbed.count;
+        self.dual_phase_one.unperturbed_dual_infeasibility_max = unperturbed.maximum;
+        self.dual_phase_one.unperturbed_dual_infeasibility_sum = unperturbed.sum;
     }
 
     // Always restore the original model state before classifying feasibility
