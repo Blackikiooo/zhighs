@@ -849,3 +849,10 @@ scsd1 104 / shell 670`，状态全部 optimal。后续改动必须按 E1/E3/F �
 - [x] 最终机械审计：`simplex`、`matrix`、`io` 中每个函数声明前均存在作用说明；
   三个模块的主要结构体字段均说明所有权、有效范围或状态含义。
 - [x] 最终验证：全模块 `zig fmt`、ReleaseFast 全量测试及 `git diff --check` 通过。
+- [x] 2026-08-12 语义化字段组织（行为零变化，各轮均以 forced-dual 40/40 且逐模型
+  pivots 与重构前一致为门禁）：`SimplexEngine` 的 9 个 dual Phase-I 度量标量收进
+  `DualPhaseOneAssessment` 并按 Resources/Policy/Lifecycle/Certificates/Dual
+  observations/Strategy knobs/Phase-I metrics/Diagnostics 八个横幅分区；
+  `DualPhaseOneWorkspace` 的 RHS list/checkpoint/rebuild 度量收进 `DualRHSState`/
+  `BasisCheckpoint`/`RebuildMeasurements` 并按生命周期分区；非基移动方向从 `i8` 魔数
+  升级为 `NonbasicMove` 枚举（`i8` 保底、`sign()/negated()` 内联助手）。

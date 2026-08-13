@@ -124,9 +124,14 @@ zhighs/
 
 | 状态 | 模块 |
 |---|---|
-| 已实现 | `foundation` 中的整数、强类型 ID、`HD/HCD`；`matrix` 中的稀疏向量、SoA 构建、CSC/CSR、MatrixStore、乘法、稳定范数、转置、切片、scaling、permutation、结构编辑、动态行和稀疏累加。 |
-| 骨架 | `matrix` 的 scaling 后续部分，以及 `model/nla/lp/simplex/presolve/analysis/mip/framework/plugin/solver/api/io/diagnostics`。 |
+| 已实现 | `foundation` 中的整数、强类型 ID、`HD/HCD`；`matrix` 中的稀疏向量、SoA 构建、CSC/CSR、MatrixStore、乘法、稳定范数、转置、切片、scaling、permutation、结构编辑、动态行和稀疏累加；`model` 中的 LinearModel/QuadraticModel/NonlinearModel/ExpressionGraph 及分类体系；`lp/simplex` 中的 serial revised simplex 全链路（SparseLU + Forrest–Tomlin 分解、IndexedVector、primal/dual Phase I/II、CHUZC/CHUZR、BFRT、DSE/Devex、crash、ratio test、pivot 提交与证书）。 |
+| 骨架 | `model` 的部分验证/重构，`presolve`、`analysis`、`mip`、`framework`、`plugin`、`solver`、`api`、`io`、`diagnostics`。 |
 | 延后骨架 | `ipm/pdlp/qp/parallel/bindings/plugins_builtin`。 |
+
+Simplex 的对齐状态以 [`src/lp/simplex/todo.md`](src/lp/simplex/todo.md) 为准：当前 forced-dual
+40 模型正确性 40/40，aggregate committed pivots 为 `10889 vs HiGHS 8774`（1.241x），
+逐模型胜/平/负 `10/25/5`，剩余差距集中在 refinery/etamacro/gas11/klein1/scsd1 的 phase
+exit 与增量更新路径。
 
 ## 与本地 HiGHS 的模块对应
 

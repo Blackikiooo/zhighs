@@ -72,8 +72,8 @@
 | 矩阵算法 | `HighsMatrixUtils.*` | `src/matrix/ops.zig`, `transpose.zig`, `slice.zig`, `permutation.zig`, `edit.zig` | ✅ `Ax/A^T y`、稳定范数、转置、切片、置换及函数式结构编辑。 |
 | 矩阵乘加与高精度乘法 | `HighsSparseMatrix::alphaProductPlusY/productQuad/productTransposeQuad` | `src/matrix/ops.zig` | ✅ `y += alpha*A*x`、转置版本及基于 `HCD` 的高精度乘法。 |
 | 矩阵数值评估 | `HighsSparseMatrix::range/assessSmallValues/hasLargeValue` | `src/matrix/ops.zig` | ✅ 绝对值范围、small/large 计数和阈值查询；日志由上层 diagnostics 负责。 |
-| Simplex pricing 矩阵视图 | `createRowwisePartitioned`, `priceByRow/Column`, `collectAj`, `update` | `src/lp/simplex/pricing_matrix.zig` | 📝 依赖 basis partition、`HVector` 和 pricing 策略，不进入通用 matrix。 |
-| Simplex 稀疏工作向量 | `HVector.h`, `HVectorBase.h/.cpp` | `src/nla/sparse_work_vector.zig` | 📝 后续支持 dense values + active index 集合，不与矩阵切片混用。 |
+| Simplex pricing 矩阵视图 | `createRowwisePartitioned`, `priceByRow/Column`, `collectAj`, `update` | `src/lp/simplex/pricing_workspace.zig` | ✅ 复用 CSR companion，`RowView` 已接入 column/row pricing。 |
+| Simplex 稀疏工作向量 | `HVector.h`, `HVectorBase.h/.cpp` | `src/lp/simplex/indexed_vector.zig` | ✅ `IndexedVector(Real)` 覆盖 dense+indexed 状态、sparse clear、reIndex/tight/pack/norm2/saxpy 与 synthetic tick；f64/f128 由 comptime 生成。 |
 | 稀疏向量和 | `HighsSparseVectorSum.h` | `src/matrix/sparse_sum.zig` | ✅ dense value + generation mark + active ID，用于割、聚合和 O(1) 逻辑清空。 |
 | 动态 MIP 行矩阵 | `mip/HighsDynamicRowMatrix.*` | `src/matrix/dynamic_rows.zig` | ✅ append-only 连续行存储、checkpoint/rollback 和批量合并；cuts 不直接修改基础 CSC。 |
 
@@ -81,20 +81,21 @@
 
 | 功能 | HiGHS C++ 文件 | zhighs Zig 文件 | 状态与说明 |
 |---|---|---|---|
-| Basis factorization 主体 | `util/HFactor.h/.cpp` | `src/nla/factorization.zig` | 🧱 `nla` 入口已建，具体实现待完成。 |
-| Refactor / update | `HFactorRefactor.cpp`, `HFactorExtend.cpp` | `src/nla/refactor.zig`, `src/nla/update.zig` | 📝 Forrest–Tomlin/产品形式按验证顺序实现。 |
-| Factor 辅助与调试 | `HFactorUtils.cpp`, `HFactorDebug.*`, `HFactorConst.h` | `src/nla/factor_utils.zig`, `src/diagnostics/factor_check.zig` | 📝 算法与调试检查分开。 |
-| Simplex 总控状态 | `simplex/HEkk.h/.cpp`, `HEkkControl.cpp` | `src/lp/simplex/solver.zig`, `state.zig`, `control.zig` | 🧱 Simplex 模块入口已建。 |
-| Simplex 公共接口 | `HSimplex.h/.cpp`, `HEkkInterface.cpp` | `src/lp/simplex/interface.zig` | 📝 供顶层 LP router 和 MIP relaxation 使用。 |
-| Primal simplex | `HEkkPrimal.h/.cpp` | `src/lp/simplex/primal.zig` | 📝 Phase I/II、entering/leaving 和更新。 |
-| Dual simplex | `HEkkDual.h/.cpp`, `HEkkDualMulti.cpp` | `src/lp/simplex/dual.zig` | 📝 MIP reoptimization 主线。 |
-| Dual RHS | `HEkkDualRHS.h/.cpp` | `src/lp/simplex/dual_rhs.zig` | 📝 管理 primal infeasibility 与 leaving row。 |
-| Dual row / pricing | `HEkkDualRow.h/.cpp` | `src/lp/simplex/pricing.zig` | 📝 Devex、DSE 和候选选择。 |
-| NLA 桥接 | `HSimplexNla.h/.cpp`, `HSimplexNla*.cpp` | `src/lp/simplex/nla.zig` | 📝 管理 factor、FTRAN/BTRAN、freeze 和 product-form。 |
-| Simplex 数据结构 | `SimplexStruct.h` | `src/lp/simplex/state.zig` | 📝 工作 cost/bounds/value、basis map、edge weights 和 rays。 |
-| Simplex 计时与统计 | `SimplexTimer.h`, `HighsSimplexAnalysis.*` | `src/diagnostics/simplex_stats.zig` | 📝 不放入核心 pivot 逻辑。 |
-| Simplex 日志 | `HSimplexReport.h/.cpp` | `src/diagnostics/simplex_report.zig` | 📝 只读 solver snapshot。 |
-| 应用入口 | `simplex/HApp.h` | `src/lp/simplex/solve.zig` | 📝 `solveLpSimplex` 对应入口。 |
+| Basis factorization 主体 | `util/HFactor.h/.cpp` | `src/lp/simplex/factorization.zig` | ✅ SparseLU（base + hyper kernel）与 Forrest–Tomlin 更新链，`matrix/dense_lu.zig` 提供稠密后端。 |
+| Refactor / update | `HFactorRefactor.cpp`, `HFactorExtend.cpp` | `src/lp/simplex/factorization.zig` | ✅ FT 重构与 update 内联于 factorization；独立 `refactor/update` 文件不再规划。 |
+| Factor 辅助与调试 | `HFactorUtils.cpp`, `HFactorDebug.*`, `HFactorConst.h` | `src/lp/simplex/factorization.zig`, `src/diagnostics/factor_check.zig` | 📝 算法内已带调试断言；独立检查入口延后。 |
+| Simplex 总控状态 | `simplex/HEkk.h/.cpp`, `HEkkControl.cpp` | `src/lp/simplex/engine.zig`, `dual_state.zig` | ✅ `SimplexEngine` + `ControlState` 统一 dual phase/rebuild 控制；tasks/multi dual 未实现。 |
+| Simplex 公共接口 | `HSimplex.h/.cpp`, `HEkkInterface.cpp` | `src/lp/simplex/engine.zig` | ✅ `solveProblem/repair` 等公开入口；LP router 与 MIP relaxation 接入属后续 solver 层。 |
+| Primal simplex | `HEkkPrimal.h/.cpp` | `src/lp/simplex/engine_primal.zig` | ✅ Phase I/II、entering/leaving、更新；默认 primal Phase-I 路径对部分语料仍有已知 `direction_column` 数值失败（见 `per_iteration_optimization.md` H2b 注）。 |
+| Dual simplex | `HEkkDual.h/.cpp`, `HEkkDualMulti.cpp` | `src/lp/simplex/engine_dual.zig` | ✅ serial dual 全链路与 HiGHS 结构对齐进行中；multi dual 未实现。 |
+| Dual RHS | `HEkkDualRHS.h/.cpp` | `src/lp/simplex/dual_phase_one.zig` | ✅ `DualRHSState`（infeasibility list、changed rows、candidates）；>500 candidate 的 `workCutoff` nth-element 路径未完成。 |
+| Dual row / pricing | `HEkkDualRow.h/.cpp` | `src/lp/simplex/pricing.zig`, `ratio_test.zig`, `dual_iteration_workspace.zig` | ✅ CHUZC0-3 已实现，CHUZC4 grouping 行为开关待 E3 dual update 对齐后重开。 |
+| NLA 桥接 | `HSimplexNla.h/.cpp`, `HSimplexNla*.cpp` | `src/lp/simplex/simplex_nla.zig` | ✅ vector-native FTRAN/BTRAN/UPDATE 契约，producer-owned support。 |
+| Simplex 数据结构 | `SimplexStruct.h` | `src/lp/simplex/basis.zig`, `dual_phase_one.zig`, `engine.zig` | ✅ `BasisState`、`DualPhaseOneWorkspace`（work cost/bounds/move、RHS、checkpoint、rebuild 度量）、迭代 workspace。 |
+| Simplex 计时与统计 | `SimplexTimer.h`, `HighsSimplexAnalysis.*` | `src/diagnostics/simplex_stats.zig` | 📝 统计字段已随 engine 提供，独立 diagnostics 模块延后。 |
+| Simplex 日志 | `HSimplexReport.h/.cpp` | `src/diagnostics/simplex_report.zig` | 📝 runner 已输出结构化 stats；库内报告入口延后。 |
+| 应用入口 | `simplex/HApp.h` | `src/lp/simplex/solve.zig` | 📝 `solveLpSimplex` 对应入口待 solver 层接线。 |
+| Crash | `ICrash.h/.cpp`, `ICrashUtil.*`, `ICrashX.*` | `src/lp/simplex/crash.zig` | ✅ logical 默认 + 显式 ltssf/bixby 策略；crash 失败原子回退。 |
 
 ## 5. Presolve 与 Postsolve
 
@@ -106,7 +107,6 @@
 | 组件包装 | `PresolveComponent.h/.cpp` | `src/plugin/presolver.zig`, `src/framework/registry.zig` | 📝 用统一插件契约替代单独组件基类。 |
 | 具体 reduction | `HPresolve.cpp` 中各规则 | `src/presolve/rules/*.zig` | 🧱 rules 入口已建，规则按功能拆文件。 |
 | Symmetry | `HighsSymmetry.h/.cpp` | `src/plugins_builtin/presolve/symmetry.zig` | 📝 可选高级组件。 |
-| Crash | `ICrash.h/.cpp`, `ICrashUtil.*`, `ICrashX.*` | `src/lp/simplex/crash.zig` | 📝 从 presolve 目录移到 simplex 初始化职责。 |
 
 ## 6. MIP Branch-and-Cut
 
