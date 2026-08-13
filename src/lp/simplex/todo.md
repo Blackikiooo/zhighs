@@ -850,10 +850,11 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   时从当前基热切 primal（约 13 pivots），Phase-I 重入仅保留给 dual+primal 均不可行的情形。
   CHUZR no-row 与 CHUZC give-up 两个 cleanup 边界同改。全语料 aggregate `9892→9324`（1.063x），
   胜/平/负 `11/25/4→12/25/3`。
-- klein1（434 vs 126，infeasible）：zig 从未进入 dual（primal Ph1 299 + Ph2 135）；HiGHS 冷启动即
-  DuPh2 126。初始 perturbed-computeDual 后 HiGHS 判 dual feasible 直进 Phase II，zig 的
-  `unperturbed_dual_infeasibility_count` 判定非零且 Phase-I setup 早退。属 B1 两次 cost 初始化与
-  phase 选择遗留。
+- klein1（434 vs 126，infeasible）：phase 选择已按 HiGHS 对齐（扰动后 duals 判定 + force_phase2，
+  本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
+  ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
+  HiGHS 的完整证书，随后冷回退 primal Ph1 299。下一轮：按 HiGHS 语义构建全 y 向量 Farkas ray，
+  或先对齐 Phase II 轨迹使 no-entering 基与 HiGHS 一致。
 - scsd1（87 vs 86）：仅差 1，忽略。
 
 ### G. 迭代数验收

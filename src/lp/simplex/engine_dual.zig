@@ -456,13 +456,14 @@ fn solveDualLoop(
                         return self.finishOptimal(problem);
                     }
                     if (cleaned.dual and !cleaned.primal) {
+                        const ray_valid = self.buildAndValidateInfeasibilityRay(problem, leaving);
                         // Dual feasible + primal infeasible with no entering
                         // candidate is the possibly-dual-unbounded state.
                         // Re-validate the Farkas certificate now that exact
                         // costs are installed: the perturbed-cost attempt can
                         // fail spuriously while the cleaned basis certifies
                         // the original bounds.
-                        if (self.buildAndValidateInfeasibilityRay(problem, leaving)) {
+                        if (ray_valid) {
                             self.shifted_dual_exit = .phase_two_fresh_infeasible;
                             return .infeasible;
                         }
@@ -777,11 +778,18 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     self.buildDualPhaseOneCosts(problem);
     self.dual_control.costs_perturbed = true;
     if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
-    // A dual-feasible cold start does not need Phase-I bounds. HiGHS keeps
-    // the freshly perturbed objective and enters Phase II directly, using the
-    // perturbation to break CHUZC ties before exact-cost cleanup.
-
-    if (self.dual_control.unperturbed_dual_infeasibility_count == 0) {
+    // HiGHS decides Phase I versus II on the duals computed with the freshly
+    // perturbed costs, not on the unperturbed assessment: a start whose
+    // unperturbed duals are slightly infeasible but whose perturbed duals are
+    // feasible enters Phase II directly and removes the perturbation in
+    // cleanup. Using the unperturbed count here sent klein1 into a futile
+    // Phase-I cycle followed by a cold primal fallback.
+    const perturbed_dual_stats = self.dual_work.dualInfeasibilityStats(
+        basis,
+        original_count,
+        self.numerical.dual_tolerance,
+    );
+    if (perturbed_dual_stats.count == 0) {
         const correction = rebuildDualState(self, problem, true, null, true) orelse return .not_implemented;
         if (correction.free_infeasibility_count != 0 or !self.classifyFeasibility(problem).dual)
             return .not_implemented;
