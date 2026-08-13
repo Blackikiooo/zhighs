@@ -800,6 +800,13 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `refinery 1359 vs 396 / etamacro 1094 vs 532 / gas11 1127 vs 699 / klein1 434 vs 134 /
   scsd1 87 vs 86`；前四项必须从新的真实路径首次分叉继续追踪。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
+  2026-08-12 F1b 第二步/phase exit 已实现并提交：扰动 Phase II 的 CHUZC no-entering 不再放弃——cleanup
+  扰动、以精确 cost 分类后，(a) dual+primal 可行则 finishOptimal；(b) dual 可行 + primal 不可行
+  （possibly-dual-unbounded）在 cleaned 状态重验 Farkas 证书，有效即返回 infeasible；(c) dual
+  不可行则温重入 dual Phase I（`phase_one_reentries` 深度护栏 3）。CHUZR no-row 的 cleanup 分支
+  同样接入重入协议。refinery `1359→362`（HiGHS 396），证书 `infeasibility_ray_valid=true`；
+  全语料 aggregate `10889→9892`（1.127x），胜/平/负 `10/25/5→11/25/4`，40/40 PASS。剩余落后
+  gas11/etamacro/scsd1/klein1 待从新真实路径首次分叉继续追踪。
   2026-08-12 差分工具与 refinery 首次分叉复核：`PivotTraceEvent` 增加 trace-only 的
   `dual_objective`（行尾字段，不影响 trace lock 列位），与本地 HiGHS 逐迭代 objective 日志
   逐项对比。当前状态 refinery 首个 objective 分叉在 zig pivot 12/HiGHS iter 13

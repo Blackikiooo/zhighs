@@ -311,6 +311,17 @@ fn solveDualLoop(
                 fresh_no_entering_basis = true;
                 continue;
             }
+            // Exact-cost dual infeasibility after the perturbed Phase II
+            // re-enters dual Phase I with the restored basis, matching
+            // HEkkDual::assessPhase1Optimality. Never cold-fall-back to the
+            // artificial primal Phase I from this boundary: the warm basis is
+            // the productive continuation. The depth guard keeps the legacy
+            // fallback for re-entry sequences that cannot terminate.
+            if (self.dual_control.phase_one_reentries < 3) {
+                self.dual_control.phase_one_reentries += 1;
+                self.shifted_dual_exit = .original_dual_infeasible;
+                return self.solveDualPhaseOne(problem, control);
+            }
             if (original_feasibility.primal) {
                 // Primal feasibility does not authorize an algorithm switch
                 // on an explicitly forced-dual run. The original costs are
@@ -427,6 +438,35 @@ fn solveDualLoop(
                 // essential: otherwise the later fallback overwrites the
                 // actual cold-start CHUZC failure site.
                 self.recordDualPhaseOneNoEntering(leaving, entering.flip_count, original_cols);
+                // HiGHS never gives up a perturbed Phase II on CHUZC
+                // no-entering. Cleanup the perturbation, assess the exact
+                // costs, and warm re-enter dual Phase I when they are dual
+                // infeasible instead of cold-falling-back to artificial
+                // primal Phase I.
+                if (rebuildDualState(self, problem, false, .cleanup, false) != null) {
+                    const cleaned = self.classifyFeasibility(problem);
+                    if (cleaned.dual and cleaned.primal) {
+                        self.shifted_dual_exit = .original_dual_feasible;
+                        return self.finishOptimal(problem);
+                    }
+                    if (cleaned.dual and !cleaned.primal) {
+                        // Dual feasible + primal infeasible with no entering
+                        // candidate is the possibly-dual-unbounded state.
+                        // Re-validate the Farkas certificate now that exact
+                        // costs are installed: the perturbed-cost attempt can
+                        // fail spuriously while the cleaned basis certifies
+                        // the original bounds.
+                        if (self.buildAndValidateInfeasibilityRay(problem, leaving)) {
+                            self.shifted_dual_exit = .phase_two_fresh_infeasible;
+                            return .infeasible;
+                        }
+                    }
+                    if (!cleaned.dual and self.dual_control.phase_one_reentries < 3) {
+                        self.dual_control.phase_one_reentries += 1;
+                        self.shifted_dual_exit = .original_dual_infeasible;
+                        return self.solveDualPhaseOne(problem, control);
+                    }
+                }
             }
             self.failure_site = .ratio_test;
             return .numerical_failure;

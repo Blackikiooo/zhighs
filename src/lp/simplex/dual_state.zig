@@ -54,6 +54,10 @@ pub const ControlState = struct {
     phase_one_cleanup_level: u16 = 0,
     /// Number of original-objective cleanup attempts made after Phase II.
     cleanup_level: u16 = 0,
+    /// Warm dual Phase-I re-entries performed after an exact-cost cleanup
+    /// found dual infeasibility. Depth-guards the assessPhase1Optimality
+    /// protocol before the legacy fallback boundary is reached.
+    phase_one_reentries: u16 = 0,
     /// Count of unperturbed dual-infeasible nonbasic variables at initialization.
     unperturbed_dual_infeasibility_count: usize = 0,
     /// Largest unperturbed dual infeasibility.
