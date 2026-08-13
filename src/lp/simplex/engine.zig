@@ -196,7 +196,7 @@ pub const DualPhaseOneCandidateTraceEvent = struct {
     /// Basis/bound status at the time of CHUZC.
     status: basis_module.BasisStatus,
     /// Explicit persistent nonbasic movement in {-1,0,+1}.
-    explicit_move: i8,
+    explicit_move: dual_phase_one_module.NonbasicMove,
     /// Pivotal tableau coefficient.
     tableau: f64,
     /// Temporary CHUZC movement direction.
@@ -1039,7 +1039,7 @@ pub const SimplexEngine = struct {
             // pre-shift basis transactionally and give the original dual
             // Phase I one bounded retry before the primal cold fallback.
             if (self.active_dual_initialization_strategy == .baseline and
-                self.dual_work.checkpoint_valid)
+                self.dual_work.checkpoint.valid)
             retry: {
                 self.numerical = numerical_before_dual_phase_one;
                 self.pricing = pricing_before_dual_phase_one;
@@ -1047,9 +1047,9 @@ pub const SimplexEngine = struct {
                 self.reduced_cost_update_count = 0;
                 self.dual_edge_weights_valid = true;
                 const checkpoint_view = basis_snapshot_module.BasisView{
-                    .structural_status = self.dual_work.checkpoint_status[0..problem.num_cols],
-                    .logical_status = self.dual_work.checkpoint_status[problem.num_cols..][0..problem.num_rows],
-                    .basic_index = self.dual_work.checkpoint_basic_index[0..problem.num_rows],
+                    .structural_status = self.dual_work.checkpoint.status[0..problem.num_cols],
+                    .logical_status = self.dual_work.checkpoint.status[problem.num_cols..][0..problem.num_rows],
+                    .basic_index = self.dual_work.checkpoint.basic_index[0..problem.num_rows],
                 };
                 self.importBasis(problem, checkpoint_view) catch break :retry;
                 if (self.recomputeReducedCosts(problem) != .optimal) break :retry;

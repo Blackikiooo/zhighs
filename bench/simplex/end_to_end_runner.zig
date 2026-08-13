@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
             const line = try std.fmt.allocPrint(allocator, "dual_phase1_candidate\t{d}\t{s}\t{d}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{e:.17}\t{s}\n", .{
                 event.column,
                 @tagName(event.status),
-                event.explicit_move,
+                @intFromEnum(event.explicit_move),
                 event.tableau,
                 event.direction,
                 event.signed_pivot,

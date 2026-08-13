@@ -3,6 +3,7 @@
 const std = @import("std");
 const basis = @import("basis.zig");
 const dual_iteration_workspace = @import("dual_iteration_workspace.zig");
+const dual_phase_one = @import("dual_phase_one.zig");
 
 pub const DualTableauView = dual_iteration_workspace.PivotalRowView(f64);
 
@@ -213,7 +214,7 @@ pub const RatioTest = struct {
         tableau: DualTableauView,
         reduced_cost: []const f64,
         status: []const basis.BasisStatus,
-        nonbasic_move: []const i8,
+        nonbasic_move: []const dual_phase_one.NonbasicMove,
         lower: []const f64,
         upper: []const f64,
         primal: []const f64,
@@ -243,7 +244,7 @@ pub const RatioTest = struct {
 
             // Direction is normally implied by the bound status; `nonbasic_move`
             // (dual Phase-I) can override it with an explicit sign.
-            const explicit_move = if (nonbasic_move.len == 0) 0 else nonbasic_move[column];
+            const explicit_move = if (nonbasic_move.len == 0) .stationary else nonbasic_move[column];
             if (status[column] == .basic) continue;
             if (status[column] == .fixed) continue;
             // CHUZC0 gives only truly free variables a transient direction;
@@ -260,8 +261,8 @@ pub const RatioTest = struct {
             };
             const direction: f64 = if (nonbasic_move.len == 0)
                 status_direction
-            else if (explicit_move != 0)
-                @floatFromInt(explicit_move)
+            else if (explicit_move != .stationary)
+                explicit_move.sign()
             else if ((status[column] == .free or status[column] == .superbasic) and
                 !std.math.isFinite(lower[column]) and !std.math.isFinite(upper[column]))
                 status_direction

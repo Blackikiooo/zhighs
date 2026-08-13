@@ -31,6 +31,33 @@ pub const InfeasibilityStats = struct {
 };
 
 /// Non-owning binding of dual work arrays used by iteration kernels.
+/// Explicit nonbasic direction used by dual Phase I. HiGHS encodes this as
+/// a signed numeric `workMove`; the enum keeps the same `i8` representation
+/// and arithmetic while making `stationary` (basic/fixed/free) distinct from
+/// a real direction at the type level.
+pub const NonbasicMove = enum(i8) {
+    /// Basic, fixed or free: no nonbasic direction is implied.
+    stationary = 0,
+    /// May move up from the lower bound.
+    upward = 1,
+    /// May move down from the upper bound.
+    downward = -1,
+
+    /// Numeric signed movement equivalent to HiGHS `workMove`.
+    pub inline fn sign(self: NonbasicMove) f64 {
+        return @as(f64, @floatFromInt(@intFromEnum(self)));
+    }
+
+    /// Direction flip used by bound-flip corrections.
+    pub inline fn negated(self: NonbasicMove) NonbasicMove {
+        return switch (self) {
+            .stationary => .stationary,
+            .upward => .downward,
+            .downward => .upward,
+        };
+    }
+};
+
 pub const DualWorkView = struct {
     /// Working objective coefficients before temporary `shift`.
     cost: []f64,
@@ -47,7 +74,7 @@ pub const DualWorkView = struct {
     /// Live reduced costs/work duals owned by `BasisState`.
     dual: []f64,
     /// Persistent nonbasic move in {-1,0,+1}.
-    move: []i8,
+    move: []NonbasicMove,
 };
 
 /// Serial-dual RHS state corresponding to `HEkkDualRHS`: the sparse primal
@@ -133,7 +160,7 @@ pub const DualPhaseOneWorkspace = struct {
     highs_permutation: []u32 = &.{},
     /// Explicit Phase-I nonbasic direction: +1 moves up from the lower
     /// bound, -1 moves down from the upper bound, and zero is basic/fixed/free.
-    nonbasic_move: []i8 = &.{},
+    nonbasic_move: []NonbasicMove = &.{},
     /// Residual basic-bound violation after the current ratio-test flip set.
     remaining_violation: []f64 = &.{},
     // ── Serial-dual RHS ─ HEkkDualRHS counterpart; see `DualRHSState` ───────
@@ -205,7 +232,7 @@ pub const DualPhaseOneWorkspace = struct {
         errdefer self.allocator.free(perturbation);
         const highs_permutation = try self.allocator.alloc(u32, count);
         errdefer self.allocator.free(highs_permutation);
-        const move = try self.allocator.alloc(i8, count);
+        const move = try self.allocator.alloc(NonbasicMove, count);
         errdefer self.allocator.free(move);
         const remaining = try self.allocator.alloc(f64, count);
         errdefer self.allocator.free(remaining);
@@ -408,36 +435,36 @@ pub const DualPhaseOneWorkspace = struct {
             const lower = basis.col_lower[column];
             const upper = basis.col_upper[column];
             if (basis.col_status[column] == .basic) {
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 continue;
             }
             // HiGHS derives fixed/free movement from work bounds, not from a
             // possibly stale imported status label.
             if (lower == upper) {
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = lower;
                 continue;
             }
             if (!std.math.isFinite(lower) and !std.math.isFinite(upper)) {
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 basis.col_status[column] = .free;
                 basis.primal[column] = 0.0;
                 continue;
             }
             if (std.math.isFinite(lower)) {
                 if (std.math.isFinite(upper) and basis.col_status[column] == .at_upper) {
-                    self.nonbasic_move[column] = -1;
+                    self.nonbasic_move[column] = .downward;
                     basis.col_status[column] = .at_upper;
                     basis.primal[column] = upper;
                 } else {
                     // Lower or boxed with invalid original move.
-                    self.nonbasic_move[column] = 1;
+                    self.nonbasic_move[column] = .upward;
                     basis.col_status[column] = .at_lower;
                     basis.primal[column] = lower;
                 }
             } else {
-                self.nonbasic_move[column] = -1;
+                self.nonbasic_move[column] = .downward;
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
             }
@@ -479,7 +506,7 @@ pub const DualPhaseOneWorkspace = struct {
             const infeasibility = if (!std.math.isFinite(lower) and !std.math.isFinite(upper))
                 @abs(dual)
             else
-                -@as(f64, @floatFromInt(self.nonbasic_move[column])) * dual;
+                -self.nonbasic_move[column].sign() * dual;
             if (infeasibility <= 0.0) continue;
             if (infeasibility >= dual_tolerance) stats.count += 1;
             stats.maximum = @max(stats.maximum, infeasibility);
@@ -511,16 +538,16 @@ pub const DualPhaseOneWorkspace = struct {
                 if (@abs(current_dual) >= dual_tolerance) result.free_infeasibility_count += 1;
                 continue;
             }
-            const dual_infeasibility = -@as(f64, @floatFromInt(move)) * current_dual;
+            const dual_infeasibility = -move.sign() * current_dual;
             if (dual_infeasibility < dual_tolerance) continue;
             const fixed = lower == upper;
             const boxed = std.math.isFinite(lower) and std.math.isFinite(upper);
             if (fixed or (boxed and !force_phase_two)) {
-                self.nonbasic_move[column] = -move;
-                if (self.nonbasic_move[column] > 0) {
+                self.nonbasic_move[column] = move.negated();
+                if (self.nonbasic_move[column] == .upward) {
                     basis.col_status[column] = .at_lower;
                     basis.primal[column] = lower;
-                } else if (self.nonbasic_move[column] < 0) {
+                } else if (self.nonbasic_move[column] == .downward) {
                     basis.col_status[column] = .at_upper;
                     basis.primal[column] = upper;
                 } else {
@@ -530,7 +557,7 @@ pub const DualPhaseOneWorkspace = struct {
                 result.flip_count += 1;
                 continue;
             }
-            const new_dual = if (move > 0)
+            const new_dual = if (move == .upward)
                 (1.0 + self.correction_random.fraction()) * dual_tolerance
             else
                 -(1.0 + self.correction_random.fraction()) * dual_tolerance;
@@ -689,7 +716,7 @@ pub const DualPhaseOneWorkspace = struct {
             if (basis.col_lower[column] == basis.col_upper[column]) {
                 // Fixed or collapsed boxed variables do not participate in
                 // the Phase-I ratio test or bound flips.
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = 0.0;
             } else if (!lower_finite and !upper_finite) {
@@ -698,19 +725,19 @@ pub const DualPhaseOneWorkspace = struct {
                 // the lower endpoint.
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = -1000.0;
-                self.nonbasic_move[column] = 1;
+                self.nonbasic_move[column] = .upward;
             } else if (!lower_finite) {
                 // Original upper variable keeps its downward move and is
                 // placed at the Phase-I upper endpoint, zero.
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = 0.0;
-                self.nonbasic_move[column] = -1;
+                self.nonbasic_move[column] = .downward;
             } else {
                 // Original lower variable keeps its upward move and is
                 // placed at the Phase-I lower endpoint, zero.
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = 0.0;
-                self.nonbasic_move[column] = 1;
+                self.nonbasic_move[column] = .upward;
             }
         }
         for (basis.basic_index, 0..) |column, row| {
@@ -735,18 +762,18 @@ pub const DualPhaseOneWorkspace = struct {
         for (0..original_count) |column| {
             if (basis.col_status[column] == .basic) continue;
             const move = self.nonbasic_move[column];
-            if (move == 0 or basis.col_lower[column] == basis.col_upper[column]) continue;
-            const dual_infeasibility = -@as(f64, @floatFromInt(move)) * basis.reduced_cost[column];
+            if (move == .stationary or basis.col_lower[column] == basis.col_upper[column]) continue;
+            const dual_infeasibility = -move.sign() * basis.reduced_cost[column];
             self.dual_infeasibility[column] = @max(dual_infeasibility, 0.0);
             if (dual_infeasibility < dual_tolerance) continue;
-            if (move > 0) {
+            if (move == .upward) {
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = basis.col_upper[column];
-                self.nonbasic_move[column] = -1;
+                self.nonbasic_move[column] = .downward;
             } else {
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = basis.col_lower[column];
-                self.nonbasic_move[column] = 1;
+                self.nonbasic_move[column] = .upward;
             }
             flip_count += 1;
         }
@@ -785,39 +812,39 @@ pub const DualPhaseOneWorkspace = struct {
             const upper_finite = std.math.isFinite(upper);
             const move = self.nonbasic_move[column];
             if (lower == upper) {
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 basis.col_status[column] = .fixed;
                 basis.primal[column] = lower;
             } else if (!lower_finite and !upper_finite) {
-                self.nonbasic_move[column] = 0;
+                self.nonbasic_move[column] = .stationary;
                 basis.col_status[column] = .free;
                 basis.primal[column] = 0.0;
             } else if (!lower_finite) {
-                self.nonbasic_move[column] = -1;
+                self.nonbasic_move[column] = .downward;
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
             } else if (!upper_finite) {
-                self.nonbasic_move[column] = 1;
+                self.nonbasic_move[column] = .upward;
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
-            } else if (move != 0) {
+            } else if (move != .stationary) {
                 // Boxed column that was collapsed: use the Phase-I-tracked
-                // direction. move > 0 → at_lower, move < 0 → at_upper.
-                if (move > 0) {
-                    self.nonbasic_move[column] = 1;
+                // direction. upward → at_lower, downward → at_upper.
+                if (move == .upward) {
+                    self.nonbasic_move[column] = .upward;
                     basis.col_status[column] = .at_lower;
                     basis.primal[column] = lower;
                 } else {
-                    self.nonbasic_move[column] = -1;
+                    self.nonbasic_move[column] = .downward;
                     basis.col_status[column] = .at_upper;
                     basis.primal[column] = upper;
                 }
             } else if (basis.reduced_cost[column] >= 0.0) {
-                self.nonbasic_move[column] = 1;
+                self.nonbasic_move[column] = .upward;
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
             } else {
-                self.nonbasic_move[column] = -1;
+                self.nonbasic_move[column] = .downward;
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
             }
@@ -832,7 +859,7 @@ pub const DualPhaseOneWorkspace = struct {
     /// Mirror a committed nonbasic bound flip in the persistent move array.
     pub fn noteBoundFlip(self: *DualPhaseOneWorkspace, column: usize) void {
         if (column >= self.nonbasic_move.len) return;
-        self.nonbasic_move[column] = -self.nonbasic_move[column];
+        self.nonbasic_move[column] = self.nonbasic_move[column].negated();
     }
 
     /// Update explicit moves after a committed basis exchange.
@@ -843,12 +870,12 @@ pub const DualPhaseOneWorkspace = struct {
         leaving_bound: basis_module.BasisStatus,
     ) void {
         if (entering_column >= self.nonbasic_move.len or leaving_column >= self.nonbasic_move.len) return;
-        self.nonbasic_move[entering_column] = 0;
+        self.nonbasic_move[entering_column] = .stationary;
         self.nonbasic_move[leaving_column] = switch (leaving_bound) {
-            .at_lower => 1,
-            .at_upper => -1,
-            .fixed => 0,
-            else => 0,
+            .at_lower => .upward,
+            .at_upper => .downward,
+            .fixed => .stationary,
+            else => .stationary,
         };
     }
 
@@ -1046,21 +1073,21 @@ test "dual Phase-I initial correction flips infeasibilities to objective endpoin
     // initialiseNonbasicValueAndMove first uses the original move and zero
     // endpoint (free is corrected to the finite Phase-I lower endpoint).
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, -1000.0, 0.0 }, basis.primal[0..4]);
-    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 1, 0 }, workspace.nonbasic_move[0..4]);
+    try std.testing.expectEqualSlices(NonbasicMove, &.{ .upward, .downward, .upward, .stationary }, workspace.nonbasic_move[0..4]);
     // The first rebuild flips each Phase-I boxed dual infeasibility. This is
     // where ±1/±1000 values and the negative Phase-I objective arise.
     try std.testing.expectEqual(@as(usize, 3), workspace.correctInitialDualInfeasibilities(&basis, 4, 1e-7));
     try std.testing.expectEqualSlices(f64, &.{ 1.0, -1.0, 1000.0, 0.0 }, basis.primal[0..4]);
-    try std.testing.expectEqualSlices(i8, &.{ -1, 1, -1, 0 }, workspace.nonbasic_move[0..4]);
+    try std.testing.expectEqualSlices(NonbasicMove, &.{ .downward, .upward, .downward, .stationary }, workspace.nonbasic_move[0..4]);
     try std.testing.expectApproxEqAbs(@as(f64, -4005.0), workspace.dualObjective(&basis, 4), 1e-12);
     workspace.noteBoundFlip(0);
-    try std.testing.expectEqual(@as(i8, 1), workspace.nonbasic_move[0]);
+    try std.testing.expectEqual(NonbasicMove.upward, workspace.nonbasic_move[0]);
     workspace.notePivot(1, 3, .at_upper);
-    try std.testing.expectEqual(@as(i8, 0), workspace.nonbasic_move[1]);
-    try std.testing.expectEqual(@as(i8, -1), workspace.nonbasic_move[3]);
+    try std.testing.expectEqual(NonbasicMove.stationary, workspace.nonbasic_move[1]);
+    try std.testing.expectEqual(NonbasicMove.downward, workspace.nonbasic_move[3]);
     workspace.restoreOriginalBounds(&basis, 4);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -std.math.inf(f64), -std.math.inf(f64), -2.0 }, basis.col_lower[0..4]);
-    try std.testing.expectEqualSlices(i8, &.{ 1, -1, 0, -1 }, workspace.nonbasic_move[0..4]);
+    try std.testing.expectEqualSlices(NonbasicMove, &.{ .upward, .downward, .stationary, .downward }, workspace.nonbasic_move[0..4]);
     try std.testing.expectEqualSlices(
         basis_module.BasisStatus,
         &.{ .at_lower, .at_upper, .free, .at_upper },

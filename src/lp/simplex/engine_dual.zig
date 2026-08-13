@@ -993,7 +993,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
 /// unchanged because a simple bound exchange cannot repair them.
 fn flipDualInfeasibleBoxedColumns(
     basis: *basis_module.BasisState,
-    nonbasic_move: []i8,
+    nonbasic_move: []dual_phase_one_module.NonbasicMove,
     column_count: usize,
     dual_tolerance: f64,
 ) void {
@@ -1007,12 +1007,12 @@ fn flipDualInfeasibleBoxedColumns(
             .at_lower => if (reduced < -dual_tolerance) {
                 basis.col_status[column] = .at_upper;
                 basis.primal[column] = upper;
-                nonbasic_move[column] = -1;
+                nonbasic_move[column] = .downward;
             },
             .at_upper => if (reduced > dual_tolerance) {
                 basis.col_status[column] = .at_lower;
                 basis.primal[column] = lower;
-                nonbasic_move[column] = 1;
+                nonbasic_move[column] = .upward;
             },
             else => {},
         }
