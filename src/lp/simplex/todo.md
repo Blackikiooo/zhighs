@@ -749,6 +749,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   第二步仅在实测 Phase-I dual infeasibility 非零时重新初始化 Phase-I nonbasic value/move 并回到 rebuild/
   iterate 外循环。这样先验证 gas11 是否复现 HiGHS cleanup 的 `objective≈-12266、dual infeas=15`，再引入
   re-entry，避免同时改变 objective、bounds 和 basis 三类状态。
+  F1b 第一步已实现并提交：fresh no-row 且 `costs_perturbed` 时按 `HEkkDual::cleanup` 恢复精确 scaled
+  cost（保留 Phase-I bounds/nonbasic value），记录 unperturbed objective 与 dual infeasibility 统计，
+  runner 同步输出。forced-dual 40/40 PASS、aggregate 10889 不变。全语料扫描显示 40 个模型当前 fresh
+  Phase-I final objective 全为 0，该分支暂未被触发；HiGHS 的 gas11 走非零 objective cleanup
+  （objective≈-12266、dual infeas=15），说明分叉在上游 fresh rebuild/objective 计算，F1b 第二步
+  （重入协议）需先定位该差异。
 - [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
   2026-08-12 F1a 后用本地同 commit HiGHS 的开发日志确认：`refinery` 正确路径为
   `DuPh1 96 + DuPh2 300 = 396`。HiGHS 在 fresh Phase-I objective 恰为零时保留已扰动的

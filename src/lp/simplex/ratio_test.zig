@@ -297,7 +297,10 @@ pub const RatioTest = struct {
             candidate_work[candidate_count] = @intCast(column);
             candidate_count += 1;
         }
-        if (candidate_count == 0) return .{};
+        if (candidate_count == 0) {
+            if (chuzc.trace_chuzc) std.debug.print("chuzc_exit\treason=no_candidate\n", .{});
+            return .{};
+        }
 
         // HiGHS CHUZC3 grows a relaxed step until the selected subset has
         // enough aggregate bound range to cover the leaving violation. Keep
@@ -328,6 +331,10 @@ pub const RatioTest = struct {
                 if (total_change >= primal_infeasibility or work_count == full_count) break;
             }
             candidate_count = work_count;
+            if (candidate_count == 0) {
+                if (chuzc.trace_chuzc) std.debug.print("chuzc_exit\treason=large_step_empty\n", .{});
+                return .{};
+            }
         }
 
         if (chuzc.highs_breakpoint_groups) {
@@ -366,13 +373,23 @@ pub const RatioTest = struct {
                 select_theta = remain_theta;
                 if (work_count == previous_work_count and
                     previous_select_theta == select_theta and
-                    previous_remain_theta == remain_theta) return .{};
+                    previous_remain_theta == remain_theta)
+                {
+                    if (chuzc.trace_chuzc) std.debug.print(
+                        "chuzc_exit\treason=grouping_stalled\tworkCount={d}\tfullCount={d}\tselectTheta={e:.17}\n",
+                        .{ work_count, full_count, select_theta },
+                    );
+                    return .{};
+                }
                 previous_work_count = work_count;
                 previous_remain_theta = remain_theta;
                 previous_select_theta = select_theta;
                 if (total_change >= primal_infeasibility or work_count == full_count) break;
             }
-            if (work_count == 0 or group_count == 0) return .{};
+            if (work_count == 0 or group_count == 0) {
+                if (chuzc.trace_chuzc) std.debug.print("chuzc_exit\treason=grouping_empty\n", .{});
+                return .{};
+            }
             candidate_count = work_count;
 
             var maximum_alpha: f64 = 0.0;
@@ -415,7 +432,13 @@ pub const RatioTest = struct {
                     chosen_alpha = effective_alpha;
                 }
             }
-            const entering = chosen_column orelse return .{};
+            const entering = chosen_column orelse {
+                if (chuzc.trace_chuzc) std.debug.print(
+                    "chuzc_exit\treason=no_large_alpha\tworkCount={d}\tfinalCompare={e:.17}\n",
+                    .{ candidate_count, final_compare },
+                );
+                return .{};
+            };
             var flip_count: usize = 0;
             if (reduced_cost[entering] * direction_work[entering] > 0.0) {
                 for (candidate_work[0..candidate_count]) |column_u32| {

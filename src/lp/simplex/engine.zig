@@ -697,6 +697,14 @@ pub const SimplexEngine = struct {
     dual_phase_one_initial_objective: f64 = 0.0,
     /// Fresh working dual objective at the final perturbed Phase-I assessment.
     dual_phase_one_final_objective: f64 = 0.0,
+    /// Exact Phase-I objective after removing cost perturbation.
+    dual_phase_one_unperturbed_objective: f64 = 0.0,
+    /// Dual infeasibilities against Phase-I bounds after cost cleanup.
+    dual_phase_one_unperturbed_dual_infeasibilities: usize = 0,
+    /// Largest cleaned Phase-I dual infeasibility.
+    dual_phase_one_unperturbed_dual_infeasibility_max: f64 = 0.0,
+    /// Sum of cleaned Phase-I dual infeasibilities.
+    dual_phase_one_unperturbed_dual_infeasibility_sum: f64 = 0.0,
     /// Largest basic-bound violation immediately after Phase-I initialization.
     dual_phase_one_initial_max_basic_violation: f64 = 0.0,
     /// First leaving row selected by dual Phase I, if any.
@@ -852,6 +860,10 @@ pub const SimplexEngine = struct {
         self.dual_phase_one_initial_flips = 0;
         self.dual_phase_one_initial_objective = 0.0;
         self.dual_phase_one_final_objective = 0.0;
+        self.dual_phase_one_unperturbed_objective = 0.0;
+        self.dual_phase_one_unperturbed_dual_infeasibilities = 0;
+        self.dual_phase_one_unperturbed_dual_infeasibility_max = 0.0;
+        self.dual_phase_one_unperturbed_dual_infeasibility_sum = 0.0;
         self.dual_phase_one_initial_max_basic_violation = 0.0;
         self.dual_phase_one_initial_leaving_row = null;
         self.numerical.resetAntiCycling();

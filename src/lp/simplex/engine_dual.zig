@@ -917,6 +917,28 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         return solveDualLoop(self, problem, control, true);
     }
 
+    // A nonzero fresh Phase-I objective cannot establish LP dual
+    // infeasibility while costs are perturbed. HEkkDual::cleanup restores the
+    // exact scaled objective but deliberately leaves Phase-I bounds and
+    // nonbasic values installed for this assessment.
+    if (self.dual_control.costs_perturbed) {
+        self.dual_control.phase_one_cleanup_level +|= 1;
+        initializeUnperturbedDualCosts(self, problem);
+        self.dual_control.costs_perturbed = false;
+        self.dual_control.costs_shifted = false;
+        self.dual_control.allow_cost_perturbation = false;
+        if (self.recomputeReducedCostsFromWork(problem) != .optimal) return .not_implemented;
+        const unperturbed = self.dual_work.dualInfeasibilityStats(
+            basis,
+            original_count,
+            self.numerical.dual_tolerance,
+        );
+        self.dual_phase_one_unperturbed_objective = self.dual_work.dualObjective(basis, original_count);
+        self.dual_phase_one_unperturbed_dual_infeasibilities = unperturbed.count;
+        self.dual_phase_one_unperturbed_dual_infeasibility_max = unperturbed.maximum;
+        self.dual_phase_one_unperturbed_dual_infeasibility_sum = unperturbed.sum;
+    }
+
     // Always restore the original model state before classifying feasibility
     // or entering either Phase-II algorithm. Boxed columns are placed on the
     // side implied by the freshly priced reduced cost during restoration.
