@@ -837,6 +837,21 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   顺序与 dual 可行性判定（F1b 第二步的 re-entry 是否应触发）。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 
+### G. 迭代数验收（2026-08-12 剩余四模型分类）
+
+- gas11（1127 vs 699，unbounded）：dense-DSE CHUZR 在迭代 ~57 少选一个微步长 pivot（HiGHS 在
+  57/58 间多做一次目标几乎不变的 pivot），之后轨迹偏移直至 453 处提前 CHUZR no-row（HiGHS DuPh1
+  485、objective≈-12266、Du 14(10987.7) possibly optimal），随后冷回退 primal Ph1 520。根因在
+  chooseRow 的 DSE 权重拒绝/接受循环或 RNG 流消耗，需 gdb 对比。
+- etamacro（1094 vs 530，optimal）：zig = DuPh1 142 + 冷回退 primal Ph1 348 + shifted Ph2 604；
+  HiGHS = DuPh1 152 + DuPh2 372 + PrPh2 6。dual Phase I 退出后仍走冷回退，需复核其 Phase-I
+  exit 为何未命中 R7 的 cleaned 评估/重入协议（final objective/证书路径）。
+- klein1（434 vs 126，infeasible）：zig 从未进入 dual（primal Ph1 299 + Ph2 135）；HiGHS 冷启动即
+  DuPh2 126。初始 perturbed-computeDual 后 HiGHS 判 dual feasible 直进 Phase II，zig 的
+  `unperturbed_dual_infeasibility_count` 判定非零且 Phase-I setup 早退。属 B1 两次 cost 初始化与
+  phase 选择遗留。
+- scsd1（87 vs 86）：仅差 1，忽略。
+
 ### G. 迭代数验收
 
 - [ ] G1 四模型完整 pivot trace 与 HiGHS 对齐。
