@@ -44,11 +44,11 @@ pub fn dualCandidateScore(self: *const SimplexEngine, row_u32: u32) f64 {
 /// Select the highest-merit row from the active sparse candidate list.
 pub fn bestDualCandidate(self: *SimplexEngine) ?pricing_module.DualLeavingChoice {
     if (self.basis == null) return null;
-    if (self.dual_candidate_count > self.dual_work.candidate_row.len or
-        self.dual_candidate_count > self.dual_work.candidate_score.len) return null;
+    if (self.dual_candidate_count > self.dual_work.rhs.candidate_row.len or
+        self.dual_candidate_count > self.dual_work.rhs.candidate_score.len) return null;
     var best: ?pricing_module.DualLeavingChoice = null;
     var best_score = self.numerical.primal_tolerance;
-    for (self.dual_work.candidate_row[0..self.dual_candidate_count], self.dual_work.candidate_score[0..self.dual_candidate_count]) |row, *stored_score| {
+    for (self.dual_work.rhs.candidate_row[0..self.dual_candidate_count], self.dual_work.rhs.candidate_score[0..self.dual_candidate_count]) |row, *stored_score| {
         const score = self.dualCandidateScore(row);
         stored_score.* = score;
         if (score > best_score) {
@@ -62,7 +62,7 @@ pub fn bestDualCandidate(self: *SimplexEngine) ?pricing_module.DualLeavingChoice
 /// Rebuild the sparse CHUZR candidate set and density cutoff from all rows.
 pub fn rebuildDualCandidateList(self: *SimplexEngine) void {
     const basis = if (self.basis) |*value| value else return;
-    const capacity = @min(@min(basis.num_rows, self.dual_work.candidate_row.len), @min(self.dual_work.candidate_score.len, 32));
+    const capacity = @min(@min(basis.num_rows, self.dual_work.rhs.candidate_row.len), @min(self.dual_work.rhs.candidate_score.len, 32));
     self.dual_candidate_count = 0;
     self.dual_candidate_cutoff = 0.0;
     if (capacity == 0) return;
@@ -71,23 +71,23 @@ pub fn rebuildDualCandidateList(self: *SimplexEngine) void {
         if (score <= self.numerical.primal_tolerance) continue;
         if (self.dual_candidate_count < capacity) {
             const slot = self.dual_candidate_count;
-            self.dual_work.candidate_row[slot] = @intCast(row);
-            self.dual_work.candidate_score[slot] = score;
+            self.dual_work.rhs.candidate_row[slot] = @intCast(row);
+            self.dual_work.rhs.candidate_score[slot] = score;
             self.dual_candidate_count += 1;
             continue;
         }
         var weakest: usize = 0;
-        for (self.dual_work.candidate_score[1..capacity], 1..) |candidate_score, slot| {
-            if (candidate_score < self.dual_work.candidate_score[weakest]) weakest = slot;
+        for (self.dual_work.rhs.candidate_score[1..capacity], 1..) |candidate_score, slot| {
+            if (candidate_score < self.dual_work.rhs.candidate_score[weakest]) weakest = slot;
         }
-        if (score > self.dual_work.candidate_score[weakest]) {
-            self.dual_work.candidate_row[weakest] = @intCast(row);
-            self.dual_work.candidate_score[weakest] = score;
+        if (score > self.dual_work.rhs.candidate_score[weakest]) {
+            self.dual_work.rhs.candidate_row[weakest] = @intCast(row);
+            self.dual_work.rhs.candidate_score[weakest] = score;
         }
     }
     if (self.dual_candidate_count > 0) {
-        self.dual_candidate_cutoff = self.dual_work.candidate_score[0];
-        for (self.dual_work.candidate_score[1..self.dual_candidate_count]) |score|
+        self.dual_candidate_cutoff = self.dual_work.rhs.candidate_score[0];
+        for (self.dual_work.rhs.candidate_score[1..self.dual_candidate_count]) |score|
             self.dual_candidate_cutoff = @min(self.dual_candidate_cutoff, score);
     }
 }

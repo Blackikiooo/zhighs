@@ -50,14 +50,75 @@ pub const DualWorkView = struct {
     move: []i8,
 };
 
+/// Serial-dual RHS state corresponding to `HEkkDualRHS`: the sparse primal
+/// infeasibility list, the changed-row support published by the latest FTRAN,
+/// and the retained CHUZR candidate arrays. Infeasibilities are squared,
+/// matching HiGHS when dual steepest-edge pricing is active. The index/mark
+/// pair deliberately retains feasible rows until the next rebuild: insertion
+/// order is the CHUZR tie-break state, not merely a cache of the current
+/// candidates.
+pub const DualRHSState = struct {
+    /// Squared primal infeasibilities by row.
+    primal_infeasibility: []f64 = &.{},
+    /// Sparse row order used by serial CHUZR.
+    infeasibility_index: []u32 = &.{},
+    /// Whether a row has ever been inserted since the last rebuild.
+    infeasibility_mark: []u8 = &.{},
+    /// Active prefix length of `infeasibility_index`.
+    infeasibility_count: usize = 0,
+    /// Hyper-sparse merit cutoff; zero until the >500 candidate path exists.
+    infeasibility_cutoff: f64 = 0.0,
+    /// True when CHUZR scans every row instead of the sparse index.
+    infeasibility_dense: bool = false,
+    /// Whether the persistent RHS list is initialized for the current basis.
+    infeasibility_list_active: bool = false,
+    /// HVector-equivalent row order changed by the latest FTRAN.
+    changed_row_index: []u32 = &.{},
+    /// Active prefix length of `changed_row_index`.
+    changed_row_count: usize = 0,
+    /// Retained row indexes for the legacy hyper-sparse CHUZR selector.
+    /// Kept beside the authoritative infeasibility list until the unified
+    /// major controller removes the legacy selector entirely.
+    candidate_row: []u32 = &.{},
+    /// Weighted CHUZR merits parallel to `candidate_row`.
+    candidate_score: []f64 = &.{},
+};
+
+/// Solution-state measurements recorded at the most recent dual rebuild.
+pub const RebuildMeasurements = struct {
+    /// Basic rows infeasible at the most recently recorded rebuild.
+    primal_infeasibility_count: usize = 0,
+    /// Largest basic-bound violation at the most recent rebuild.
+    primal_infeasibility_max: f64 = 0.0,
+    /// Sum of basic-bound violations at the most recent rebuild.
+    primal_infeasibility_sum: f64 = 0.0,
+    /// Working dual objective at the most recent rebuild.
+    dual_objective: f64 = 0.0,
+    /// Monotonic number of recorded rebuild solution states.
+    epoch: u64 = 0,
+};
+
+/// Transactional basis snapshot used by the shifted cold-dual entry. The
+/// status block is one contiguous SoA array; the basis head is dense.
+pub const BasisCheckpoint = struct {
+    /// Nonbasic status prefix parallel to `basic_index`.
+    status: []basis_module.BasisStatus = &.{},
+    /// Basis head captured when the checkpoint was taken.
+    basic_index: []u32 = &.{},
+    /// Whether the prefixes contain a complete restorable basis.
+    valid: bool = false,
+};
+
 /// Owning persistent SoA workspace shared by serial dual Phase I and II.
 pub const DualPhaseOneWorkspace = struct {
     /// Allocator owning every retained buffer below.
     allocator: std.mem.Allocator,
+    // ── Cold bounds ─ original/Phase-II bounds saved before Phase I ─────────
     /// Original/Phase-II lower bounds saved before installing Phase-I bounds.
     saved_lower: []f64 = &.{},
     /// Original/Phase-II upper bounds saved before installing Phase-I bounds.
     saved_upper: []f64 = &.{},
+    // ── Working cost and move state ─ installed during a Phase-I epoch ──────
     /// Working objective coefficient for every non-artificial column.
     work_cost: []f64 = &.{},
     /// Temporary objective shifts kept separate from `work_cost`.
@@ -75,56 +136,21 @@ pub const DualPhaseOneWorkspace = struct {
     nonbasic_move: []i8 = &.{},
     /// Residual basic-bound violation after the current ratio-test flip set.
     remaining_violation: []f64 = &.{},
-    /// `HEkkDualRHS` state. Infeasibilities are squared, matching HiGHS when
-    /// dual steepest-edge pricing is active. The index/mark pair deliberately
-    /// retains feasible rows until the next rebuild: insertion order is the
-    /// CHUZR tie-break state, not merely a cache of the current candidates.
-    primal_infeasibility: []f64 = &.{},
-    /// Sparse row order used by serial CHUZR.
-    infeasibility_index: []u32 = &.{},
-    /// Whether a row has ever been inserted since the last rebuild.
-    infeasibility_mark: []u8 = &.{},
-    /// HVector-equivalent row order changed by the latest FTRAN.
-    changed_row_index: []u32 = &.{},
-    /// Retained row indexes for the legacy hyper-sparse CHUZR selector.
-    /// Kept beside the authoritative infeasibility list until the unified
-    /// major controller removes the legacy selector entirely.
-    candidate_row: []u32 = &.{},
-    /// Weighted CHUZR merits parallel to `candidate_row`.
-    candidate_score: []f64 = &.{},
-    /// Active prefix length of `infeasibility_index`.
-    infeasibility_count: usize = 0,
-    /// Active prefix length of `changed_row_index`.
-    changed_row_count: usize = 0,
-    /// Hyper-sparse merit cutoff; zero until the >500 candidate path exists.
-    infeasibility_cutoff: f64 = 0.0,
-    /// True when CHUZR scans every row instead of the sparse index.
-    infeasibility_dense: bool = false,
-    /// Whether the persistent RHS list is initialized for the current basis.
-    infeasibility_list_active: bool = false,
+    // ── Serial-dual RHS ─ HEkkDualRHS counterpart; see `DualRHSState` ───────
+    rhs: DualRHSState = .{},
+    // ── Checkpoint ─ transactional basis snapshot for shifted cold dual ─────
     /// Reusable transactional checkpoint for the basis entering the shifted
     /// cold-dual path. Status is one contiguous SoA block; the basis head is
     /// dense. These buffers grow with the existing workspace and never
     /// allocate on a steady-state solve.
-    checkpoint_status: []basis_module.BasisStatus = &.{},
-    /// Basis head paired with `checkpoint_status`.
-    checkpoint_basic_index: []u32 = &.{},
-    /// Whether checkpoint prefixes contain a complete restorable basis.
-    checkpoint_valid: bool = false,
+    checkpoint: BasisCheckpoint = .{},
+    // ── Epoch, RNG and rebuild measurements ─────────────────────────────────
     /// Monotonic identifier incremented when a Phase-I/cost epoch begins.
     basis_epoch: u64 = 0,
     /// HiGHS-compatible RNG stream consumed by dual correction and CHUZR.
     correction_random: highs_random.RandomStream = highs_random.RandomStream.init(0),
-    /// Basic rows infeasible at the most recently recorded rebuild.
-    rebuild_primal_infeasibility_count: usize = 0,
-    /// Largest basic-bound violation at the most recent rebuild.
-    rebuild_primal_infeasibility_max: f64 = 0.0,
-    /// Sum of basic-bound violations at the most recent rebuild.
-    rebuild_primal_infeasibility_sum: f64 = 0.0,
-    /// Working dual objective at the most recent rebuild.
-    rebuild_dual_objective: f64 = 0.0,
-    /// Monotonic number of recorded rebuild solution states.
-    rebuild_epoch: u64 = 0,
+    /// Rebuild-boundary measurements; see `RebuildMeasurements`.
+    rebuild: RebuildMeasurements = .{},
     /// Basic-coordinate envelope in the engine's scaled coordinates when the
     /// current Phase-I epoch was installed.
     working_radius: f64 = 1.0,
@@ -148,14 +174,14 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.highs_permutation);
         self.allocator.free(self.nonbasic_move);
         self.allocator.free(self.remaining_violation);
-        self.allocator.free(self.primal_infeasibility);
-        self.allocator.free(self.infeasibility_index);
-        self.allocator.free(self.infeasibility_mark);
-        self.allocator.free(self.changed_row_index);
-        self.allocator.free(self.candidate_row);
-        self.allocator.free(self.candidate_score);
-        self.allocator.free(self.checkpoint_status);
-        self.allocator.free(self.checkpoint_basic_index);
+        self.allocator.free(self.rhs.primal_infeasibility);
+        self.allocator.free(self.rhs.infeasibility_index);
+        self.allocator.free(self.rhs.infeasibility_mark);
+        self.allocator.free(self.rhs.changed_row_index);
+        self.allocator.free(self.rhs.candidate_row);
+        self.allocator.free(self.rhs.candidate_score);
+        self.allocator.free(self.checkpoint.status);
+        self.allocator.free(self.checkpoint.basic_index);
         self.* = .{ .allocator = self.allocator };
     }
 
@@ -210,14 +236,14 @@ pub const DualPhaseOneWorkspace = struct {
         self.allocator.free(self.highs_permutation);
         self.allocator.free(self.nonbasic_move);
         self.allocator.free(self.remaining_violation);
-        self.allocator.free(self.primal_infeasibility);
-        self.allocator.free(self.infeasibility_index);
-        self.allocator.free(self.infeasibility_mark);
-        self.allocator.free(self.changed_row_index);
-        self.allocator.free(self.candidate_row);
-        self.allocator.free(self.candidate_score);
-        self.allocator.free(self.checkpoint_status);
-        self.allocator.free(self.checkpoint_basic_index);
+        self.allocator.free(self.rhs.primal_infeasibility);
+        self.allocator.free(self.rhs.infeasibility_index);
+        self.allocator.free(self.rhs.infeasibility_mark);
+        self.allocator.free(self.rhs.changed_row_index);
+        self.allocator.free(self.rhs.candidate_row);
+        self.allocator.free(self.rhs.candidate_score);
+        self.allocator.free(self.checkpoint.status);
+        self.allocator.free(self.checkpoint.basic_index);
         self.saved_lower = lower;
         self.saved_upper = upper;
         self.work_cost = cost;
@@ -228,15 +254,15 @@ pub const DualPhaseOneWorkspace = struct {
         self.highs_permutation = highs_permutation;
         self.nonbasic_move = move;
         self.remaining_violation = remaining;
-        self.primal_infeasibility = primal_infeasibility;
-        self.infeasibility_index = infeasibility_index;
-        self.infeasibility_mark = infeasibility_mark;
-        self.changed_row_index = changed_row_index;
-        self.candidate_row = candidate_row;
-        self.candidate_score = candidate_score;
-        self.checkpoint_status = checkpoint_status;
-        self.checkpoint_basic_index = checkpoint_basic_index;
-        self.checkpoint_valid = false;
+        self.rhs.primal_infeasibility = primal_infeasibility;
+        self.rhs.infeasibility_index = infeasibility_index;
+        self.rhs.infeasibility_mark = infeasibility_mark;
+        self.rhs.changed_row_index = changed_row_index;
+        self.rhs.candidate_row = candidate_row;
+        self.rhs.candidate_score = candidate_score;
+        self.checkpoint.status = checkpoint_status;
+        self.checkpoint.basic_index = checkpoint_basic_index;
+        self.checkpoint.valid = false;
     }
 
     /// Return squared basic-bound violation, or zero inside tolerance.
@@ -260,12 +286,12 @@ pub const DualPhaseOneWorkspace = struct {
         num_rows: usize,
         tolerance: f64,
     ) bool {
-        if (num_rows > basis.basic_value.len or num_rows > self.primal_infeasibility.len or
-            num_rows > self.infeasibility_index.len or num_rows > self.infeasibility_mark.len) return false;
-        @memset(self.infeasibility_mark[0..num_rows], 0);
-        self.infeasibility_count = 0;
-        self.infeasibility_cutoff = 0.0;
-        self.infeasibility_dense = false;
+        if (num_rows > basis.basic_value.len or num_rows > self.rhs.primal_infeasibility.len or
+            num_rows > self.rhs.infeasibility_index.len or num_rows > self.rhs.infeasibility_mark.len) return false;
+        @memset(self.rhs.infeasibility_mark[0..num_rows], 0);
+        self.rhs.infeasibility_count = 0;
+        self.rhs.infeasibility_cutoff = 0.0;
+        self.rhs.infeasibility_dense = false;
         for (0..num_rows) |row| {
             const infeasibility = squaredPrimalInfeasibility(
                 basis.basic_value[row],
@@ -273,14 +299,14 @@ pub const DualPhaseOneWorkspace = struct {
                 basis.basic_upper[row],
                 tolerance,
             );
-            self.primal_infeasibility[row] = infeasibility;
+            self.rhs.primal_infeasibility[row] = infeasibility;
             if (infeasibility == 0.0) continue;
-            self.infeasibility_mark[row] = 1;
-            self.infeasibility_index[self.infeasibility_count] = @intCast(row);
-            self.infeasibility_count += 1;
+            self.rhs.infeasibility_mark[row] = 1;
+            self.rhs.infeasibility_index[self.rhs.infeasibility_count] = @intCast(row);
+            self.rhs.infeasibility_count += 1;
         }
-        if (self.infeasibility_count * 5 > num_rows) self.infeasibility_dense = true;
-        self.infeasibility_list_active = true;
+        if (self.rhs.infeasibility_count * 5 > num_rows) self.rhs.infeasibility_dense = true;
+        self.rhs.infeasibility_list_active = true;
         return true;
     }
 
@@ -293,22 +319,22 @@ pub const DualPhaseOneWorkspace = struct {
         rows: []const u32,
         tolerance: f64,
     ) void {
-        if (!self.infeasibility_list_active) return;
+        if (!self.rhs.infeasibility_list_active) return;
         for (rows) |row_u32| {
             const row: usize = @intCast(row_u32);
-            if (row >= basis.basic_value.len or row >= self.primal_infeasibility.len) continue;
+            if (row >= basis.basic_value.len or row >= self.rhs.primal_infeasibility.len) continue;
             const infeasibility = squaredPrimalInfeasibility(
                 basis.basic_value[row],
                 basis.basic_lower[row],
                 basis.basic_upper[row],
                 tolerance,
             );
-            self.primal_infeasibility[row] = infeasibility;
-            if (self.infeasibility_dense or infeasibility == 0.0 or self.infeasibility_mark[row] != 0) continue;
-            if (self.infeasibility_count >= self.infeasibility_index.len) continue;
-            self.infeasibility_index[self.infeasibility_count] = row_u32;
-            self.infeasibility_mark[row] = 1;
-            self.infeasibility_count += 1;
+            self.rhs.primal_infeasibility[row] = infeasibility;
+            if (self.rhs.infeasibility_dense or infeasibility == 0.0 or self.rhs.infeasibility_mark[row] != 0) continue;
+            if (self.rhs.infeasibility_count >= self.rhs.infeasibility_index.len) continue;
+            self.rhs.infeasibility_index[self.rhs.infeasibility_count] = row_u32;
+            self.rhs.infeasibility_mark[row] = 1;
+            self.rhs.infeasibility_count += 1;
         }
     }
 
@@ -318,18 +344,18 @@ pub const DualPhaseOneWorkspace = struct {
         basis: *const basis_module.BasisState,
         num_rows: usize,
     ) ?u32 {
-        if (!self.infeasibility_list_active or num_rows == 0) return null;
-        const scan_count = if (self.infeasibility_dense) num_rows else self.infeasibility_count;
+        if (!self.rhs.infeasibility_list_active or num_rows == 0) return null;
+        const scan_count = if (self.rhs.infeasibility_dense) num_rows else self.rhs.infeasibility_count;
         if (scan_count == 0) return null;
         const random_start = self.correction_random.integer(scan_count);
         var best_row: ?u32 = null;
         var best_merit: f64 = 0.0;
         for (0..scan_count) |offset| {
             const position = (random_start + offset) % scan_count;
-            const row_u32: u32 = if (self.infeasibility_dense) @intCast(position) else self.infeasibility_index[position];
+            const row_u32: u32 = if (self.rhs.infeasibility_dense) @intCast(position) else self.rhs.infeasibility_index[position];
             const row: usize = @intCast(row_u32);
             if (row >= basis.row_edge_weight.len) continue;
-            const infeasibility = self.primal_infeasibility[row];
+            const infeasibility = self.rhs.primal_infeasibility[row];
             if (infeasibility <= 0.0) continue;
             const weight = basis.row_edge_weight[row];
             if (best_merit * weight < infeasibility) {
@@ -351,10 +377,10 @@ pub const DualPhaseOneWorkspace = struct {
         num_rows: usize,
     ) !void {
         try self.ensureCapacity(original_count);
-        if (num_rows > self.checkpoint_basic_index.len) return error.OutOfMemory;
-        @memcpy(self.checkpoint_status[0..original_count], basis.col_status[0..original_count]);
-        @memcpy(self.checkpoint_basic_index[0..num_rows], basis.basic_index[0..num_rows]);
-        self.checkpoint_valid = true;
+        if (num_rows > self.checkpoint.basic_index.len) return error.OutOfMemory;
+        @memcpy(self.checkpoint.status[0..original_count], basis.col_status[0..original_count]);
+        @memcpy(self.checkpoint.basic_index[0..num_rows], basis.basic_index[0..num_rows]);
+        self.checkpoint.valid = true;
     }
 
     /// Bind the complementary SoA storage to BasisState's live work arrays.
@@ -421,7 +447,7 @@ pub const DualPhaseOneWorkspace = struct {
     /// Bind original Phase-II bounds and initialize complementary work arrays.
     pub fn bindPhaseTwo(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, count: usize) !DualWorkView {
         try self.ensureCapacity(count);
-        self.infeasibility_list_active = false;
+        self.rhs.infeasibility_list_active = false;
         @memcpy(self.saved_lower[0..count], basis.col_lower[0..count]);
         @memcpy(self.saved_upper[0..count], basis.col_upper[0..count]);
         for (self.work_range[0..count], basis.col_lower[0..count], basis.col_upper[0..count]) |*range_value, lower, upper|
@@ -527,20 +553,20 @@ pub const DualPhaseOneWorkspace = struct {
         primal_tolerance: f64,
     ) bool {
         if (self.remaining_violation.len < basis.basic_value.len or count > basis.col_status.len) return false;
-        self.rebuild_primal_infeasibility_count = 0;
-        self.rebuild_primal_infeasibility_max = 0.0;
-        self.rebuild_primal_infeasibility_sum = 0.0;
+        self.rebuild.primal_infeasibility_count = 0;
+        self.rebuild.primal_infeasibility_max = 0.0;
+        self.rebuild.primal_infeasibility_sum = 0.0;
         @memset(self.remaining_violation[0..basis.basic_value.len], 0.0);
         for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |value, lower, upper, row| {
             const violation = @max(@max(lower - value, value - upper), 0.0);
             self.remaining_violation[row] = violation;
             if (violation < primal_tolerance) continue;
-            self.rebuild_primal_infeasibility_count += 1;
-            self.rebuild_primal_infeasibility_max = @max(self.rebuild_primal_infeasibility_max, violation);
-            self.rebuild_primal_infeasibility_sum += violation;
+            self.rebuild.primal_infeasibility_count += 1;
+            self.rebuild.primal_infeasibility_max = @max(self.rebuild.primal_infeasibility_max, violation);
+            self.rebuild.primal_infeasibility_sum += violation;
         }
-        self.rebuild_dual_objective = self.dualObjective(basis, count);
-        self.rebuild_epoch +%= 1;
+        self.rebuild.dual_objective = self.dualObjective(basis, count);
+        self.rebuild.epoch +%= 1;
         return true;
     }
 
@@ -562,7 +588,7 @@ pub const DualPhaseOneWorkspace = struct {
     /// Start a dual Phase-I epoch and snapshot original bounds for restoration.
     pub fn begin(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, original_count: usize) !void {
         try self.ensureCapacity(original_count);
-        self.infeasibility_list_active = false;
+        self.rhs.infeasibility_list_active = false;
         @memcpy(self.saved_lower[0..original_count], basis.col_lower[0..original_count]);
         @memcpy(self.saved_upper[0..original_count], basis.col_upper[0..original_count]);
         for (self.work_range[0..original_count], basis.col_lower[0..original_count], basis.col_upper[0..original_count]) |*range_value, lower, upper|
@@ -581,7 +607,7 @@ pub const DualPhaseOneWorkspace = struct {
     /// required.
     pub fn beginCostEpoch(self: *DualPhaseOneWorkspace, basis: *basis_module.BasisState, original_count: usize) !void {
         try self.ensureCapacity(original_count);
-        self.infeasibility_list_active = false;
+        self.rhs.infeasibility_list_active = false;
         @memcpy(self.saved_lower[0..original_count], basis.col_lower[0..original_count]);
         @memcpy(self.saved_upper[0..original_count], basis.col_upper[0..original_count]);
         for (self.work_range[0..original_count], basis.col_lower[0..original_count], basis.col_upper[0..original_count]) |*range_value, lower, upper|
@@ -858,14 +884,14 @@ pub const DualPhaseOneWorkspace = struct {
             std.mem.sliceAsBytes(self.highs_permutation).len +
             std.mem.sliceAsBytes(self.nonbasic_move).len +
             std.mem.sliceAsBytes(self.remaining_violation).len +
-            std.mem.sliceAsBytes(self.primal_infeasibility).len +
-            std.mem.sliceAsBytes(self.infeasibility_index).len +
-            std.mem.sliceAsBytes(self.infeasibility_mark).len +
-            std.mem.sliceAsBytes(self.changed_row_index).len +
-            std.mem.sliceAsBytes(self.candidate_row).len +
-            std.mem.sliceAsBytes(self.candidate_score).len +
-            std.mem.sliceAsBytes(self.checkpoint_status).len +
-            std.mem.sliceAsBytes(self.checkpoint_basic_index).len;
+            std.mem.sliceAsBytes(self.rhs.primal_infeasibility).len +
+            std.mem.sliceAsBytes(self.rhs.infeasibility_index).len +
+            std.mem.sliceAsBytes(self.rhs.infeasibility_mark).len +
+            std.mem.sliceAsBytes(self.rhs.changed_row_index).len +
+            std.mem.sliceAsBytes(self.rhs.candidate_row).len +
+            std.mem.sliceAsBytes(self.rhs.candidate_score).len +
+            std.mem.sliceAsBytes(self.checkpoint.status).len +
+            std.mem.sliceAsBytes(self.checkpoint.basic_index).len;
     }
 };
 
@@ -898,16 +924,16 @@ test "dual RHS candidate storage grows transactionally and is accounted" {
     var work = DualWorkState.init(std.testing.allocator);
     defer work.deinit();
     try work.ensureCapacity(7);
-    try std.testing.expectEqual(@as(usize, 7), work.candidate_row.len);
-    try std.testing.expectEqual(@as(usize, 7), work.candidate_score.len);
-    const row_pointer = work.candidate_row.ptr;
-    const score_pointer = work.candidate_score.ptr;
-    const candidate_bytes = std.mem.sliceAsBytes(work.candidate_row).len +
-        std.mem.sliceAsBytes(work.candidate_score).len;
+    try std.testing.expectEqual(@as(usize, 7), work.rhs.candidate_row.len);
+    try std.testing.expectEqual(@as(usize, 7), work.rhs.candidate_score.len);
+    const row_pointer = work.rhs.candidate_row.ptr;
+    const score_pointer = work.rhs.candidate_score.ptr;
+    const candidate_bytes = std.mem.sliceAsBytes(work.rhs.candidate_row).len +
+        std.mem.sliceAsBytes(work.rhs.candidate_score).len;
     try std.testing.expect(work.requestedBytes() >= candidate_bytes);
     try work.ensureCapacity(5);
-    try std.testing.expectEqual(row_pointer, work.candidate_row.ptr);
-    try std.testing.expectEqual(score_pointer, work.candidate_score.ptr);
+    try std.testing.expectEqual(row_pointer, work.rhs.candidate_row.ptr);
+    try std.testing.expectEqual(score_pointer, work.rhs.candidate_score.ptr);
 }
 
 test "dual correction flips boxed and shifts one-sided work costs" {
@@ -948,17 +974,17 @@ test "dual RHS sparse infeasibility list retains insertion order" {
     basis.basic_value[2] = -2.0;
 
     try std.testing.expect(work.createPrimalInfeasibilityList(&basis, 5, 1e-7));
-    try std.testing.expect(!work.infeasibility_dense);
-    try std.testing.expectEqual(@as(usize, 1), work.infeasibility_count);
-    try std.testing.expectEqual(@as(u32, 2), work.infeasibility_index[0]);
+    try std.testing.expect(!work.rhs.infeasibility_dense);
+    try std.testing.expectEqual(@as(usize, 1), work.rhs.infeasibility_count);
+    try std.testing.expectEqual(@as(u32, 2), work.rhs.infeasibility_index[0]);
 
     // A feasible marked row remains in place, while a newly infeasible row is
     // appended according to the FTRAN index order.
     basis.basic_value[2] = 0.0;
     basis.basic_value[4] = -3.0;
     work.updatePrimalInfeasibilityList(&basis, &.{ 2, 4 }, 1e-7);
-    try std.testing.expectEqual(@as(usize, 2), work.infeasibility_count);
-    try std.testing.expectEqualSlices(u32, &.{ 2, 4 }, work.infeasibility_index[0..2]);
+    try std.testing.expectEqual(@as(usize, 2), work.rhs.infeasibility_count);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 4 }, work.rhs.infeasibility_index[0..2]);
     try std.testing.expectEqual(@as(?u32, 4), work.choosePrimalInfeasibleRow(&basis, 5));
 }
 
@@ -991,12 +1017,12 @@ test "dual rebuild state records primal infeasibilities and objective" {
     basis.primal[0..4].* = .{ 2.0, 3.0, -3.0, 7.0 };
     basis.reduced_cost[0..4].* = .{ 5.0, -2.0, 0.0, 0.0 };
     try std.testing.expect(work.recordRebuildState(&basis, 4, 1e-7));
-    try std.testing.expectEqual(@as(usize, 2), work.rebuild_primal_infeasibility_count);
-    try std.testing.expectEqual(@as(f64, 2.0), work.rebuild_primal_infeasibility_max);
-    try std.testing.expectEqual(@as(f64, 4.0), work.rebuild_primal_infeasibility_sum);
+    try std.testing.expectEqual(@as(usize, 2), work.rebuild.primal_infeasibility_count);
+    try std.testing.expectEqual(@as(f64, 2.0), work.rebuild.primal_infeasibility_max);
+    try std.testing.expectEqual(@as(f64, 4.0), work.rebuild.primal_infeasibility_sum);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 2.0 }, work.remaining_violation[0..2]);
-    try std.testing.expectEqual(@as(f64, 4.0), work.rebuild_dual_objective);
-    try std.testing.expectEqual(@as(u64, 1), work.rebuild_epoch);
+    try std.testing.expectEqual(@as(f64, 4.0), work.rebuild.dual_objective);
+    try std.testing.expectEqual(@as(u64, 1), work.rebuild.epoch);
 }
 
 test "dual Phase-I initial correction flips infeasibilities to objective endpoints" {

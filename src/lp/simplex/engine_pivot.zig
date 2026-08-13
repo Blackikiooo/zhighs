@@ -44,11 +44,11 @@ fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemV
             problem,
             entering_col,
             basis.pivot_direction,
-            self.dual_work.changed_row_index,
+            self.dual_work.rhs.changed_row_index,
         ) orelse return .numerical_failure;
         self.nla.factorization.solveForUpdateSparse(
             basis.pivot_direction,
-            self.dual_work.changed_row_index[0..count],
+            self.dual_work.rhs.changed_row_index[0..count],
         ) catch return .numerical_failure;
     } else {
         if (self.fillInternalColumn(problem, entering_col, basis.pivot_direction) != .optimal)
@@ -83,9 +83,9 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
         return .numerical_failure;
     }
     self.observeAqDensity(basis.pivot_direction);
-    self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
+    self.dual_work.rhs.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
         basis.pivot_direction,
-        self.dual_work.changed_row_index,
+        self.dual_work.rhs.changed_row_index,
     );
     return .optimal;
 }
@@ -135,12 +135,12 @@ pub fn computeDualDirection(
     }
     self.observeAqDensity(iteration.col_aq.values);
     if (iteration.col_aq.activeIndices()) |indices| {
-        @memcpy(self.dual_work.changed_row_index[0..indices.len], indices);
-        self.dual_work.changed_row_count = indices.len;
+        @memcpy(self.dual_work.rhs.changed_row_index[0..indices.len], indices);
+        self.dual_work.rhs.changed_row_count = indices.len;
     } else {
-        self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
+        self.dual_work.rhs.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
             iteration.col_aq.values,
-            self.dual_work.changed_row_index,
+            self.dual_work.rhs.changed_row_index,
         );
     }
     return .ready;
@@ -273,7 +273,7 @@ fn performPivotWithDirection(
     self.dual_work.notePivot(entering_col, leaving_col, committed_leaving_status);
     self.dual_work.updatePrimalInfeasibilityList(
         basis,
-        self.dual_work.changed_row_index[0..self.dual_work.changed_row_count],
+        self.dual_work.rhs.changed_row_index[0..self.dual_work.rhs.changed_row_count],
         self.numerical.primal_tolerance,
     );
     if (self.devex_reset_after_pivot) {

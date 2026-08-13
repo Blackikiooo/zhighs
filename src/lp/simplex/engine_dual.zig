@@ -901,7 +901,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     // Assess the Phase-I objective while the special bounds and values are
     // still installed. HiGHS then reinstalls the original (Phase-II) bounds
     // before performing any Phase-II iteration.
-    self.dual_phase_one.final_objective = self.dual_work.rebuild_dual_objective;
+    self.dual_phase_one.final_objective = self.dual_work.rebuild.dual_objective;
     if (self.dual_phase_one.final_objective == 0.0) {
         // Zero auxiliary objective is the normal Phase-I exit. Keep the
         // perturbed work costs alive: HEkkDual restores only Phase-II bounds
@@ -1487,7 +1487,7 @@ fn chooseDualLeavingWithExactDseValidation(
     while (true) {
         const basis = if (self.basis) |*value| value else return .numerical_failure;
         const leaving = if (self.active_dual_initialization_strategy == .highs and
-            self.dual_work.infeasibility_list_active)
+            self.dual_work.rhs.infeasibility_list_active)
         blk: {
             const row_u32 = self.dual_work.choosePrimalInfeasibleRow(basis, problem.num_rows) orelse return .optimal;
             const row: usize = @intCast(row_u32);
@@ -1596,9 +1596,9 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
         return .numerical_failure;
     self.nla.ftran(&iteration.col_bfrt) catch return .numerical_failure;
     for (iteration.col_bfrt.values) |value| if (!std.math.isFinite(value)) return .numerical_failure;
-    self.dual_work.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
+    self.dual_work.rhs.changed_row_count = self.nla.factorization.gatherFtranResultIndices(
         iteration.col_bfrt.values,
-        self.dual_work.changed_row_index,
+        self.dual_work.rhs.changed_row_index,
     );
 
     // Commit only after the aggregate solve succeeds. Thus an invalid
@@ -1618,7 +1618,7 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
     for (basis.basic_index, basis.basic_value) |basic_column, value| basis.primal[basic_column] = value;
     self.dual_work.updatePrimalInfeasibilityList(
         basis,
-        self.dual_work.changed_row_index[0..self.dual_work.changed_row_count],
+        self.dual_work.rhs.changed_row_index[0..self.dual_work.rhs.changed_row_count],
         self.numerical.primal_tolerance,
     );
     return .optimal;
