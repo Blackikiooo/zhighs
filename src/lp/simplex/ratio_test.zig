@@ -27,7 +27,9 @@ pub const DualEnteringChoice = struct {
     column: ?u32 = null,
     /// Signed primal movement of the entering nonbasic variable.
     direction: f64 = 0.0,
-    /// Dual step applied to the packed tableau row.
+    /// Dual step applied to the packed tableau row. Matches HiGHS
+    /// `theta_dual`: the CHUZC2 minimum relaxed ratio (or the CHUZC4
+    /// pivot-dual step), mapped to zhighs' reduced-cost sign convention.
     theta: f64 = 0.0,
     /// Whether HiGHS CHUZC selected the zero-theta shift-cost path.
     zero_dual_step: bool = false,
@@ -519,21 +521,24 @@ pub const RatioTest = struct {
                     continue;
                 }
             }
-            const ratio = ratio_work[column];
             return .{
                 .column = column_u32,
                 .direction = direction_work[column],
-                .theta = if (leaving_bound == .at_lower) -ratio else ratio,
+                // HiGHS applies the CHUZC2 minimum relaxed ratio as the dual
+                // step, not the entering column's own ratio. `min_ratio` is
+                // the smallest candidate ratio in HiGHS `relax/alpha`
+                // coordinates; the leaving-bound sign maps it to zhighs'
+                // reduced-cost convention.
+                .theta = if (leaving_bound == .at_lower) -min_ratio else min_ratio,
                 .flip_count = flip_count,
             };
         }
         if (flip_count > 0 and flip_count == candidate_count) {
             const entering = candidate_work[candidate_count - 1];
-            const ratio = ratio_work[entering];
             return .{
                 .column = entering,
                 .direction = direction_work[entering],
-                .theta = if (leaving_bound == .at_lower) -ratio else ratio,
+                .theta = if (leaving_bound == .at_lower) -min_ratio else min_ratio,
                 .flip_count = flip_count - 1,
             };
         }

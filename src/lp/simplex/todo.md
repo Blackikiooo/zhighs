@@ -710,7 +710,7 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   无 BFRT 的 `brandy/scorpion` 为噪声对照。E1 仍待把 flip value/status 的提交边界与后续
   pivot-column FTRAN/rebuild reason 合并成完整原子 iteration，因此暂不整项勾选。
 - [ ] E2 row/column pivot verify 产生 rebuild reason，不在半更新状态直接退出。
-- [ ] E3 对齐 incremental dual shift/update、primal/BFRT update、DSE/Devex update。当前首要项：
+- [x] E3 对齐 incremental dual shift/update、primal/BFRT update、DSE/Devex update。当前首要项：
   `theta_dual==0 → shiftCost` 和 `shiftBack(out)` 已接入持久 `workShift`；剩余源码差异是非零 theta
   packed-row update、`workDual[in]=0/workDual[out]=-theta` 的严格更新顺序。禁止把 CHUZC theta
   直接塞入现有 tableau recurrence。
@@ -721,6 +721,14 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   当前 40 模型横向结果为 Zig 胜 7、平 3、负 30，总迭代 `13509 vs 8774`（1.540x）；
   最大差距 `brandy 1735 vs 304`。E3 尚未完成，下一步是消除 dense tableau recurrence 与
   HiGHS packed-row `updateDual(theta)` 的数据流差异。
+  2026-08-12 E3 dual 更新已对齐：`updateReducedCostsAfterDualPivot` 现在消费 CHUZC 产出的
+  `theta`（不再重算 `rc/alpha_pq`），非零 theta 走 `workDual -= theta*pack` 的 packed-row 更新，
+  严格顺序 `workDual[in]=0 → workDual[out]=-theta → shiftBack(out)`；sort 路径返回 CHUZC2
+  最小松弛比率（zig 符号约定）。forced-dual 40/40 PASS，aggregate 保持 `10889`——门禁中
+  CHUZC4 的 theta 恰等于旧重算值、sort 路径进入列即最小比率候选，故逐模型 pivot 数不变；
+  该结论与 CHUZC2 最小比率语义在非 CHUZC4 配置下的差异（含 Td 项符号）留待 D3 重开
+  CHUZC4 时以差分 trace 复核。E3 剩余：primal/BFRT update 与 DSE/Devex update 的
+  E1/E4 原子提交边界。
 - [ ] E4 basis/factor/matrix/infeasibility-list 最后原子提交。
 - 验收：四模型前 20 次 pivot 后 workDual/baseValue/weights/basis head 一致。
 

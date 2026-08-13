@@ -464,6 +464,7 @@ fn solveDualLoop(
             entering_index,
             leaving.row,
             entering.zero_dual_step,
+            entering.theta,
         ) != .optimal) {
             self.failure_site = .reduced_cost;
             return .numerical_failure;
@@ -868,6 +869,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             entering_index,
             leaving.row,
             entering.zero_dual_step,
+            entering.theta,
         ) != .optimal) return .not_implemented;
         if (self.performDualPivot(problem, entering_index, entering.direction, leaving_row, leaving.bound, @max(step, 0.0)) != .optimal)
             return .not_implemented;
@@ -1699,16 +1701,19 @@ pub fn accumulateBoundFlipRhs(
     return .optimal;
 }
 
-/// Maintain `r' = r - (r_q / alpha_pq) alpha_p` from the tableau row of
-/// the old basis. `pivot_direction` may have been negated for movement
-/// from an upper bound, but basis replacement still installs the original
-/// `A_q`, so the unsigned tableau pivot is the required denominator.
+/// Maintain the working dual values after a committed dual pivot, matching
+/// `HEkkDual::updateDual`: a zero theta performs `shiftCost(in, -workDual[in])`,
+/// a nonzero theta applies the packed pivotal row `workDual -= theta*pack`,
+/// then `workDual[in] = 0`, `workDual[out] = -theta` and `shiftBack(out)` are
+/// applied in exactly that order. The theta consumed here is the CHUZC
+/// dual step produced by the ratio test, not a recomputed `rc/alpha` ratio.
 pub fn updateReducedCostsAfterDualPivot(
     self: *SimplexEngine,
     problem: problem_module.ProblemView,
     entering_col: usize,
     leaving_row: u32,
     zero_dual_step: bool,
+    theta: f64,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
@@ -1726,16 +1731,22 @@ pub fn updateReducedCostsAfterDualPivot(
         if (!std.math.isFinite(shift) or !self.dual_work.shiftCost(entering_col, shift))
             return .numerical_failure;
     } else {
-        const theta = basis.reduced_cost[entering_col] / alpha_pq;
         if (!std.math.isFinite(theta)) return .numerical_failure;
-        for (basis.reduced_cost[0..original_count], 0..) |*reduced, column|
-            reduced.* -= theta * tableau.at(column);
+        // HiGHS `HEkkDualRow::updateDual`: only the CHUZC pack participates.
+        for (iteration.packedIndices(), iteration.packedValues()) |column_u32, pack_value| {
+            const column: usize = @intCast(column_u32);
+            basis.reduced_cost[column] -= theta * pack_value;
+        }
+        // Artificial Phase-I columns are absent from the pack; retain the
+        // dense pass so the primal Phase-I context keeps its sign-adjusted
+        // reduced-cost update.
         const artificial_begin = original_count;
         for (0..problem.num_rows) |logical_row|
             basis.reduced_cost[artificial_begin + logical_row] -=
                 theta * iteration.row_ep.values[logical_row] * basis.artificial_sign[logical_row];
     }
     basis.reduced_cost[entering_col] = 0.0;
+    basis.reduced_cost[leaving_col] = -theta;
     if (!self.dual_work.shiftBack(basis.reduced_cost, leaving_col)) return .numerical_failure;
     for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
     self.reduced_cost_update_count += 1;
@@ -1899,7 +1910,7 @@ test "dual rank one reduced cost update uses the old tableau row" {
     engine.dual_iteration.?.row_ep.values[0] = 1;
     engine.basis.?.artificial_sign[0] = -1;
 
-    try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0, false));
+    try std.testing.expectEqual(SolveStatus.optimal, engine.updateReducedCostsAfterDualPivot(problem, 0, 0, false, 1.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0), engine.basis.?.reduced_cost[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, -2.5), engine.basis.?.reduced_cost[1], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, -0.5), engine.basis.?.reduced_cost[2], 1e-12);
