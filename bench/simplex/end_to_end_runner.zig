@@ -169,10 +169,10 @@ pub fn main(init: std.process.Init) !void {
     });
     const solve_ns: u64 = @intCast(nowNs() - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
-        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{d}\n", .{
-            @tagName(event.phase),  event.iteration, event.entering_column, event.leaving_column,          event.leaving_row,
-            event.pivot,            event.step,      event.update_count,    event.ftran_relative_residual, event.condition_estimate,
-            event.bound_flip_count,
+        const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{d}\t{e:.17}\n", .{
+            @tagName(event.phase),  event.iteration,      event.entering_column, event.leaving_column,          event.leaving_row,
+            event.pivot,            event.step,           event.update_count,    event.ftran_relative_residual, event.condition_estimate,
+            event.bound_flip_count, event.dual_objective,
         });
         defer allocator.free(trace_line);
         try std.Io.File.stderr().writeStreamingAll(io_context, trace_line);

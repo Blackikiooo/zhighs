@@ -282,6 +282,10 @@ fn performPivotWithDirection(
     }
     for (basis.basic_index, basis.basic_value) |global_col, value| basis.primal[global_col] = value;
     if (self.pivot_trace_count < self.active_pivot_trace.len) {
+        const trace_dual_objective = self.dual_work.dualObjective(
+            basis,
+            problem.num_cols + problem.num_rows,
+        );
         self.active_pivot_trace[self.pivot_trace_count] = .{
             .phase = self.current_phase,
             .iteration = self.iterations,
@@ -294,6 +298,7 @@ fn performPivotWithDirection(
             .ftran_relative_residual = self.numerical.last_ftran_relative_residual,
             .condition_estimate = self.numerical.pivot_condition_estimate,
             .bound_flip_count = 0,
+            .dual_objective = trace_dual_objective,
         };
         self.pivot_trace_count += 1;
     }

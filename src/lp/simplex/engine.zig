@@ -150,6 +150,9 @@ pub const PivotTraceEvent = struct {
     condition_estimate: f64,
     /// Number of nonbasic bound flips associated with this iteration.
     bound_flip_count: usize,
+    /// Working dual objective after the pivot. Recomputed exactly only when
+    /// caller trace storage is active; otherwise zero.
+    dual_objective: f64,
 };
 /// Mutually exclusive primary cause assigned to a degenerate iteration.
 pub const DegeneracyReason = enum {

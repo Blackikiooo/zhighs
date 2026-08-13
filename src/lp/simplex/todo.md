@@ -800,6 +800,17 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   `refinery 1359 vs 396 / etamacro 1094 vs 532 / gas11 1127 vs 699 / klein1 434 vs 134 /
   scsd1 87 vs 86`；前四项必须从新的真实路径首次分叉继续追踪。
 - [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
+  2026-08-12 差分工具与 refinery 首次分叉复核：`PivotTraceEvent` 增加 trace-only 的
+  `dual_objective`（行尾字段，不影响 trace lock 列位），与本地 HiGHS 逐迭代 objective 日志
+  逐项对比。当前状态 refinery 首个 objective 分叉在 zig pivot 12/HiGHS iter 13
+  （`-860.4972919350e2 vs -860.4972911000e2`），与 F0p 记录的 base LU pivot permutation
+  tie-break 一致。结构确认：zig = DuPh1 90（HiGHS 96）+ 主 dual Phase II 272（HiGHS 300，
+  use_work_costs 记账为 shifted）→ CHUZR no-row（primal 可行）→ 恢复原始 cost 后分类
+  dual infeasible → 冷回退 primal Phase I 997（HiGHS 无）。Phase-II no-entering 全程仅
+  2 次 `chuzc_exit reason=no_candidate`，272 处来自 CHUZR no-row 而非 CHUZC 早退。
+  下一根因：HiGHS 在 DuPh2 300 后 original-cost cleanup 成功判 optimal，zig 在 272 后
+  同协议分类为 original dual infeasible——需比对 cleanup 的 remove-perturbation/reprice
+  顺序与 dual 可行性判定（F1b 第二步的 re-entry 是否应触发）。
 - 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
 
 ### G. 迭代数验收
