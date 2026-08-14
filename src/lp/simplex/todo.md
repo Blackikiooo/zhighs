@@ -1092,3 +1092,12 @@ grow7 外 7 个 cycles 上升，shell `66.0M→71.5M`（+8.3%）、scrs8
 `70.5M→74.0M`（+4.9%）、seba `39.1M→41.6M`（+6.5%）。影子镜像已完整
 删除。结论与此前 synthetic-clock shadow graph 一致：下一次 U/UR 布局工作必须
 直接替换权威表示，不能在 pivot UPDATE 上并行维护第二套结构。
+
+### Round 10c: whole-row/whole-column unlink specialization（否定）
+
+将 pivotal row 删除专门化为只修复 column 链、pivotal column 删除专门化为只修复
+row 链，避免维护即将整体作废的另一方向；free-list 顺序和剩余遍历顺序不变。
+ReleaseFast 全测与 shell 558 pivots 通过，8 模型硬件 cycles 合计仅约 -0.13%，
+独立 512 阶/64-update FT microbench 的 UPDATE 中位数反而 `2769→2779 ns`。
+编译器已内联原通用 remove 并消除了足够多的死写，手工专门化没有越过噪声门槛，
+实现已删除。
