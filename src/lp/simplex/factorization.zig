@@ -587,12 +587,13 @@ pub const Factorization = struct {
         const pivot_row: usize = @intCast(update_view.leaving_row);
         if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
         const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
-        // Scan the direction vector for non-finite entries and the largest magnitude.
+        // Scan the direction vector for the largest magnitude; non-finite
+        // entries propagate through `max` (NaN or infinity) and are rejected
+        // once after the loop, removing the per-entry branch.
         var maximum_magnitude: f64 = 0.0;
-        for (update_view.direction) |value| {
-            if (!std.math.isFinite(value)) return error.NumericalFailure;
+        for (update_view.direction) |value|
             maximum_magnitude = @max(maximum_magnitude, @abs(value * update_view.column_scale));
-        }
+        if (!std.math.isFinite(maximum_magnitude)) return error.NumericalFailure;
         if (pivot_magnitude <= self.dense_lu.pivot_tolerance)
             return error.Singular;
         const update_growth = maximum_magnitude / pivot_magnitude;
