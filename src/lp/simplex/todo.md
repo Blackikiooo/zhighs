@@ -907,6 +907,20 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   或先对齐 Phase II 轨迹使 no-entering 基与 HiGHS 一致。
 - scsd1（87 vs 86）：仅差 1，忽略。
 
+### G. 迭代数验收（2026-08-12 对齐墙结论与 Phase 3 转场）
+
+- 对齐墙：gas11 的 226 CHUZR 分叉与 klein1 的 pivot-1 CHUZC4 分叉均为 1-ulp 级数值漂移
+  （klein1 系数 ~1e-12；gas11 的 DSE 权重递推自 117 处起漂移）。逐位对齐要求：预缩放矩阵
+  物化（HiGHS `A*(colScale*rowScale)` 顺序）、成本缩放坐标统一、以及三角求解/FT 更新的
+  运算顺序与 HFactor 完全一致——后者正是 F 系列明确放弃的 factor-order 对齐。结论：迭代数
+  平价（≤8774）在 ulp 墙处不可达，对齐战役收口于 **9354 vs 8774（1.066x）**、40/40 正确、
+  胜/平/负 12/25/3，etamacro/refinery 已反超 HiGHS。
+- 转场 Phase 3（时间指标）：2026-08-12 性能基线（11 轮交替中位数，与 08-08 冻结基线同法）
+  shell 3.37x、capri 1.79x、scrs8 1.97x、seba 2.78x。目标改为逐模型中位数时间之和低于
+  HiGHS；H 系列协议（ns/pivot、31/101 轮交替、负结果删除并记录）继续生效。gas11 的
+  rebuild/invert 风暴（112 次 invert）随 546-pivot 路径解锁自然消除；纯 dual 模型的
+  per-pivot 成本在 FTRAN/BTRAN/PRICE，按 H 系列假设逐一实验。
+
 ### G. 迭代数验收
 
 - [ ] G1 四模型完整 pivot trace 与 HiGHS 对齐。

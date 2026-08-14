@@ -909,12 +909,10 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
     while (self.iterations < control.max_iterations) : (self.iterations += 1) {
         if (self.beginIteration(problem, control, .dual_phase_one)) |status| return status;
         if (self.pricing.rule == .steepest_edge and self.ensureExactDualEdgeWeights() != .optimal) {
-            std.debug.print("dual_diag\tloop_exit_edge_weights\titerations={d}\n", .{self.iterations});
             return .not_implemented;
         }
         var leaving_choice: ?pricing_module.DualLeavingChoice = null;
         if (chooseDualLeavingWithExactDseValidation(self, problem, &leaving_choice) != .optimal) {
-            std.debug.print("dual_diag\tloop_exit_chuzr\titerations={d}\n", .{self.iterations});
             return .not_implemented;
         }
         const leaving = leaving_choice orelse {
@@ -932,7 +930,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
                     return .not_implemented;
                 continue;
             }
-            std.debug.print("dual_diag\tloop_no_row_break\titerations={d}\n", .{self.iterations});
             break;
         };
         if (self.dual_phase_one.initial_leaving_row == null)
@@ -1161,7 +1158,6 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             break;
         }
     }
-    std.debug.print("dual_diag\tpost_assessment\tdual_infeasible={d}\tprimal_feasible={}\n", .{ dual_infeasible, primal_feasible });
     if (primal_feasible) {
         self.pricing.rule = saved_pricing_rule;
         return self.solvePrimal(problem, control);
