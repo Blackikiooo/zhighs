@@ -62,9 +62,9 @@ fn priceStructuralColumns(
             alpha += dual[matrix_row.toUsize()] * scaled_coefficient;
         }
         row_ap.values[column] = alpha;
-        if (@abs(alpha) > zero_tolerance) counts.simplex_nonzeros += 1;
-        if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.highs_nonzeros += 1;
         if (alpha != 0.0) {
+            if (@abs(alpha) > zero_tolerance) counts.simplex_nonzeros += 1;
+            if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.highs_nonzeros += 1;
             row_ap.indices[row_ap.index_count] = @intCast(column);
             row_ap.index_count += 1;
         }
