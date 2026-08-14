@@ -454,17 +454,22 @@ pub const DualPhaseOneWorkspace = struct {
         const random_start = self.correction_random.integer(scan_count);
         var best_row: ?u32 = null;
         var best_merit: f64 = 0.0;
-        for (0..scan_count) |offset| {
-            const position = (random_start + offset) % scan_count;
-            const row_u32: u32 = if (self.rhs.infeasibility_dense) @intCast(position) else self.rhs.infeasibility_index[position];
-            const row: usize = @intCast(row_u32);
-            if (row >= basis.row_edge_weight.len) continue;
-            const infeasibility = self.rhs.primal_infeasibility[row];
-            if (infeasibility <= 0.0) continue;
-            const weight = basis.row_edge_weight[row];
-            if (best_merit * weight < infeasibility) {
-                best_merit = infeasibility / weight;
-                best_row = row_u32;
+        // HiGHS' two-section wrap avoids a modulo per scanned row: the same
+        // visitation order from random_start around the ring.
+        for (0..2) |section| {
+            const section_begin: usize = if (section == 0) random_start else 0;
+            const section_end: usize = if (section == 0) scan_count else random_start;
+            for (section_begin..section_end) |position| {
+                const row_u32: u32 = if (self.rhs.infeasibility_dense) @intCast(position) else self.rhs.infeasibility_index[position];
+                const row: usize = @intCast(row_u32);
+                if (row >= basis.row_edge_weight.len) continue;
+                const infeasibility = self.rhs.primal_infeasibility[row];
+                if (infeasibility <= 0.0) continue;
+                const weight = basis.row_edge_weight[row];
+                if (best_merit * weight < infeasibility) {
+                    best_merit = infeasibility / weight;
+                    best_row = row_u32;
+                }
             }
         }
         // Sparse mode with a hyper-sparse cutoff: rebuild the list when no
