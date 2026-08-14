@@ -1149,3 +1149,14 @@ ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 13 完�
 （aggregate 9365）。8 模型 11 轮硬件 cycles 合计约 **-1.66%**；完整 40 模型
 31 轮交替门禁的 solve 中位数之和 `261.139→254.783 ms`（**-2.43%**），
 34 胜 6 负。该项保留。
+
+### Round 14b: column PRICE direct-to-CHUZC pack（否定）
+
+利用 column PRICE 覆盖全部 `row_ap.values`、且 Round 13 已不依赖结构 support
+清零的 producer contract，试验在 PRICE 内直接按自然列序写 CHUZC pack，跳过
+`row_ap.indices` 发布及紧随其后的结构 pack 复制；row-pricing 路径保持不变。
+ReleaseFast 全测通过，forced-dual 40 模型 pivot 与 Round 14 完全一致（aggregate
+9365）。8 模型各 31 轮硬件门禁 instructions/cycles 合计约 -0.33%/-0.25%，但
+完整 40 模型 31 轮交替门禁的 solve 中位数之和 `262.174→263.847 ms`
+（**+0.64%**，23 胜 17 负）。这点微小的读写减少没有覆盖 producer 中新增的
+双目标存储流，未形成稳定端到端收益，代码已删除。
