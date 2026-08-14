@@ -361,7 +361,7 @@ fn solveDualLoop(
             leaving.bound,
             leaving.violation,
             iteration.work_ratio,
-            iteration.work_direction,
+            iteration.work_alpha,
             iteration.candidate_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
@@ -954,7 +954,7 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
             leaving.bound,
             leaving.violation,
             iteration.work_ratio,
-            iteration.work_direction,
+            iteration.work_alpha,
             iteration.candidate_indices,
             .{
                 .highs_choose_possible = self.active_dual_initialization_strategy == .highs,
@@ -1460,7 +1460,7 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
             leaving.bound,
             leaving.violation,
             iteration.work_ratio,
-            iteration.work_direction,
+            iteration.work_alpha,
             iteration.candidate_indices,
             .{},
         );

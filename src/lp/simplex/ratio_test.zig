@@ -37,6 +37,10 @@ pub const DualEnteringChoice = struct {
     flip_count: usize = 0,
 };
 
+inline fn directionFromMovedAlpha(moved_alpha: f64) f64 {
+    return if (moved_alpha > 0.0) 1.0 else -1.0;
+}
+
 /// Optional source-alignment controls for HiGHS CHUZC2 candidate filtering.
 pub const DualChuzcControl = struct {
     /// Enable HiGHS update-count-dependent candidate pivot tolerances.
@@ -223,18 +227,19 @@ pub const RatioTest = struct {
         leaving_bound: basis.BasisStatus,
         primal_infeasibility: f64,
         ratio_work: []f64,
-        direction_work: []f64,
+        alpha_work: []f64,
         candidate_work: []u32,
         chuzc: DualChuzcControl,
     ) DualEnteringChoice {
         const count = tableau.len();
         if (reduced_cost.len < count or status.len < count or lower.len < count or upper.len < count or
-            primal.len < count or ratio_work.len < count or direction_work.len < count or candidate_work.len < count)
+            primal.len < count or ratio_work.len < count or alpha_work.len < count or candidate_work.len < count)
             return .{};
         if (nonbasic_move.len != 0 and nonbasic_move.len < count) return .{};
         // First pass: compute ratio and direction for every eligible nonbasic column.
         var candidate_count: usize = 0;
         const scan_count = if (chuzc.use_packed_indices) chuzc.packed_indices.len else count;
+        const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
         for (0..scan_count) |position| {
             const column = if (chuzc.use_packed_indices)
                 @as(usize, @intCast(chuzc.packed_indices[position]))
@@ -270,8 +275,8 @@ pub const RatioTest = struct {
                 status_direction
             else
                 continue;
-            const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-            const effective_alpha = alpha * move_out * direction;
+            const moved_alpha = alpha * move_out;
+            const effective_alpha = moved_alpha * direction;
             const alpha_tolerance: f64 = if (chuzc.highs_choose_possible)
                 if (chuzc.update_count < 10) 1e-9 else if (chuzc.update_count < 20) 3e-8 else 1e-6
             else
@@ -293,7 +298,7 @@ pub const RatioTest = struct {
             // ratios: the CHUZC2 minimum decides the rebuild below, and a
             // nonpositive workTheta never reaches CHUZC3 expansion.
             ratio_work[column] = ratio;
-            direction_work[column] = direction;
+            alpha_work[column] = moved_alpha;
             candidate_work[candidate_count] = @intCast(column);
             candidate_count += 1;
         }
@@ -333,9 +338,9 @@ pub const RatioTest = struct {
                 var index = work_count;
                 while (index < full_count) {
                     const column: usize = @intCast(candidate_work[index]);
-                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-                    const effective_alpha = tableau.at(column) * move_out * direction_work[column];
-                    const tight = direction_work[column] * reduced_cost[column];
+                    const moved_alpha = alpha_work[column];
+                    const effective_alpha = @abs(moved_alpha);
+                    const tight = directionFromMovedAlpha(moved_alpha) * reduced_cost[column];
                     if (effective_alpha * select_theta >= tight) {
                         std.mem.swap(u32, &candidate_work[work_count], &candidate_work[index]);
                         work_count += 1;
@@ -371,9 +376,9 @@ pub const RatioTest = struct {
                 var index = work_count;
                 while (index < full_count) {
                     const column: usize = @intCast(candidate_work[index]);
-                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-                    const effective_alpha = tableau.at(column) * move_out * direction_work[column];
-                    const dual = direction_work[column] * reduced_cost[column];
+                    const moved_alpha = alpha_work[column];
+                    const effective_alpha = @abs(moved_alpha);
+                    const dual = directionFromMovedAlpha(moved_alpha) * reduced_cost[column];
                     if (dual <= select_theta * effective_alpha) {
                         std.mem.swap(u32, &candidate_work[work_count], &candidate_work[index]);
                         const selected: usize = @intCast(candidate_work[work_count]);
@@ -411,11 +416,7 @@ pub const RatioTest = struct {
             var maximum_alpha: f64 = 0.0;
             for (candidate_work[0..candidate_count]) |column_u32| {
                 const column: usize = @intCast(column_u32);
-                const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-                maximum_alpha = @max(
-                    maximum_alpha,
-                    tableau.at(column) * move_out * direction_work[column],
-                );
+                maximum_alpha = @max(maximum_alpha, @abs(alpha_work[column]));
             }
             const final_compare = @min(0.1 * maximum_alpha, 1.0);
             var chosen_column: ?usize = null;
@@ -428,8 +429,7 @@ pub const RatioTest = struct {
             for (candidate_work[0..candidate_count]) |column_u32| {
                 const column: usize = @intCast(column_u32);
                 const group: usize = @intFromFloat(ratio_work[column]);
-                const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
-                const effective_alpha = tableau.at(column) * move_out * direction_work[column];
+                const effective_alpha = @abs(alpha_work[column]);
                 if (effective_alpha <= final_compare) continue;
                 const wins_tie = if (chosen_column) |incumbent|
                     if (chuzc.permutation.len > @max(column, incumbent))
@@ -456,7 +456,8 @@ pub const RatioTest = struct {
                 return .{};
             };
             var flip_count: usize = 0;
-            if (reduced_cost[entering] * direction_work[entering] > 0.0) {
+            const entering_direction = directionFromMovedAlpha(alpha_work[entering]);
+            if (reduced_cost[entering] * entering_direction > 0.0) {
                 for (candidate_work[0..candidate_count]) |column_u32| {
                     const column: usize = @intCast(column_u32);
                     if (@as(usize, @intFromFloat(ratio_work[column])) >= chosen_group) continue;
@@ -470,18 +471,18 @@ pub const RatioTest = struct {
             if (chuzc.trace_chuzc) {
                 std.debug.print(
                     "chuzc4\tworkTheta={e:.17}\tgroups={d}\tbreakGroup={d}\tworkPivot={d}\tworkAlpha={e:.17}\tflipCount={d}\n",
-                    .{ work_theta, group_count, chosen_group, entering, tableau.at(entering), flip_count },
+                    .{ work_theta, group_count, chosen_group, entering, alpha_work[entering] * move_out, flip_count },
                 );
                 for (candidate_work[0..candidate_count]) |column_u32| {
                     const column: usize = @intCast(column_u32);
-                    const move_out: f64 = if (leaving_bound == .at_lower) -1.0 else 1.0;
+                    const direction = directionFromMovedAlpha(alpha_work[column]);
                     std.debug.print(
                         "chuzc4_candidate\tcolumn={d}\tmove={e:.1}\tdual={e:.17}\talpha={e:.17}\trange={e:.17}\tgroup={d}\n",
                         .{
                             column,
-                            direction_work[column],
+                            direction,
                             reduced_cost[column],
-                            tableau.at(column) * move_out * direction_work[column],
+                            @abs(alpha_work[column]),
                             upper[column] - lower[column],
                             @as(usize, @intFromFloat(ratio_work[column])),
                         },
@@ -490,12 +491,12 @@ pub const RatioTest = struct {
             }
             return .{
                 .column = @intCast(entering),
-                .direction = direction_work[entering],
-                .theta = if (reduced_cost[entering] * direction_work[entering] > 0.0)
-                    reduced_cost[entering] / tableau.at(entering)
+                .direction = entering_direction,
+                .theta = if (reduced_cost[entering] * entering_direction > 0.0)
+                    reduced_cost[entering] / (alpha_work[entering] * move_out)
                 else
                     0.0,
-                .zero_dual_step = reduced_cost[entering] * direction_work[entering] <= 0.0,
+                .zero_dual_step = reduced_cost[entering] * entering_direction <= 0.0,
                 .flip_count = flip_count,
             };
         }
@@ -515,8 +516,8 @@ pub const RatioTest = struct {
 
         for (candidate_work[0..candidate_count]) |column_u32| {
             const column: usize = @intCast(column_u32);
-            const alpha_abs = @abs(tableau.at(column));
-            const tight = direction_work[column] * reduced_cost[column];
+            const alpha_abs = @abs(alpha_work[column]);
+            const tight = directionFromMovedAlpha(alpha_work[column]) * reduced_cost[column];
             const width = upper[column] - lower[column];
             const boxed = std.math.isFinite(width) and width > self.tolerance and
                 (status[column] == .at_lower or status[column] == .at_upper);
@@ -536,7 +537,7 @@ pub const RatioTest = struct {
             }
             return .{
                 .column = column_u32,
-                .direction = direction_work[column],
+                .direction = directionFromMovedAlpha(alpha_work[column]),
                 // HiGHS applies the CHUZC2 minimum relaxed ratio as the dual
                 // step, not the entering column's own ratio. `min_ratio` is
                 // the smallest candidate ratio in HiGHS `relax/alpha`
@@ -550,7 +551,7 @@ pub const RatioTest = struct {
             const entering = candidate_work[candidate_count - 1];
             return .{
                 .column = entering,
-                .direction = direction_work[entering],
+                .direction = directionFromMovedAlpha(alpha_work[entering]),
                 .theta = if (leaving_bound == .at_lower) -min_ratio else min_ratio,
                 .flip_count = flip_count - 1,
             };

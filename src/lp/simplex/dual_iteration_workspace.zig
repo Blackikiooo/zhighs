@@ -70,8 +70,10 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
         candidate_indices: []u32,
         /// CHUZC ratio or breakpoint group keyed by global column.
         work_ratio: []Real,
-        /// CHUZC selected nonbasic move keyed by global column.
-        work_direction: []Real,
+        /// Tableau alpha times the leaving-row move, keyed by global column.
+        /// Its sign is the selected nonbasic direction and its magnitude is
+        /// the positive effective alpha consumed by later CHUZC stages.
+        work_alpha: []Real,
 
         const Self = @This();
         pub const Scalar = Real;
@@ -98,13 +100,13 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             errdefer allocator.free(candidate_indices);
             const work_ratio = try allocator.alloc(Real, total_columns);
             errdefer allocator.free(work_ratio);
-            const work_direction = try allocator.alloc(Real, total_columns);
-            errdefer allocator.free(work_direction);
+            const work_alpha = try allocator.alloc(Real, total_columns);
+            errdefer allocator.free(work_alpha);
             @memset(pack_indices, 0);
             @memset(pack_values, 0);
             @memset(candidate_indices, 0);
             @memset(work_ratio, std.math.inf(Real));
-            @memset(work_direction, 0);
+            @memset(work_alpha, 0);
             return .{
                 .allocator = allocator,
                 .num_rows = num_rows,
@@ -118,7 +120,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 .pack_values = pack_values,
                 .candidate_indices = candidate_indices,
                 .work_ratio = work_ratio,
-                .work_direction = work_direction,
+                .work_alpha = work_alpha,
             };
         }
 
@@ -133,7 +135,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
             self.allocator.free(self.pack_values);
             self.allocator.free(self.candidate_indices);
             self.allocator.free(self.work_ratio);
-            self.allocator.free(self.work_direction);
+            self.allocator.free(self.work_alpha);
             self.* = undefined;
         }
 
@@ -188,7 +190,7 @@ pub fn DualIterationWorkspace(comptime Real: type) type {
                 std.mem.sliceAsBytes(self.pack_values).len +
                 std.mem.sliceAsBytes(self.candidate_indices).len +
                 std.mem.sliceAsBytes(self.work_ratio).len +
-                std.mem.sliceAsBytes(self.work_direction).len;
+                std.mem.sliceAsBytes(self.work_alpha).len;
         }
     };
 }

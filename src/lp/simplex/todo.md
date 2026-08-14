@@ -1101,3 +1101,16 @@ ReleaseFast 全测与 shell 558 pivots 通过，8 模型硬件 cycles 合计仅�
 独立 512 阶/64-update FT microbench 的 UPDATE 中位数反而 `2769→2779 ns`。
 编译器已内联原通用 remove 并消除了足够多的死写，手工专门化没有越过噪声门槛，
 实现已删除。
+
+## Round 11 perf: retain moved alpha in CHUZC work state（落地 -0.75%）
+
+对齐 HiGHS `HEkkDualRow::workData(index, alpha)`：把原 `work_direction` SoA 改为
+保存 `moved_alpha = tableau_alpha * move_out`。候选成立后，其符号精确恢复
+nonbasic direction，绝对值就是 effective alpha，乘回 `move_out` 恢复原 alpha；
+因此 CHUZC3/4、large-alpha、BFRT 和最终 theta 不再反复经分段 pivotal-row view
+读取 tableau，也没有新增数组或改变浮点比较。
+
+ReleaseFast 全测和 forced-dual 40/40 PASS；与 98d9a16 基线逐模型 pivot 完全一致，
+aggregate `9365→9365`。8 模型各 11 轮硬件门禁 cycles/instructions 合计约
+-0.22%/-0.18%，完整 40 模型 31 轮同会话交替门禁的 solve 中位数之和
+`272.980→270.935 ms`（**-0.75%**），27 胜 13 负。该项保留。
