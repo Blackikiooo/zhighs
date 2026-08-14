@@ -1160,3 +1160,13 @@ ReleaseFast 全测通过，forced-dual 40 模型 pivot 与 Round 14 完全一致
 完整 40 模型 31 轮交替门禁的 solve 中位数之和 `262.174→263.847 ms`
 （**+0.64%**，23 胜 17 负）。这点微小的读写减少没有覆盖 producer 中新增的
 双目标存储流，未形成稳定端到端收益，代码已删除。
+
+### Round 14c: HiGHS column-PRICE nonbasicFlag（否定）
+
+对齐 `HEkk::tableauRowPrice`，曾在 column PRICE 发布 support 后将基本结构列的
+tableau 值置零。Zig 的 CHUZC 已通过 `col_status` 排除这些列；基本 reduced cost
+的中间值不参与选择，并在变量离基时由 `updateDual` 覆盖，因此 40 模型 pivot
+仍与 Round 14 完全一致（aggregate 9365）。把 `col_status` 读流并入最热的 PRICE
+循环反而破坏点积吞吐：8 模型各 31 轮硬件门禁 instructions **+0.08%**、cycles
+**+1.34%**，且 7/8 模型周期回退。该机械移植已删除；后续不在 column PRICE
+内增加与点积无关的状态读流。
