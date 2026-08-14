@@ -1082,3 +1082,13 @@ shell **558 pivots**，ReleaseFast 全测通过，但收益不足以接受：ind
 读流抵消了省下的 dense 访问，两个实现均已完整删除。下一项不再给现有 dense-
 visit FT 路径附加 support bookkeeping，转向与 HiGHS 一致的连续 U/UR 存储和
 无链式指针的 solve/update 遍历。
+
+### Round 10b: mutable-U contiguous column read mirror（否定）
+
+为避免一次性重写 U/UR，曾保留 intrusive pool 作为 UPDATE 权威结构，同时增量维护
+按当前链表次序排列的连续 U-column 镜像供 `solveUpper` 使用。实现保持 shell 558
+pivots 和 ReleaseFast 全测，但双写成本压倒读侧收益：8 模型各 11 轮硬件门禁中除
+grow7 外 7 个 cycles 上升，shell `66.0M→71.5M`（+8.3%）、scrs8
+`70.5M→74.0M`（+4.9%）、seba `39.1M→41.6M`（+6.5%）。影子镜像已完整
+删除。结论与此前 synthetic-clock shadow graph 一致：下一次 U/UR 布局工作必须
+直接替换权威表示，不能在 pivot UPDATE 上并行维护第二套结构。
