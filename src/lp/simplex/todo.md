@@ -888,6 +888,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   dual-feasible-primal-infeasible 基暖切 primal（仿 kSolvePhasePrimalInfeasibleCleanup）使
   klein1 `434→611`（shifted 405 + primal 206），暖 primal 不比冷回退便宜，撤销并记录。
   下一轮：全 y 向量 Farkas ray 或对 klein1 的 ulp 敏感路径做 HCD/扩展精度审计。
+  2026-08-12 否定实验（已撤销）：暖 Phase-I 幽灵 unbounded 方向的 repairs-check（沿方向所有违反
+  基都向界移动则判定 feasible-in-the-limit → .optimal）使 gas11 `1220→1247`（暖 Phase II 27 pivots
+  后仍失败回退，浪费 90 pivots）。幽灵方向（entering 762、rc=-1、[0,inf)）的根治在暖 Phase-I
+  轨迹对齐：zig 63-pivot 态 vs HiGHS 97-pivot 态的分叉需 gdb 逐 pivot 对比 HEkkPrimal
+  solvePhase1（下一轮）。
+
 （扰动后 duals 判定 + force_phase2，
   本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
   ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
