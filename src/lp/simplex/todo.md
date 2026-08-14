@@ -1125,3 +1125,15 @@ aggregate `9365→9365`。8 模型各 11 轮硬件门禁 cycles/instructions 合
 ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 11 基线完全
 一致（aggregate 9365）。8 模型硬件 instructions 合计约 -0.28%；完整 40 模型
 31 轮交替门禁的 solve 中位数之和 `279.529→277.250 ms`（**-0.82%**）。
+
+## Round 13 perf: skip overwritten column-PRICE clear（落地）
+
+`computeDualTableauRow` 原先无条件 `row_ap.clear()`；但 column PRICE 会给每个
+结构列赋值，包括精确零，因此旧 numerical support 无需先清除。现在 row-pricing
+scatter 路径仍完整 clear，column 路径只 `clearScalars()` 重置 index/pack 生命周期。
+这利用了 Zig 中明确的 producer contract，数值赋值和 support 发布顺序不变。
+
+ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots lock-exact（aggregate
+9365）。8 模型 11 轮硬件门禁 instructions 合计约 **-1.41%**、cycles 约 -0.27%；
+两轮完整 40 模型 31 轮交替墙钟分别 +1.19%/-1.98%，仍处于共享宿主调度噪声，
+但硬件工作量下降明确，因此保留。

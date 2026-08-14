@@ -1527,7 +1527,6 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     const row: usize = @intCast(leaving_row);
     if (row >= problem.num_rows) return .numerical_failure;
     iteration.row_ep.clear();
-    iteration.row_ap.clear();
     iteration.pack_count = 0;
     iteration.row_ep.values[row] = 1.0;
     iteration.row_ep.appendIndex(@intCast(row)) catch return .numerical_failure;
@@ -1539,6 +1538,13 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     self.observeEpDensity(iteration.row_ep.values);
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
     const row_pricing = self.selectRowPricing(iteration.row_ep.values);
+    // Row PRICE scatters into row_ap and therefore needs a zero complement.
+    // Column PRICE below assigns every structural entry, including exact
+    // zeros, so clearing its old numerical support would be redundant.
+    if (row_pricing)
+        iteration.row_ap.clear()
+    else
+        iteration.row_ap.clearScalars();
     var exact_weight: f64 = 0.0;
     var ep_simplex_nonzeros: usize = 0;
     var ep_highs_nonzeros: usize = 0;
