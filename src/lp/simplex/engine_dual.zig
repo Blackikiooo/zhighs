@@ -1554,28 +1554,23 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     var exact_weight: f64 = 0.0;
     var ep_simplex_nonzeros: usize = 0;
     var ep_highs_nonzeros: usize = 0;
-    if (needs_exact_weight and !row_pricing) {
-        for (iteration.row_ep.values) |entry| {
-            exact_weight += entry * entry;
+    const ep_support = iteration.row_ep.activeIndices() orelse return .numerical_failure;
+    if (ep_support.len * 10 <= iteration.row_ep.values.len) {
+        for (ep_support) |row_u32| {
+            const entry = iteration.row_ep.values[row_u32];
+            if (needs_exact_weight) exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
             if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
         }
-        if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
-            return .numerical_failure;
-    } else if (needs_exact_weight) {
-        for (iteration.row_ep.values) |entry| {
-            exact_weight += entry * entry;
-            if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
-            if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
-        }
-        if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
-            return .numerical_failure;
     } else {
         for (iteration.row_ep.values) |entry| {
+            if (needs_exact_weight) exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
             if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
         }
     }
+    if (needs_exact_weight and (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance))
+        return .numerical_failure;
     self.dual_row_exact_weight = exact_weight;
     self.dual_row_nonzero_count = ep_highs_nonzeros;
     if (needs_exact_weight) {

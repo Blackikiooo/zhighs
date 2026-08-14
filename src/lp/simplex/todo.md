@@ -1199,3 +1199,15 @@ ReleaseFast profile 中 `priceStructuralColumns` 保留独立符号，故试验 
 8 模型各 31 轮硬件门禁 instructions 仅 -0.01%、cycles **+0.22%**，scrs8 与
 scorpion 回退最明显。调用摊销本就可忽略，强制内联只增加 solve-loop 指令体，
 实现已删除。
+
+## Round 16 perf: hyper-sparse ep support statistics（落地 -1.59%）
+
+BTRAN 已发布精确 HVector support，但 `computeDualTableauRow` 原先总是稠密扫描
+整个 `row_ep.values` 来计算 exact-DSE norm 与两种非零计数。现在 support ≤10%
+时直接遍历 producer indices；较密路径仍按自然行序扫描，保持其浮点累加顺序。
+同时合并了两个完全重复的 exact-weight 分支。
+
+ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivot lock-exact（aggregate
+9365）。8 模型各 31 轮硬件门禁 instructions **-1.04%**、cycles **-0.94%**；
+完整 40 模型 31 轮交替门禁 solve 中位数之和 `270.411→266.101 ms`
+（**-1.59%**，26 胜 14 负）。该项保留。
