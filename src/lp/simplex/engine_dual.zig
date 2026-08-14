@@ -1915,9 +1915,13 @@ pub fn updateReducedCostsAfterDualPivot(
     } else {
         if (!std.math.isFinite(theta)) return .numerical_failure;
         // HiGHS `HEkkDualRow::updateDual`: only the CHUZC pack participates.
+        // The finiteness check rides the pack instead of a separate full
+        // reduced-cost scan; entries outside the pack keep their previous
+        // finite values by induction.
         for (iteration.packedIndices(), iteration.packedValues()) |column_u32, pack_value| {
             const column: usize = @intCast(column_u32);
             basis.reduced_cost[column] -= theta * pack_value;
+            if (!std.math.isFinite(basis.reduced_cost[column])) return .numerical_failure;
         }
         // Artificial Phase-I columns are absent from the pack; retain the
         // dense pass so the primal Phase-I context keeps its sign-adjusted
@@ -1929,8 +1933,9 @@ pub fn updateReducedCostsAfterDualPivot(
     }
     basis.reduced_cost[entering_col] = 0.0;
     basis.reduced_cost[leaving_col] = -theta;
+    if (!std.math.isFinite(basis.reduced_cost[leaving_col])) return .numerical_failure;
     if (!self.dual_work.shiftBack(basis.reduced_cost, leaving_col)) return .numerical_failure;
-    for (basis.reduced_cost) |value| if (!std.math.isFinite(value)) return .numerical_failure;
+    if (!std.math.isFinite(basis.reduced_cost[leaving_col])) return .numerical_failure;
     self.reduced_cost_update_count += 1;
     self.stats.dual_reduced_cost_updates += 1;
     return .optimal;

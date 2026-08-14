@@ -934,6 +934,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   本机 WSL2 共享宿主使 zig 单次求解方差 ~5%，比值测量需更严格的同会话交替协议）。
   剩余 per-pivot 目标：pivot commit 的 11.5μs（factor update+基交换+primal 镜像+DSE 更新）与
   FTRAN 的逐项缩放迁移（collectAj/fillInternalColumn）。
+  2026-08-12 perf 采样（sudo perf，shell）：priceStructuralColumns 29.2%、dual update 18.2%、
+  memset 14.0%（FTRAN/DSE 结果向量的稠密物化，HiGHS 同样支付）、FT update 11.1%+4.3%、
+  BTRAN upper 7.5%、CHUZR 5.0%。已提交 finite-scan 融合（updateReducedCostsAfterDualPivot 的
+  全向量有限性扫描移入 packed 循环，O(n)→O(pack)，归纳论证等价；40/40、aggregate 9354、
+  shell 中位数 16.74ms 为本环境最优读数）。注意：共享宿主噪声 ±5%，perf 相对基线（git stash
+  对比）是更可靠的验收方式。
 
 ### G. 迭代数验收
 
