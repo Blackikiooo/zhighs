@@ -1010,3 +1010,62 @@ scsd1 104 / shell 670`，状态全部 optimal。后续改动必须按 E1/E3/F �
   `DualPhaseOneWorkspace` 的 RHS list/checkpoint/rebuild 度量收进 `DualRHSState`/
   `BasisCheckpoint`/`RebuildMeasurements` 并按生命周期分区；非基移动方向从 `i8` 魔数
   升级为 `NonbasicMove` 枚举（`i8` 保底、`sign()/negated()` 内联助手）。
+
+## Round 9 perf: FT correction ep_touched support iteration (landed -2%)
+
+`SparseForrestTomlin::update` 构造下一条 FT 行修正时，部分 BTRAN（`captureEp`
+产物）只存在于 `ep_touched` 记录的 pivot 上。把原来的全 n 稠密 work 扫描改为
+按 `ep_touched` support 迭代：语义完全等价（support 清零不变式保证其余位置为 0，
+leaving pivot 是后缀第一个被触 pivot 必须保留排除），shell 63.9M -> 62.7M
+cycles（-2%），40/40 门禁 PASS、pivots 与 lock 逐模型一致。提交 2be4049。
+
+## Round 9 perf: memset 消除战役（未落地，记下全部发现供下轮接力）
+
+目标：消除 sparse_lu 三处稠密物化 memset（solveAdaptive save/memset/restore、
+solveForUpdateSparse hyper 前置、solveHyperSparse FT 前置，合计 self ~6-8%，
+且失败实验显示其缓存副作用远超自身成本）。三个设计均失败/未收口：
+
+1. **restore 设计（错误）**：solve 结束把 (active ∪ FT 散射 \ output) 归零。
+   错在 in-place FT 上三角求解把向量在每个位置都算对了——非输出活跃位置的
+   L 值就是正确终值（DSE 更新、RHS 更新都要读它们），归零即损坏。memset+restore
+   组合通过（memset 掩盖了 restore 的错误），纯 restore 在 pivot 302 失败。
+
+2. **纯移除（错误）**：直接删三处 memset。前置检查（Debug 下扫描非输入位置）
+   显示迭代起点状态干净、求解 in-place 正确，但仍在 302 失败。原因：**泄漏不在
+   当前迭代，而在下一迭代**——in-place 求解留下的中间值（L-fill + FT 散射）
+   不在向量 support（= ftran_output）里，下一迭代的 clear 漏清零，稀疏超路径
+   的求解把这些陈旧值当 spike 读入。
+
+3. **merged support 设计（90%，未收口）**：向量 support 扩展为
+   active ∪ ftran_output ∪ ftran_scatter（sparse_ft 用 write_stamp 去重记录
+   FT 写入，sparse_lu 用 marked 去重合并），下一迭代 clear 覆盖全部写入。
+   结果：**仅 site B（solveForUpdateSparse 前置 memset）+ merged = optimal 但
+   556 pivots ≠ 基线 558**（残余轨迹分歧，机制未查明——候选：clear 的
+   稠密/稀疏决策、或某个未枚举的 support 消费者）。40/40 门禁必败（pivots
+   必须 lock-exact），故回退。
+
+关键诊断手段（下轮复用）：
+- **分配器布局敏感性 = 未初始化内存实锤**：no-trace 在 302 失败；trace 开 →
+  optimal 558；no-trace 但分配同样的 8MB 哑缓冲 → optimal 558；显式
+  `-Doptimize=Debug`（GPA 清零）→ optimal。未初始化读的候选：merged 构建里
+  `marked[column_position[column]]` 的映射读。注意 `zig build
+  build-simplex-end-to-end` 默认构建不是 Debug（std.builtin.mode 守卫不触发），
+  Debug 验证必须显式 `-Doptimize=Debug`。
+- 轨迹 diff：`trace` 参数写 stderr，`grep ^pivot` 得 pivot 序列；首个分歧 =
+  shell pivot 214：同进入 1594，基线离开行 182 / 失败配置 181（CHUZR 邻近
+  近平局被 ulp/列表顺序打破）。CHUZR 走 hyper 路径（bestDualCandidate +
+  rebuildDualCandidateList，engine_dual_candidate.zig），score =
+  violation/sqrt(max(edge_weight,1))。
+- 三个 vector（col_aq/col_dse/col_bfrt）生命周期：col_aq = clear+fill+
+  ftranForUpdate；col_dse = copyFrom(row_ep)+ftran（输入密 → 稠密路径，无
+  影响）；col_bfrt = accumulateBoundFlipRhs（先 clear）+ftran。行 141-143 的
+  changed_row_index 拷入（喂 performPivotWithDirection:278 的
+  updatePrimalInfeasibilityList）与 col_aq_density（喂 createPrimal
+  InfeasibilityList 的 >500 && density<0.05 截断）都必须保持 ftran_output
+  精确语义，不能吃 merged support。
+
+下轮建议：修 556/558 残余分歧——先 diff site-B+merged 配置的 pivot 序列定位
+分歧点，重点排查 merged support 对 `IndexedVector.clear()` 稠密/稀疏决策
+（30% 阈值）的影响，以及 buildMergedFtranSupport 的 marked/column_position
+未初始化读（先 @memset(marked,false) 验证）。若 merged 语义无法与基线完全
+一致，改走"双 support"（published=精确、clear=merged）或放弃本项。
