@@ -1179,3 +1179,15 @@ row/coefficient；不再为每列重复读取起点和构造两组切片。每�
 lock-exact（aggregate 9365）。8 模型各 31 轮硬件门禁 instructions 约 -0.04%、
 cycles **-0.46%**，6/8 模型周期改善。完整 40 模型墙钟在高系统负载下两轮分别
 +1.89%/-0.17%（总耗时漂移 316→330 ms），故按稳定的硬件周期门禁保留。
+
+### Round 15b: reuse BTRAN ep in FT UPDATE（否定）
+
+对照 HiGHS `unitBtran(packFlag=true) → btranU tight/pack → btranFT → btranL →
+updateFT(ep)`，试图消除 Zig `captureEp` 对 partial BTRAN 的重复计算（shell profile
+约 5%）。最终 `row_ep` 直接传入导致 31/40 模型分歧、aggregate pivots
+`9365→15475`；补 `ep /= leaving basic scale` 后仍有 23 个分歧。进一步在 unit
+hyper-BTRAN 中从 leaving logical suffix 求解并捕获 pre-correction ep，仍得到同一
+23 模型分歧（aggregate 13639），因为当前 intrusive mutable-U 的全 BTRAN 必须从
+logical 0 开始，不能像 HiGHS U/UR reachability 那样跳过前缀。实现已完整删除。
+结论：消除此 5% 重算必须直接替换权威 U/UR 图/顺序，使 BTRAN 的中间 pack 与
+UPDATE correction 原生共享；不能在现有表示上复用最终 row_ep 或缩短求解起点。
