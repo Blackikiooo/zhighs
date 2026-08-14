@@ -1191,3 +1191,11 @@ hyper-BTRAN 中从 leaving logical suffix 求解并捕获 pre-correction ep，�
 logical 0 开始，不能像 HiGHS U/UR reachability 那样跳过前缀。实现已完整删除。
 结论：消除此 5% 重算必须直接替换权威 U/UR 图/顺序，使 BTRAN 的中间 pack 与
 UPDATE correction 原生共享；不能在现有表示上复用最终 row_ep 或缩短求解起点。
+
+### Round 15c: force-inline column PRICE（否定）
+
+ReleaseFast profile 中 `priceStructuralColumns` 保留独立符号，故试验 `inline fn`
+让 ProblemView/CSC/output 跨调用边界传播。40 模型 pivot lock-exact（9365），但
+8 模型各 31 轮硬件门禁 instructions 仅 -0.01%、cycles **+0.22%**，scrs8 与
+scorpion 回退最明显。调用摊销本就可忽略，强制内联只增加 solve-loop 指令体，
+实现已删除。
