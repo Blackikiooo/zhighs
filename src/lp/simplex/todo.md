@@ -1137,3 +1137,15 @@ ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots lock-exact（aggr
 9365）。8 模型 11 轮硬件门禁 instructions 合计约 **-1.41%**、cycles 约 -0.27%；
 两轮完整 40 模型 31 轮交替墙钟分别 +1.19%/-1.98%，仍处于共享宿主调度噪声，
 但硬件工作量下降明确，因此保留。
+
+## Round 14 perf: HiGHS-tiny PRICE producer support（落地 -2.43%）
+
+对齐本地 `HighsSparseMatrix::priceByColumn`：row_ap producer 只发布
+`abs(alpha) > kHighsTiny (1e-14)` 的结构项，其余显式写零；row-pricing scatter
+完成后采用相同边界。此前所有 `alpha != 0` 的数值填充都会进入 CHUZC pack 和
+packed reduced-cost update，虽然未改变 pivot，却放大了每轮工作集。
+
+ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 13 完全一致
+（aggregate 9365）。8 模型 11 轮硬件 cycles 合计约 **-1.66%**；完整 40 模型
+31 轮交替门禁的 solve 中位数之和 `261.139→254.783 ms`（**-2.43%**），
+34 胜 6 负。该项保留。

@@ -61,12 +61,15 @@ fn priceStructuralColumns(
             if (filter_small_coefficients and scaled_coefficient == 0.0) continue;
             alpha += dual[matrix_row.toUsize()] * scaled_coefficient;
         }
-        row_ap.values[column] = alpha;
-        if (alpha != 0.0) {
-            if (@abs(alpha) > zero_tolerance) counts.simplex_nonzeros += 1;
-            if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.highs_nonzeros += 1;
+        const magnitude = @abs(alpha);
+        if (magnitude > simplex_nla_module.Vector.highs_tiny) {
+            row_ap.values[column] = alpha;
+            if (magnitude > zero_tolerance) counts.simplex_nonzeros += 1;
+            counts.highs_nonzeros += 1;
             row_ap.indices[row_ap.index_count] = @intCast(column);
             row_ap.index_count += 1;
+        } else {
+            row_ap.values[column] = 0.0;
         }
     }
     return counts;
@@ -1634,12 +1637,15 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     // the packed support preserves the dense scan's natural column order and
     // hence its deterministic CHUZC tie-breaking.
     if (row_pricing) {
-        for (iteration.row_ap.values, 0..) |value, column| {
-            if (@abs(value) > self.numerical.zero_tolerance) structural_counts.simplex_nonzeros += 1;
-            if (@abs(value) >= simplex_nla_module.Vector.highs_tiny) structural_counts.highs_nonzeros += 1;
-            if (value != 0.0) {
+        for (iteration.row_ap.values, 0..) |*value, column| {
+            const magnitude = @abs(value.*);
+            if (magnitude > simplex_nla_module.Vector.highs_tiny) {
+                if (magnitude > self.numerical.zero_tolerance) structural_counts.simplex_nonzeros += 1;
+                structural_counts.highs_nonzeros += 1;
                 iteration.row_ap.indices[iteration.row_ap.index_count] = @intCast(column);
                 iteration.row_ap.index_count += 1;
+            } else {
+                value.* = 0.0;
             }
         }
     }
