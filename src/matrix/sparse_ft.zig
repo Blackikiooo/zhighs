@@ -381,8 +381,16 @@ pub const SparseForrestTomlin = struct {
 
         self.correction_pivots[self.correction_count] = leaving_id;
         var correction_output = self.correction_starts[self.correction_count];
-        for (self.work[0..self.dimension], 0..) |value, index| {
-            if (index == leaving_id or @abs(value) <= zero_tolerance) continue;
+        // The partial BTRAN lives only at the pivots captureEp touched
+        // (ep_touched plus the seed at leaving_id, which the correction
+        // skips), so iterate the recorded support instead of scanning the
+        // full dense workspace.
+        for (self.ep_touched[0..self.ep_touched_count]) |index| {
+            // The leaving pivot is the first touched suffix pivot; the
+            // correction row excludes it exactly as the dense scan did.
+            if (index == leaving_id) continue;
+            const value = self.work[index];
+            if (@abs(value) <= zero_tolerance) continue;
             self.correction_indices[correction_output] = @intCast(index);
             self.correction_values[correction_output] = -value * old_pivot;
             correction_output += 1;
