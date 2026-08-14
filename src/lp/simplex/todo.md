@@ -921,6 +921,16 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   rebuild/invert 风暴（112 次 invert）随 546-pivot 路径解锁自然消除；纯 dual 模型的
   per-pivot 成本在 FTRAN/BTRAN/PRICE，按 H 系列假设逐一实验。
 
+### Phase 3 画像（2026-08-12 shell）
+
+- 每 pivot ~32μs：CHUZR+BTRAN+PRICE+DSE 验证 13.7μs（42%）、pivot commit（factor update+
+  基交换+primal 镜像+DSE 更新+list）11.5μs（35%）、FTRAN+dual update 5.6μs、CHUZC 1.4μs。
+  PRICE 7.7μs/调用 ≈ HiGHS 的 2-3 倍——逐项 `row_scale*coefficient*column_scale*dual`
+  表达式比 HiGHS 预缩放矩阵上的 `A_s*dual` 多 2 次乘法 + 2 次查表/nonzero。
+- 第一优化目标：预缩放矩阵物化（HiGHS `A*(colScale*rowScale)` 顺序）+ PRICE 迁移到
+  `A_s*dual`，同时消除逐项缩放。兼作对齐杠杆（与 HiGHS 的 FP 表达式一致）。风险：所有
+  模型的数值路径变化，40/40 门禁 + 逐模型迭代数重基线。
+
 ### G. 迭代数验收
 
 - [ ] G1 四模型完整 pivot trace 与 HiGHS 对齐。
