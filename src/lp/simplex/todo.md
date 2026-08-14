@@ -1170,3 +1170,12 @@ tableau 值置零。Zig 的 CHUZC 已通过 `col_status` 排除这些列；基�
 循环反而破坏点积吞吐：8 模型各 31 轮硬件门禁 instructions **+0.08%**、cycles
 **+1.34%**，且 7/8 模型周期回退。该机械移植已删除；后续不在 column PRICE
 内增加与点积无关的状态读流。
+
+## Round 15 perf: sequential CSC PRICE cursor（落地）
+
+column PRICE 改为沿 `col_starts` 保留单一 `begin` 游标，并用位置循环同时读取
+row/coefficient；不再为每列重复读取起点和构造两组切片。每列内非零项访问及浮点
+累加顺序完全不变。ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivot
+lock-exact（aggregate 9365）。8 模型各 31 轮硬件门禁 instructions 约 -0.04%、
+cycles **-0.46%**，6/8 模型周期改善。完整 40 模型墙钟在高系统负载下两轮分别
++1.89%/-0.17%（总耗时漂移 316→330 ms），故按稳定的硬件周期门禁保留。

@@ -51,16 +51,19 @@ fn priceStructuralColumns(
     zero_tolerance: f64,
 ) PriceDensityCounts {
     var counts: PriceDensityCounts = .{};
+    var begin = problem.matrix.col_starts[0];
     for (0..problem.num_cols) |column| {
-        const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         // HiGHS' priceByColumn on the pre-scaled matrix: dual * A_s with no
         // per-term scaling arithmetic.
         var alpha: f64 = 0.0;
-        for (problem.matrix.row_indices[begin..end], scaled_coefficients[begin..end]) |matrix_row, scaled_coefficient| {
+        var position = begin;
+        while (position < end) : (position += 1) {
+            const scaled_coefficient = scaled_coefficients[position];
             if (filter_small_coefficients and scaled_coefficient == 0.0) continue;
-            alpha += dual[matrix_row.toUsize()] * scaled_coefficient;
+            alpha += dual[problem.matrix.row_indices[position].toUsize()] * scaled_coefficient;
         }
+        begin = end;
         const magnitude = @abs(alpha);
         if (magnitude > simplex_nla_module.Vector.highs_tiny) {
             row_ap.values[column] = alpha;
