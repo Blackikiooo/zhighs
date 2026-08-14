@@ -576,7 +576,15 @@ fn solvePhaseOneGeneric(self: *SimplexEngine, problem: problem_module.ProblemVie
     const saved_pricing_rule = self.pricing.rule;
     const phase_two_refresh_period = self.reduced_cost_refresh_period;
     self.pricing.rule = switch (control.phase_one_pricing) {
-        .inherit => if (self.active_primal_pricing_strategy == .partial) .partial else saved_pricing_rule,
+        // HiGHS' primal Phase I prices with Dantzig; the warm variant must
+        // not inherit the dual solve's steepest-edge rule, whose weights
+        // diverge from the first pivot on (gas11).
+        .inherit => if (warm)
+            .dantzig
+        else if (self.active_primal_pricing_strategy == .partial)
+            .partial
+        else
+            saved_pricing_rule,
         .dantzig => .dantzig,
         .devex => .devex,
         .steepest_edge => .steepest_edge,

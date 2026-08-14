@@ -751,6 +751,12 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
 
 ### F. Phase exit、cleanup 和结论
 
+  2026-08-12 暖成本型 primal Phase I 机制已实现（`solveWarmPhaseOne`/`recomputeWarmPhaseOneReducedCosts`/
+  泛型 `solvePhaseOneGeneric`，Dantzig 定价修正——不继承 dual DSE 权重）。**调用已撤销**：gdb 逐 pivot
+  对比确认 warm Phase-I 在 pivot 0 即与 HiGHS 分叉（entering 41 vs 40）——入口基不同（dual 轨迹
+  226 处分叉的下游），幽灵方向无法消除；净亏 gas11 +228（1157→1305）无收益，故回退到冷回退
+  路径（gas11 1157、aggregate 9354）。机制保留为 pub API，待 dual 226 处 DSE 权重接受漂移
+  （ulp 级）解决后重新启用。
   2026-08-12 暖成本型 primal Phase I 机制已实现并提交：`solveWarmPhaseOne`（±1 基成本 +
   5e-7 确定性扰动 + BTRAN，镜像 `HEkkPrimal::phase1ComputeDual`）在 dual 失败后从保留基运行，
   成功则直接进 primal Phase II；unbounded 视为失败安全回退冷路径（证书不损坏）。gas11 的暖
