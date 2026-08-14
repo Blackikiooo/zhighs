@@ -449,6 +449,12 @@ fn solveDualLoop(
                 // costs, and warm re-enter dual Phase I when they are dual
                 // infeasible instead of cold-falling-back to artificial
                 // primal Phase I.
+                // HiGHS' infeasibility proof is the accumulated logical dual
+                // at the possibly-dual-unbounded termination; the cleanup
+                // reprice overwrites it, so snapshot it first (scaled).
+                for (basis.rhs_work[0..problem.num_rows], basis.reduced_cost[problem.num_cols..][0..problem.num_rows], basis.row_scale) |*snapshot, rc_logical, row_scale| {
+                    snapshot.* = -rc_logical * row_scale;
+                }
                 if (rebuildDualState(self, problem, false, .cleanup, false) != null) {
                     const cleaned = self.classifyFeasibility(problem);
                     if (cleaned.dual and cleaned.primal) {
@@ -464,6 +470,13 @@ fn solveDualLoop(
                         // fail spuriously while the cleaned basis certifies
                         // the original bounds.
                         if (ray_valid) {
+                            self.shifted_dual_exit = .phase_two_fresh_infeasible;
+                            return .infeasible;
+                        }
+                        // A single pivotal row cannot always certify: HiGHS'
+                        // klein1 proof is the accumulated logical dual at
+                        // termination. Validate the pre-cleanup snapshot.
+                        if (self.buildAndValidateFullDualInfeasibilityRay(problem)) {
                             self.shifted_dual_exit = .phase_two_fresh_infeasible;
                             return .infeasible;
                         }
@@ -632,6 +645,54 @@ pub fn buildAndValidateInfeasibilityRay(
         self.infeasibility_certificate_failure = .invalid_workspace;
         return false;
     }
+    const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
+    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale) |*ray_value, scaled_ep, row_scale| {
+        ray_value.* = move_out * scaled_ep * row_scale;
+    }
+    return self.validateInfeasibilityRay(problem, true);
+}
+
+/// Full-dual-vector Farkas ray attempt: the row duals at a dual-feasible,
+/// primal-infeasible state certify infeasibility when the single pivotal
+/// row does not (klein1 needs an eight-row combination). Both signs are
+/// tried because the internal dual convention carries no global Farkas
+/// orientation.
+pub fn buildAndValidateFullDualInfeasibilityRay(
+    self: *SimplexEngine,
+    problem: problem_module.ProblemView,
+) bool {
+    const basis = if (self.basis) |*value| value else {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    };
+    if (basis.infeasibility_ray.len != problem.num_rows or basis.dual.len != problem.num_rows) {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    }
+    for (basis.infeasibility_ray, basis.rhs_work[0..problem.num_rows]) |*ray_value, snapshot| {
+        ray_value.* = snapshot;
+    }
+    // HiGHS publishes the raw dual combination without a coefficient
+    // floor, which would zero klein1-scale proofs entirely.
+    if (self.validateInfeasibilityRay(problem, false)) return true;
+    if (self.infeasibility_certificate_failure == .nonpositive_gap) {
+        for (basis.infeasibility_ray) |*ray_value| ray_value.* = -ray_value.*;
+        return self.validateInfeasibilityRay(problem, false);
+    }
+    return false;
+}
+
+/// Validate a filled infeasibility ray against the original bounds, rows,
+/// columns and objective-free gap. The ray lives in `basis.infeasibility_ray`
+/// in original coordinates.
+pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.ProblemView, apply_coefficient_floor: bool) bool {
+    const basis = if (self.basis) |*value| value else {
+        self.infeasibility_certificate_failure = .invalid_workspace;
+        return false;
+    };
+    self.infeasibility_certificate_failure = .none;
+    self.infeasibility_certificate_infinite_row_mass = 0.0;
+    self.infeasibility_certificate_infinite_column_mass = 0.0;
     // `residual_work` is dead after the fresh BTRAN at this decision point.
     // Reuse it allocation-free to measure each ray component in the same
     // relative form as HiGHS: |y_i| * max_j |A_ij|.
@@ -644,18 +705,15 @@ pub fn buildAndValidateInfeasibilityRay(
             basis.residual_work[row_index] = @max(basis.residual_work[row_index], @abs(value));
         }
     }
-    const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
     var proof_lower: f64 = 0.0;
     var ray_max: f64 = 0.0;
-    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale, basis.residual_work, problem.row_lower, problem.row_upper) |
+    for (basis.infeasibility_ray, basis.residual_work, problem.row_lower, problem.row_upper) |
         *ray_value,
-        scaled_ep,
-        row_scale,
         row_max,
         lower,
         upper,
     | {
-        var value = move_out * scaled_ep * row_scale;
+        var value = ray_value.*;
         if (!std.math.isFinite(value)) {
             self.infeasibility_certificate_failure = .nonfinite_ray;
             return false;
@@ -665,7 +723,8 @@ pub fn buildAndValidateInfeasibilityRay(
         // proof. Any remaining ray is still re-evaluated against the original
         // CSC and original bounds below; this is not a feasibility-tolerance
         // relaxation.
-        if (relative_contribution <= matrix.MatrixTargetPolicy.model_coefficient_tolerance) value = 0.0;
+        if (apply_coefficient_floor and
+            relative_contribution <= matrix.MatrixTargetPolicy.model_coefficient_tolerance) value = 0.0;
         if (value > 0.0) {
             if (!std.math.isFinite(lower)) {
                 self.infeasibility_certificate_infinite_row_mass = @max(

@@ -871,6 +871,14 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   CHUZR no-row 与 CHUZC give-up 两个 cleanup 边界同改。全语料 aggregate `9892→9324`（1.063x），
   胜/平/负 `11/25/4→12/25/3`。
 - klein1（434 vs 126，infeasible）：phase 选择已按 HiGHS 对齐（扰动后 duals 判定 + force_phase2，
+  本语料 gate-neutral，见 B1 提交）。证书基础设施已扩展：ray 验证重构为 `validateInfeasibilityRay`，
+  新增 full-dual 变体——cleanup 前快照累加 logical dual（HiGHS 的 proof 即终止时 workDual，
+  其 klein1 proof 为 8 行组合 5.24e6/-2.65e6/…），单行 ray 失败后按原坐标验证快照（无系数下限，
+  gap 反号重试）。klein1 的快照 ray 有真实值（row_mass 4.4e9）但仍 `infinite_column_bound`
+  （column_mass 6.9e13）——135-pivot 轨迹的累加 dual 不满足无限界列的 Farkas 条件，而 HiGHS
+  126-pivot 轨迹满足。结论：klein1 证书是轨迹锁定，根治在 pivot-1 的 1-ulp 级 CHUZC4 分叉
+  （33 vs 30）而非证书构造；full-dual 机制行为中性保留（40/40、aggregate 9417 不变）。
+（扰动后 duals 判定 + force_phase2，
   本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
   ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
   HiGHS 的完整证书，随后冷回退 primal Ph1 299。gdb 差分（break HEkkDual::updateDual 捕获
