@@ -1114,3 +1114,14 @@ ReleaseFast 全测和 forced-dual 40/40 PASS；与 98d9a16 基线逐模型 pivot
 aggregate `9365→9365`。8 模型各 11 轮硬件门禁 cycles/instructions 合计约
 -0.22%/-0.18%，完整 40 模型 31 轮同会话交替门禁的 solve 中位数之和
 `272.980→270.935 ms`（**-0.75%**），27 胜 13 负。该项保留。
+
+## Round 12 perf: delete obsolete scaled-row scratch（落地 -0.82%）
+
+预缩放矩阵落地后，column PRICE 已直接计算 `A_scaled^T * row_ep`，但旧 H2e
+路径仍在 exact-DSE 扫描中写 `basis.rhs_work = row_ep * row_scale`，并在非 exact
+分支单独物化同一向量；PRICE 不再读取它，后续 BFRT 也会覆盖该 scratch。删除两条
+死写流，不改变 DSE norm/count 顺序或 PRICE 算术。
+
+ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 11 基线完全
+一致（aggregate 9365）。8 模型硬件 instructions 合计约 -0.28%；完整 40 模型
+31 轮交替门禁的 solve 中位数之和 `279.529→277.250 ms`（**-0.82%**）。

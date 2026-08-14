@@ -1543,14 +1543,10 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     var ep_simplex_nonzeros: usize = 0;
     var ep_highs_nonzeros: usize = 0;
     if (needs_exact_weight and !row_pricing) {
-        // Column PRICE consumes the scaled BTRAN row immediately below. Fuse
-        // that materialization with the mandatory exact DSE scan so the row
-        // is read only once while preserving the norm accumulation order.
-        for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |entry, scale, *scaled_entry| {
+        for (iteration.row_ep.values) |entry| {
             exact_weight += entry * entry;
             if (@abs(entry) > self.numerical.zero_tolerance) ep_simplex_nonzeros += 1;
             if (@abs(entry) >= simplex_nla_module.Vector.highs_tiny) ep_highs_nonzeros += 1;
-            scaled_entry.* = entry * scale;
         }
         if (!std.math.isFinite(exact_weight) or exact_weight <= self.numerical.zero_tolerance)
             return .numerical_failure;
@@ -1619,13 +1615,9 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
             }
         }
     } else {
-        // Cache the row-scaled BTRAN vector once. Recomputing this product for
-        // every matrix entry made column pricing pay an avoidable multiply per
-        // nonzero; `rhs_work` is dead until the later BFRT/FTRAN stages.
-        if (!needs_exact_weight) {
-            for (iteration.row_ep.values, basis.row_scale, basis.rhs_work) |dual_value, scale, *scaled_dual|
-                scaled_dual.* = dual_value * scale;
-        }
+        // The matrix is materialized in scaled coordinates at setup, so PRICE
+        // consumes row_ep directly. The former rhs_work = row_ep*row_scale
+        // scratch became dead when this pre-scaled matrix was introduced.
         structural_counts = if (self.has_dropped_model_coefficient)
             priceStructuralColumns(true, problem, iteration.row_ep.values, self.scaled_coefficients, &iteration.row_ap, self.numerical.zero_tolerance)
         else
