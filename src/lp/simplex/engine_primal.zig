@@ -895,10 +895,9 @@ pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_modu
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             var reduced: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            for (problem.matrix.row_indices[begin..end], self.scaled_coefficients[begin..end]) |row, scaled_coefficient| {
                 const row_index = row.toUsize();
-                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+                reduced -= scaled_coefficient * basis.dual[row_index];
             }
             basis.reduced_cost[column] = reduced;
         }
@@ -969,10 +968,9 @@ pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: problem_
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             var reduced: f64 = 0.0;
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            for (problem.matrix.row_indices[begin..end], self.scaled_coefficients[begin..end]) |row, scaled_coefficient| {
                 const row_index = row.toUsize();
-                reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+                reduced -= scaled_coefficient * basis.dual[row_index];
             }
             basis.reduced_cost[column] = reduced;
         }

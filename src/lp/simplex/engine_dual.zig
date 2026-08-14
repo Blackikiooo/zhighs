@@ -45,7 +45,8 @@ const PriceDensityCounts = struct {
 fn priceStructuralColumns(
     comptime filter_small_coefficients: bool,
     problem: problem_module.ProblemView,
-    basis: *basis_module.BasisState,
+    dual: []const f64,
+    scaled_coefficients: []const f64,
     row_ap: *simplex_nla_module.Vector,
     zero_tolerance: f64,
 ) PriceDensityCounts {
@@ -53,12 +54,13 @@ fn priceStructuralColumns(
     for (0..problem.num_cols) |column| {
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
-        var unscaled_alpha: f64 = 0.0;
-        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
-            if (filter_small_coefficients and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
-            unscaled_alpha += basis.rhs_work[matrix_row.toUsize()] * coefficient;
+        // HiGHS' priceByColumn on the pre-scaled matrix: dual * A_s with no
+        // per-term scaling arithmetic.
+        var alpha: f64 = 0.0;
+        for (problem.matrix.row_indices[begin..end], scaled_coefficients[begin..end]) |matrix_row, scaled_coefficient| {
+            if (filter_small_coefficients and scaled_coefficient == 0.0) continue;
+            alpha += dual[matrix_row.toUsize()] * scaled_coefficient;
         }
-        const alpha = unscaled_alpha * basis.column_scale[column];
         row_ap.values[column] = alpha;
         if (@abs(alpha) > zero_tolerance) counts.simplex_nonzeros += 1;
         if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.highs_nonzeros += 1;
@@ -1625,9 +1627,9 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
                 scaled_dual.* = dual_value * scale;
         }
         structural_counts = if (self.has_dropped_model_coefficient)
-            priceStructuralColumns(true, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance)
+            priceStructuralColumns(true, problem, iteration.row_ep.values, self.scaled_coefficients, &iteration.row_ap, self.numerical.zero_tolerance)
         else
-            priceStructuralColumns(false, problem, basis, &iteration.row_ap, self.numerical.zero_tolerance);
+            priceStructuralColumns(false, problem, iteration.row_ep.values, self.scaled_coefficients, &iteration.row_ap, self.numerical.zero_tolerance);
     }
     // Row pricing accumulates structural entries, so their final density is
     // known only after the scatter. Add this block before logical columns so

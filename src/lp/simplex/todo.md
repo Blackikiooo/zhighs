@@ -927,9 +927,13 @@ HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例�
   基交换+primal 镜像+DSE 更新+list）11.5μs（35%）、FTRAN+dual update 5.6μs、CHUZC 1.4μs。
   PRICE 7.7μs/调用 ≈ HiGHS 的 2-3 倍——逐项 `row_scale*coefficient*column_scale*dual`
   表达式比 HiGHS 预缩放矩阵上的 `A_s*dual` 多 2 次乘法 + 2 次查表/nonzero。
-- 第一优化目标：预缩放矩阵物化（HiGHS `A*(colScale*rowScale)` 顺序）+ PRICE 迁移到
-  `A_s*dual`，同时消除逐项缩放。兼作对齐杠杆（与 HiGHS 的 FP 表达式一致）。风险：所有
-  模型的数值路径变化，40/40 门禁 + 逐模型迭代数重基线。
+- 预缩放矩阵已实现并提交：`materializeScaledCoefficients`（HiGHS `A*(colScale*rowScale)`
+  顺序，dropped 系数置 0），column PRICE 全迁移到 `A_s*dual`（recomputeReducedCostsFromWork/
+  recomputeReducedCosts/priceStructuralColumns/recomputePhaseOneReducedCosts/Warm 五处）。
+  40/40、aggregate 9354 不变；性能在环境噪声带内（shell 11 轮 -4.3% 但 31 轮确认 ±5% 漂移，
+  本机 WSL2 共享宿主使 zig 单次求解方差 ~5%，比值测量需更严格的同会话交替协议）。
+  剩余 per-pivot 目标：pivot commit 的 11.5μs（factor update+基交换+primal 镜像+DSE 更新）与
+  FTRAN 的逐项缩放迁移（collectAj/fillInternalColumn）。
 
 ### G. 迭代数验收
 

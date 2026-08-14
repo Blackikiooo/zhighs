@@ -241,6 +241,7 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
         basis.basic_upper[row] = basis.col_upper[column];
     }
     self.objective_scale = if (self.active_dual_initialization_strategy == .highs) 1.0 else objectiveScale(problem.col_cost);
+    if (!self.materializeScaledCoefficients(problem)) return false;
     return true;
 }
 
@@ -332,6 +333,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
         basis.primal[column] /= scale;
     }
     self.objective_scale = objectiveScale(problem.col_cost);
+    if (!self.materializeScaledCoefficients(problem)) return .numerical_failure;
     return .optimal;
 }
 
@@ -438,6 +440,7 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
         basis.primal[column] /= scale;
     }
     self.objective_scale = 1.0;
+    if (!self.materializeScaledCoefficients(problem)) return .numerical_failure;
     return .optimal;
 }
 
@@ -445,6 +448,31 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
 fn powerOfTwoScale(maximum: f64, exponent_limit: comptime_int) f64 {
     if (maximum == 0.0 or !std.math.isFinite(maximum)) return 1.0;
     return @exp2(std.math.clamp(@round(-@log2(maximum)), -@as(f64, exponent_limit), @as(f64, exponent_limit)));
+}
+
+/// Materialize the pre-scaled matrix coefficients in HiGHS' exact order
+/// `A * (colScale * rowScale)` for the column pricing loops.
+pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+    const basis = if (self.basis) |*value| value else return false;
+    const nnz = problem.matrix.values.len;
+    if (self.scaled_coefficients.len != nnz) {
+        self.allocator.free(self.scaled_coefficients);
+        self.scaled_coefficients = self.allocator.alloc(f64, nnz) catch return false;
+    }
+    var position: usize = 0;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
+            const row_index = row.toUsize();
+            self.scaled_coefficients[position] = if (matrix.MatrixTargetPolicy.retainsModelCoefficient(value))
+                value * (basis.column_scale[column] * basis.row_scale[row_index])
+            else
+                0.0;
+            position += 1;
+        }
+    }
+    return true;
 }
 
 /// Compute a power-of-two objective scale from the largest absolute cost.

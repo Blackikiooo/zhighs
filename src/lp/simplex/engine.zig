@@ -639,6 +639,10 @@ pub const SimplexEngine = struct {
     degeneracy: degeneracy_module.Workspace,
     /// Optional CSR companion used by row-oriented pricing.
     pricing_row_view: pricing_workspace_module.RowView,
+    /// Pre-scaled matrix coefficients in HiGHS' `A*(colScale*rowScale)`
+    /// order, materialized once per solve and consumed by the column
+    /// pricing loops. Empty until the first scaled solve.
+    scaled_coefficients: []f64 = &.{},
     // ── Policy ─ algorithm choice and pricing/ratio/numerical rules ──────────
     /// Revised-simplex direction currently executing.
     algorithm: Algorithm = .dual_revised,
@@ -821,6 +825,7 @@ pub const SimplexEngine = struct {
         self.crash.deinit();
         self.degeneracy.deinit();
         self.pricing_row_view.deinit();
+        self.allocator.free(self.scaled_coefficients);
     }
 
     /// Return requested bytes held by retained engine workspaces.
@@ -830,7 +835,8 @@ pub const SimplexEngine = struct {
         const basis_bytes = if (self.basis) |*basis| basis.requestedBytes() else 0;
         const dual_iteration_bytes = if (self.dual_iteration) |*workspace| workspace.retainedBytes() else 0;
         return basis_bytes + dual_iteration_bytes + self.nla.retainedBytes() + self.dual_work.requestedBytes() +
-            self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes();
+            self.crash.requestedBytes() + self.degeneracy.requestedBytes() + self.pricing_row_view.requestedBytes() +
+            std.mem.sliceAsBytes(self.scaled_coefficients).len;
     }
 
     /// Retain the serial-dual workspace across solves of the same shape.
@@ -1102,6 +1108,7 @@ pub const SimplexEngine = struct {
     // Method re-exports from the engine_*.zig implementation files.
     pub const initializeLogicalBasicValues = @import("engine_setup.zig").initializeLogicalBasicValues;
     pub const installArtificialPhaseOneBasis = @import("engine_setup.zig").installArtificialPhaseOneBasis;
+    pub const materializeScaledCoefficients = @import("engine_setup.zig").materializeScaledCoefficients;
     pub const installSparseCrashBasis = @import("engine_setup.zig").installSparseCrashBasis;
     pub const refreshProblemStorage = @import("engine_setup.zig").refreshProblemStorage;
     pub const initializeProblemStorage = @import("engine_setup.zig").initializeProblemStorage;

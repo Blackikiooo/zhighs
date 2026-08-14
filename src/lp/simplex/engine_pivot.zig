@@ -342,10 +342,9 @@ pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_modu
         var reduced = costs[column] + shifts[column];
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
-        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+        for (problem.matrix.row_indices[begin..end], self.scaled_coefficients[begin..end]) |row, scaled_coefficient| {
             const row_index = row.toUsize();
-            reduced -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * basis.dual[row_index];
+            reduced -= scaled_coefficient * basis.dual[row_index];
         }
         basis.reduced_cost[column] = reduced;
     }
@@ -493,10 +492,9 @@ pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.Probl
         for (0..problem.num_cols) |col| {
             const begin = problem.matrix.col_starts[col];
             const end = problem.matrix.col_starts[col + 1];
-            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
+            for (problem.matrix.row_indices[begin..end], self.scaled_coefficients[begin..end]) |row, scaled_coefficient| {
                 const row_index = row.toUsize();
-                basis.reduced_cost[col] -= basis.row_scale[row_index] * value * basis.column_scale[col] * basis.dual[row_index];
+                basis.reduced_cost[col] -= scaled_coefficient * basis.dual[row_index];
             }
         }
     }
