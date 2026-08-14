@@ -1069,3 +1069,16 @@ solveForUpdateSparse hyper 前置、solveHyperSparse FT 前置，合计 self ~6-
 （30% 阈值）的影响，以及 buildMergedFtranSupport 的 marked/column_position
 未初始化读（先 @memset(marked,false) 验证）。若 merged 语义无法与基线完全
 一致，改走"双 support"（published=精确、clear=merged）或放弃本项。
+
+## Round 10 perf: packed pre-U Aq snapshot（否定）
+
+按本地 HiGHS `HVector.packFlag → HFactor::updateFT` 边界，把 FT 的 pre-U Aq
+从 dense memcpy + UPDATE dense scan 改为自然行序 `(index,value)` pack；随后又
+试验只对 hyper-sparse L 分支 pack、dense FTRAN 保留原 snapshot。两种实现都保持
+shell **558 pivots**，ReleaseFast 全测通过，但收益不足以接受：indexed-only 版本
+在 8 模型、每项 11 轮 `perf stat` 门禁中 instructions 合计下降约 **0.42%**，cycles
+只下降约 **0.11%**，且 shell/grow7/seba 分别回退约 1.49%/1.28%/0.73%；10 模型
+31 轮交替墙钟总和也在 `-2.9%` 与 `+4.3%` 间翻转。新增 pack 分支和额外 SoA
+读流抵消了省下的 dense 访问，两个实现均已完整删除。下一项不再给现有 dense-
+visit FT 路径附加 support bookkeeping，转向与 HiGHS 一致的连续 U/UR 存储和
+无链式指针的 solve/update 遍历。
