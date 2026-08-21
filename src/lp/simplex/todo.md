@@ -219,6 +219,9 @@ P0 固定参考和门禁
     0/1 个 BFRT flip 的通用 sort，保持 40-model correctness 和 pivots 不变。4 热点模型各 101 轮为
     `41.466 → 41.391 ms`（**-0.18%**），但完整 40 模型各 31 轮仅
     `140.001 → 139.923 ms`（**-0.056%**），最坏 `scsd1 +1.79%`；收益小于噪声和尾部风险，因此实现已撤销。
+  - 负实验：把 `sparse_ft_adaptive.zig` 的 tagged-union thin wrappers 强制 `inline`，保持 40-model
+    correctness 和 pivots 不变，但 4 热点模型各 101 轮为 `41.697 → 42.631 ms`（**+2.24%**），
+    `seba +4.96%`、`shell +2.74%`。代码膨胀/指令局部性损失超过分发开销，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
