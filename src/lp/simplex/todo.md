@@ -211,6 +211,10 @@ P0 固定参考和门禁
     `gas11 -4.91%`，最坏 `galenet +3.32%`（5 pivots tiny model）。
   - 当前 zhighs/HiGHS 36-model gate（auto PRICE）：aggregate `141.106 / 114.907 ms = 1.228x`，
     **11/36 PASS**，committed pivots `8272 / 8566`；主要剩余热点仍是 `shell/seba/scagr25` 单次迭代。
+  - 负实验：row PRICE scatter 期间标记 touched structural columns，并在 touched ≤ 50% 时排序后只 finalize
+    touched 列，保持 40-model correctness 和 pivots 不变，但完整 40 模型各 31 轮为
+    `143.247 → 159.712 ms`（**+11.49%**），1 胜 39 负；`shell +29.49%`、`scrs8 +25.17%`。
+    mark/sort 和额外写流成本明显超过省下的自然顺序 dense scan，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
