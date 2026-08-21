@@ -240,6 +240,9 @@ P0 固定参考和门禁
     `basic_value/primal` 和发布 changed rows。40-model correctness 仍 PASS，但 `sc105 119 → 121`，
     A/B 为 `140.119 → 139.573 ms`（**-0.39%**）且热点退化：`sc105 +2.36%`、`seba +1.43%`、
     `shell +0.42%`。FTRAN support order 改变 RHS infeasibility list 生命周期，尾部风险超过收益，因此实现已撤销。
+  - 负实验：把 BFRT 的 full finite-check 与 `gatherFtranResultIndices` 合并成单次 dense pass，保持
+    correctness 和 pivots 不变，但 A/B 为 `139.902 → 140.407 ms`（**+0.36%**），11 胜 25 负；
+    `seba +1.45%`、`shell +0.77%`。额外分支/函数体布局比省掉的读流更贵，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
