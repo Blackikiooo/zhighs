@@ -1136,6 +1136,7 @@ pub const SimplexEngine = struct {
     pub const recordPricingElapsed = @import("engine_progress.zig").recordPricingElapsed;
     pub const recordRowPricingElapsed = @import("engine_progress.zig").recordRowPricingElapsed;
     pub const selectRowPricing = @import("engine_progress.zig").selectRowPricing;
+    pub const selectRowPricingFromSupport = @import("engine_progress.zig").selectRowPricingFromSupport;
     pub const observeAqDensity = @import("engine_progress.zig").observeAqDensity;
     pub const observeEpDensity = @import("engine_progress.zig").observeEpDensity;
     pub const observePricingDensity = @import("engine_progress.zig").observePricingDensity;

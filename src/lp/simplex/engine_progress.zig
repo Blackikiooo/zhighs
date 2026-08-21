@@ -229,6 +229,29 @@ pub fn selectRowPricing(self: *const SimplexEngine, vector: []const f64) bool {
         touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
 }
 
+/// Support-aware variant for producer-indexed BTRAN rows. The decision is
+/// identical to `selectRowPricing`, but sparse dual rows avoid a full dense
+/// pass just to estimate CSR work.
+pub fn selectRowPricingFromSupport(self: *const SimplexEngine, vector: []const f64, support: []const u32) bool {
+    switch (self.active_pricing_kernel) {
+        .column => return false,
+        .row => return self.pricing_row_view.num_rows == vector.len,
+        .automatic => {},
+    }
+    if (self.pricing_row_view.num_rows != vector.len or self.pricing_row_view.nonzeros == 0) return false;
+    var touched_entries: usize = 0;
+    var support_count: usize = 0;
+    for (support) |row_u32| {
+        const row: usize = @intCast(row_u32);
+        if (row >= vector.len) return false;
+        if (@abs(vector[row]) <= self.numerical.zero_tolerance) continue;
+        support_count += 1;
+        touched_entries = std.math.add(usize, touched_entries, self.pricing_row_view.rowDegree(row)) catch return false;
+    }
+    return support_count * 4 <= vector.len and
+        touched_entries * 4 <= self.pricing_row_view.nonzeros * 3;
+}
+
 /// Sample the density of an entering FTRAN result when statistics are enabled.
 pub fn observeAqDensity(self: *SimplexEngine, vector: []const f64) void {
     if (self.statistics_io == null) return;

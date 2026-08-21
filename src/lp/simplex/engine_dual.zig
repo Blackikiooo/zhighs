@@ -1579,7 +1579,8 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     iteration.row_ep.reIndex();
     self.observeEpDensity(iteration.row_ep.values);
     const needs_exact_weight = self.pricing.rule == .steepest_edge and self.dual_edge_weights_valid;
-    const row_pricing = self.selectRowPricing(iteration.row_ep.values);
+    const ep_support = iteration.row_ep.activeIndices() orelse return .numerical_failure;
+    const row_pricing = self.selectRowPricingFromSupport(iteration.row_ep.values, ep_support);
     // Row PRICE scatters into row_ap and therefore needs a zero complement.
     // Column PRICE below assigns every structural entry, including exact
     // zeros, so clearing its old numerical support would be redundant.
@@ -1590,7 +1591,6 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
     var exact_weight: f64 = 0.0;
     var ep_simplex_nonzeros: usize = 0;
     var ep_highs_nonzeros: usize = 0;
-    const ep_support = iteration.row_ep.activeIndices() orelse return .numerical_failure;
     if (ep_support.len * 10 <= iteration.row_ep.values.len) {
         for (ep_support) |row_u32| {
             const entry = iteration.row_ep.values[row_u32];
@@ -1649,7 +1649,9 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
         self.recordPricingElapsed(pricing_started);
     var structural_counts: PriceDensityCounts = .{};
     if (row_pricing) {
-        for (iteration.row_ep.values, 0..) |dual_value, row_index| {
+        for (ep_support) |row_u32| {
+            const row_index: usize = @intCast(row_u32);
+            const dual_value = iteration.row_ep.values[row_index];
             if (@abs(dual_value) <= self.numerical.zero_tolerance) continue;
             const scaled_dual = dual_value * basis.row_scale[row_index];
             for (self.pricing_row_view.rowColumns(row_index), self.pricing_row_view.rowValues(row_index)) |column_u32, coefficient| {

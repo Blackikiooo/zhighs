@@ -201,6 +201,17 @@ P0 固定参考和门禁
   - 阈值实验：无 dimension gate 时 `klein1 +4.08%`、`adlittle +2.23%`；加入 dimension ≥128 后分别
     `-0.40%/+0.07%`，因此拒绝无条件 indexed gather。
 
+- [x] **P1.8 让 dual row PRICE 消费 BTRAN producer support。** `computeDualTableauRow` 已在 BTRAN 后
+  `reIndex()` 得到自然序 `row_ep` support；新增 support-aware row/column selector，并让 dual row scatter
+  只遍历 support。阈值和自然列 support 顺序不变，因此不改变 pivot 决策。
+  - correctness：ReleaseFast 全测 PASS；forced-dual 40-model corpus PASS，逐模型 committed pivots 与
+    改动前 adaptive runner 一致。
+  - A/B：改动前 adaptive runner vs 当前、CPU 2、自动 PRICE、40 模型各 31 轮、3 次预热、交替顺序，
+    中位数总和 `148.512 → 143.372 ms`（**-3.46%**），34 胜 6 负；`shell -5.27%`、`seba -8.97%`、
+    `gas11 -4.91%`，最坏 `galenet +3.32%`（5 pivots tiny model）。
+  - 当前 zhighs/HiGHS 36-model gate（auto PRICE）：aggregate `141.106 / 114.907 ms = 1.228x`，
+    **11/36 PASS**，committed pivots `8272 / 8566`；主要剩余热点仍是 `shell/seba/scagr25` 单次迭代。
+
 ### P2 — 重建当前 93-model correctness 矩阵
 
 - [ ] **P2.1 用冻结参考重跑 Netlib 93-model。** 分别跑默认策略、forced dual、forced primal，记录
