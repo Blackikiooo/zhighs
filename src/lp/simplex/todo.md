@@ -243,6 +243,11 @@ P0 固定参考和门禁
   - 负实验：把 BFRT 的 full finite-check 与 `gatherFtranResultIndices` 合并成单次 dense pass，保持
     correctness 和 pivots 不变，但 A/B 为 `139.902 → 140.407 ms`（**+0.36%**），11 胜 25 负；
     `seba +1.45%`、`shell +0.77%`。额外分支/函数体布局比省掉的读流更贵，因此实现已撤销。
+  - 负实验：按 HiGHS `HFactor::updateFT` 把 packed FT 的 U/UR 删除从保序 left-shift 改为
+    swap-with-last。40-model correctness 仍 PASS，但 `israel 143 → 151`、`lotfi 238 → 248`，
+    总 pivots `8267 → 8285`；A/B 为 `140.010 → 140.766 ms`（**+0.54%**），11 胜 25 负，
+    `lotfi +5.65%`、`israel +4.12%`、`seba +2.02%`。单点改 deletion order 会扰动当前 pivot 路径，
+    需与更完整的 HiGHS update/order 对齐一起重做，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
