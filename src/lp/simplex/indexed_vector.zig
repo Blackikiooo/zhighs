@@ -7,6 +7,7 @@
 //! append cheaply without maintaining a second membership structure.
 
 const std = @import("std");
+const matrix = @import("matrix");
 
 pub const IndexState = enum {
     /// `indices[0..index_count]` describes every possible nonzero.
@@ -45,6 +46,13 @@ pub fn IndexedVector(comptime Real: type) type {
         pub const highs_zero: Real = 1e-50;
         pub const update_byte_padding: usize = 6400;
 
+        inline fn clearValues(values: []Real) void {
+            if (comptime Real == f64)
+                matrix.clearF64(values)
+            else
+                @memset(values, 0);
+        }
+
         /// Allocate every retained stream once for a fixed vector dimension.
         pub fn init(allocator: std.mem.Allocator, size: usize) !Self {
             if (size > std.math.maxInt(u32)) return error.Overflow;
@@ -58,12 +66,12 @@ pub fn IndexedVector(comptime Real: type) type {
             self.index_work = try allocator.alloc(u32, index_work_count);
             self.packed_indices = try allocator.alloc(u32, size);
             self.packed_values = try allocator.alloc(Real, size);
-            @memset(self.values, 0);
+            clearValues(self.values);
             @memset(self.indices, 0);
             @memset(self.byte_work, 0);
             @memset(self.index_work, 0);
             @memset(self.packed_indices, 0);
-            @memset(self.packed_values, 0);
+            clearValues(self.packed_values);
             return self;
         }
 
@@ -101,7 +109,7 @@ pub fn IndexedVector(comptime Real: type) type {
         pub fn clear(self: *Self) void {
             const dense_clear = self.state == .dense or self.index_count * 10 > self.values.len * 3;
             if (dense_clear) {
-                @memset(self.values, 0);
+                clearValues(self.values);
             } else {
                 for (self.indices[0..self.index_count]) |index| self.values[index] = 0;
             }
@@ -167,7 +175,7 @@ pub fn IndexedVector(comptime Real: type) type {
             if (self.state == .dense) return;
             for (self.indices[0..self.index_count], 0..) |index, output|
                 self.packed_values[output] = self.values[index];
-            @memset(self.values, 0);
+            clearValues(self.values);
             for (self.indices[0..self.index_count], 0..) |index, output|
                 self.values[index] = self.packed_values[output];
             self.packed_count = 0;

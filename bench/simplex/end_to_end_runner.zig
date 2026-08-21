@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     const pricing_kernel: zhighs.lp.simplex.engine.PricingKernel = if (args.next()) |text|
         if (std.mem.eql(u8, text, "row")) .row else if (std.mem.eql(u8, text, "auto")) .automatic else if (std.mem.eql(u8, text, "column")) .column else return error.InvalidArguments
     else
-        .column;
+        .automatic;
     const devex_strategy: zhighs.lp.simplex.engine.DevexStrategy = if (args.next()) |text|
         if (std.mem.eql(u8, text, "framework")) .framework else if (std.mem.eql(u8, text, "legacy")) .legacy else return error.InvalidArguments
     else

@@ -6,10 +6,11 @@
 //! the packed streams and mapped to pivot positions by compact lookup arrays.
 
 const std = @import("std");
+const memory = @import("memory.zig");
 const sparse_basis = @import("sparse_basis.zig");
 const sparse_kernel = @import("sparse_kernel.zig");
 const sparse_symbolic = @import("sparse_symbolic.zig");
-const sparse_ft = @import("sparse_ft.zig");
+const sparse_ft = @import("sparse_ft_adaptive.zig");
 
 pub const SparseLuError = sparse_kernel.KernelError || sparse_symbolic.SymbolicError || sparse_ft.FtError || error{ DimensionMismatch, NumericalFailure };
 
@@ -412,13 +413,13 @@ pub const SparseLU = struct {
                 for (self.l_rows[self.l_starts[k]..self.l_starts[k + 1]], self.l_values[self.l_starts[k]..self.l_starts[k + 1]]) |row, value|
                     self.accumulate(self.row_position[row], -value * solved);
             };
-            @memset(rhs[0..n], 0.0);
+            memory.clearF64(rhs[0..n]);
             for (self.active[0..self.active_count]) |position|
                 rhs[self.pivot_columns[position]] = self.work[position];
             try self.ft.prepareFtran(rhs, true);
             return self.ft.solveUpper(rhs);
         }
-        @memset(self.work[0..n], 0.0);
+        memory.clearF64(self.work[0..n]);
         for (input_indices) |row| {
             if (row >= n) return error.DimensionMismatch;
             self.work[self.row_position[row]] = rhs[row];
@@ -531,7 +532,7 @@ pub const SparseLU = struct {
                     self.accumulate(self.row_position[row], -value * solved);
             };
             // Scatter hyper-sparse L result to original column space.
-            @memset(rhs[0..n], 0.0);
+            memory.clearF64(rhs[0..n]);
             for (self.active[0..self.active_count]) |position| {
                 const column = self.pivot_columns[position];
                 rhs[column] = self.work[position];
@@ -680,7 +681,7 @@ pub const SparseLU = struct {
         // FTRAN still leaves only its output positions defined. Preserve the
         // sparse result while materializing the conventional dense API.
         for (self.hyper_output[0..count]) |index| self.work[index] = rhs[index];
-        @memset(rhs[0..self.dimension], 0.0);
+        memory.clearF64(rhs[0..self.dimension]);
         for (self.hyper_output[0..count]) |index| rhs[index] = self.work[index];
         self.last_sparse_output_count = count;
         self.last_sparse_output_transpose = transpose;
@@ -1291,7 +1292,7 @@ test "Forrest Tomlin repeated basis replacements match dense reinversion" {
     }
     const upper = try sparse.mutableUpperView();
     try std.testing.expectEqual(n + replacements.len, upper.pivot_ids.len);
-    try std.testing.expectEqual(replacements.len, sparse.ft.update_count);
+    try std.testing.expectEqual(replacements.len, sparse.ft.updateCount());
 }
 
 test "Forrest Tomlin update ep excludes historical row corrections" {

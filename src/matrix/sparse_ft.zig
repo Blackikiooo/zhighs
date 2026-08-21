@@ -534,7 +534,7 @@ test "forward solve publishes mutable U traversal order after an update" {
     const starts = [_]usize{ 0, 0, 0, 0 };
     try ft.reset(&pivots, &diagonal, &starts, &.{}, &.{});
 
-    var entering = [_]f64{ 1, 1, 1 };
+    var entering = [_]f64{ 0.25, 1, 0.5 };
     try ft.prepareFtran(&entering, true);
     try ft.solveUpper(&entering);
     try ft.captureEp(1);

@@ -54,4 +54,8 @@ pub const BasisSnapshot = basis_snapshot.BasisSnapshot;
 
 test {
     std.testing.refAllDecls(@This());
+    // Engine methods are attached through declaration aliases, which does not
+    // reliably discover tests in the implementation fragment itself.
+    _ = @import("engine_dual_edge_weight.zig");
+    _ = @import("simplex_nla.zig");
 }

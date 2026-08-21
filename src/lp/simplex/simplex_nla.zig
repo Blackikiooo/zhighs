@@ -97,10 +97,17 @@ pub const SimplexNla = struct {
         entering_col: u32,
         column_scale: f64,
     ) factorization_module.FactorizationError!void {
+        const direction_indices: ?[]const u32 = if (col_aq.values.len >= 128 and
+            col_aq.state == .indexed and
+            col_aq.index_count * 10 <= col_aq.values.len)
+            col_aq.activeIndices()
+        else
+            null;
         try self.factorization.update(.{
             .leaving_row = leaving_row,
             .entering_col = entering_col,
             .direction = col_aq.values,
+            .direction_indices = direction_indices,
             .column_scale = column_scale,
         });
     }
@@ -167,4 +174,39 @@ test "simplex NLA update consumes the captured Aq vector" {
     try nla.ftranForUpdate(&col_aq);
     try nla.update(&col_aq, 0, 0, 1);
     try std.testing.expectEqual(@as(usize, 1), nla.factorization.update_count);
+}
+
+test "sparse update FTRAN publishes support introduced by FT corrections" {
+    const n = 64;
+    var nla = SimplexNla.init(std.testing.allocator);
+    defer nla.deinit();
+    try nla.factorizeIdentity(n);
+
+    // Replace identity column zero by e_0 + 0.25 e_5. The first update
+    // captures this Aq and creates a Forrest--Tomlin correction.
+    var entering = try Vector.init(std.testing.allocator, n);
+    defer entering.deinit();
+    entering.values[0] = 1;
+    entering.values[5] = 0.25;
+    try entering.appendIndex(0);
+    try entering.appendIndex(5);
+    try nla.ftranForUpdate(&entering);
+    try nla.update(&entering, 0, 0, 1);
+
+    // Solving the next unit RHS must scatter through that correction. The
+    // published support is consumed directly by sparse DSE and clearing, so
+    // every numerical nonzero must be represented even when absent in input.
+    var corrected = try Vector.init(std.testing.allocator, n);
+    defer corrected.deinit();
+    corrected.values[0] = 1;
+    try corrected.appendIndex(0);
+    try nla.ftranForUpdate(&corrected);
+    const support = corrected.activeIndices().?;
+    var marked = [_]bool{false} ** n;
+    for (support) |row| marked[row] = true;
+    for (corrected.values, 0..) |value, row| {
+        if (value != 0.0) try std.testing.expect(marked[row]);
+    }
+    try std.testing.expectApproxEqAbs(@as(f64, 1), corrected.values[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -0.25), corrected.values[5], 1e-12);
 }

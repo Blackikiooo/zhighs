@@ -343,7 +343,7 @@ pub const SolveControl = struct {
     adaptive_reprice: bool = false,
     /// Select once per pricing operation; no representation branch exists in
     /// either coefficient inner loop.
-    pricing_kernel: PricingKernel = .column,
+    pricing_kernel: PricingKernel = .automatic,
     /// Full reference-framework Devex is the default as of T4 (2026-07-20).
     /// 90/93 Stage 7 optimal, 88 common-completion models zero regression,
     /// and the framework→legacy cold restart provides a deterministic safety
@@ -753,7 +753,7 @@ pub const SimplexEngine = struct {
     /// Number of exact reprices performed in the current solve.
     exact_reprices: usize = 0,
     /// Resolved row/column pricing traversal.
-    active_pricing_kernel: PricingKernel = .column,
+    active_pricing_kernel: PricingKernel = .automatic,
     /// Resolved primal Devex implementation.
     active_devex_strategy: DevexStrategy = .legacy,
     /// Resolved segmented primal pricing policy.

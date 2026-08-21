@@ -11,8 +11,9 @@ HIGHS_ROOT=${HIGHS_ROOT:-/home/godv/documents/codefiles/cppfiles/HiGHS}
 HIGHS_BUILD=${HIGHS_BUILD:-$HIGHS_ROOT/cmake-build-release}
 RUNS=${RUNS:-11}
 WARMUPS=${WARMUPS:-2}
+CPU=${CPU:-}
 DUAL_EDGE_WEIGHT_STRATEGY=${DUAL_EDGE_WEIGHT_STRATEGY:-steepest-devex}
-PRICING_KERNEL=${PRICING_KERNEL:-column}
+PRICING_KERNEL=${PRICING_KERNEL:-auto}
 DUAL_DSE_UPDATE_BUDGET=${DUAL_DSE_UPDATE_BUDGET:-auto}
 
 if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || ((RUNS % 2 == 0)); then
@@ -20,7 +21,11 @@ if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || ((RUNS % 2 == 0)); then
   exit 2
 fi
 [[ "$WARMUPS" =~ ^[0-9]+$ ]] || { echo "WARMUPS must be non-negative" >&2; exit 2; }
+[[ -z "$CPU" || "$CPU" =~ ^[0-9]+$ ]] || { echo "CPU must be empty or a non-negative integer" >&2; exit 2; }
 [[ -f "$MANIFEST" && -f "$CORPUS_LOCK" ]] || { echo "missing simplex performance manifest" >&2; exit 2; }
+
+RUNNER_PREFIX=()
+if [[ -n "$CPU" ]]; then RUNNER_PREFIX=(taskset -c "$CPU"); fi
 
 if (($#)); then
   MODELS=("$@")
@@ -61,16 +66,16 @@ for model in "${MODELS[@]}"; do
   }
 
   for ((run = 0; run < WARMUPS; run++)); do
-    "$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}" >/dev/null
-    "$HIGHS_RUNNER" "$path" >/dev/null
+    "${RUNNER_PREFIX[@]}" "$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}" >/dev/null
+    "${RUNNER_PREFIX[@]}" "$HIGHS_RUNNER" "$path" >/dev/null
   done
   for ((run = 1; run <= RUNS; run++)); do
     if ((run % 2)); then
-      zig_output=$("$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}")
-      highs_output=$("$HIGHS_RUNNER" "$path")
+      zig_output=$("${RUNNER_PREFIX[@]}" "$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}")
+      highs_output=$("${RUNNER_PREFIX[@]}" "$HIGHS_RUNNER" "$path")
     else
-      highs_output=$("$HIGHS_RUNNER" "$path")
-      zig_output=$("$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}")
+      highs_output=$("${RUNNER_PREFIX[@]}" "$HIGHS_RUNNER" "$path")
+      zig_output=$("${RUNNER_PREFIX[@]}" "$ZIG_RUNNER" "$path" "${SOLVE_ARGS[@]}")
     fi
     awk -F '\t' -v model="$model" -v run="$run" '
       $1 == "zhighs" {OFS="\t"; print model,run,"zhighs",$18,$6,$3,$5}
@@ -120,8 +125,15 @@ awk -F '\t' -v manifest="$MANIFEST" '
       result = ratio < target[model] ? "PASS" : "FAIL"
       if (status[zig_key] != status[highs_key]) result = "STATUS_MISMATCH"
       if (result != "PASS") failed = 1
+      model_count++
+      if (result == "PASS") pass_count++
+      zig_total += zig_median
+      highs_total += highs_median
+      zig_iterations += iterations[zig_key]
+      highs_iterations += iterations[highs_key]
       print model,class[model],count[zig_key],zig_median/1e6,highs_median/1e6,ratio,iterations[zig_key],iterations[highs_key],result
     }
+    print "SUMMARY","aggregate",count[zig_key],zig_total/1e6,highs_total/1e6,zig_total/highs_total,zig_iterations,highs_iterations,pass_count "/" model_count
     exit failed
   }
 ' "$samples" | sort -t $'\t' -k1,1

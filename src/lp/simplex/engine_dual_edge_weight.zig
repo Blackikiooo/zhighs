@@ -25,6 +25,64 @@ const matrix = @import("matrix");
 const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
 
+const DseRecurrenceCounts = struct {
+    aq_nonzeros: usize,
+    tau_nonzeros: usize,
+};
+
+/// Match HiGHS `HSimplexNla::sparseLoopStyle`: indexed traversal wins only
+/// below 40% possible-nonzero density. Denser producer streams keep their
+/// valid support for lifecycle operations but are cheaper to consume in
+/// natural dense order.
+inline fn sparseLoopSupport(vector: *const simplex_nla_module.Vector) ?[]const u32 {
+    const support = vector.activeIndices() orelse return null;
+    return if (support.len * 5 < vector.values.len * 2) support else null;
+}
+
+/// Apply the DSE recurrence over the entering-column producer support when it
+/// is available. The indexed contract guarantees that every possible nonzero
+/// is present; exact zeros may remain in the stream after cancellation.
+inline fn applyDualSteepestEdgeRecurrence(
+    weights: []f64,
+    col_aq: *const simplex_nla_module.Vector,
+    col_dse: *const simplex_nla_module.Vector,
+    leaving_row: usize,
+    new_pivotal_edge_weight: f64,
+    kai: f64,
+) ?DseRecurrenceCounts {
+    var counts = DseRecurrenceCounts{ .aq_nonzeros = 0, .tau_nonzeros = 0 };
+    if (sparseLoopSupport(col_dse)) |tau_support| {
+        for (tau_support) |row| if (@abs(col_dse.values[row]) >= simplex_nla_module.Vector.highs_tiny) {
+            counts.tau_nonzeros += 1;
+        };
+    } else {
+        for (col_dse.values) |tau| if (@abs(tau) >= simplex_nla_module.Vector.highs_tiny) {
+            counts.tau_nonzeros += 1;
+        };
+    }
+    if (sparseLoopSupport(col_aq)) |aq_support| {
+        for (aq_support) |row_u32| {
+            const row: usize = @intCast(row_u32);
+            const alpha = col_aq.values[row];
+            if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.aq_nonzeros += 1;
+            if (row == leaving_row or alpha == 0.0) continue;
+            const updated = weights[row] + alpha *
+                (new_pivotal_edge_weight * alpha + kai * col_dse.values[row]);
+            if (!std.math.isFinite(updated)) return null;
+            weights[row] = @max(updated, 1e-4);
+        }
+    } else {
+        for (weights, col_aq.values, col_dse.values, 0..) |*weight, alpha, tau, row| {
+            if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) counts.aq_nonzeros += 1;
+            if (row == leaving_row or alpha == 0.0) continue;
+            const updated = weight.* + alpha * (new_pivotal_edge_weight * alpha + kai * tau);
+            if (!std.math.isFinite(updated)) return null;
+            weight.* = @max(updated, 1e-4);
+        }
+    }
+    return counts;
+}
+
 /// Full dual Devex recurrence used by HiGHS-style row pricing. The hot
 /// FTRAN column is reused directly, so updating every row is allocation
 /// free and requires no additional basis solve.
@@ -140,34 +198,27 @@ pub fn updateDualSteepestEdgeWeights(self: *SimplexEngine, leaving_row: usize, p
     basis.row_edge_weight[leaving_row] = exact_pivot_weight;
     iteration.col_dse.copyFrom(&iteration.row_ep) catch return .numerical_failure;
     self.nla.ftran(&iteration.col_dse) catch return .numerical_failure;
-    var aq_nonzeros: usize = 0;
-    var tau_nonzeros: usize = 0;
     const new_pivotal_edge_weight = exact_pivot_weight / (pivot * pivot);
     const kai = -2.0 / pivot;
-    for (basis.row_edge_weight, iteration.col_aq.values, iteration.col_dse.values, 0..) |*weight, alpha, tau, row| {
-        if (@abs(alpha) >= simplex_nla_module.Vector.highs_tiny) aq_nonzeros += 1;
-        if (@abs(tau) >= simplex_nla_module.Vector.highs_tiny) tau_nonzeros += 1;
-        if (row == leaving_row) continue;
-        // HiGHS traverses the indexed pivotal column and therefore never
-        // evaluates the recurrence for exact structural zeros.
-        if (alpha == 0.0) continue;
-        // Preserve HiGHS' operation order: strict CHUZR ties are sensitive to
-        // a one-ulp difference between this form and the algebraic ratio form.
-        const updated = weight.* + alpha * (new_pivotal_edge_weight * alpha + kai * tau);
-        if (!std.math.isFinite(updated)) return .numerical_failure;
-        weight.* = @max(updated, 1e-4);
-    }
+    const counts = applyDualSteepestEdgeRecurrence(
+        basis.row_edge_weight,
+        &iteration.col_aq,
+        &iteration.col_dse,
+        leaving_row,
+        new_pivotal_edge_weight,
+        kai,
+    ) orelse return .numerical_failure;
     basis.row_edge_weight[leaving_row] = @max(new_pivotal_edge_weight, 1e-4);
     const row_count = basis.row_edge_weight.len;
     if (row_count != 0) {
         const inverse_rows = 1.0 / @as(f64, @floatFromInt(row_count));
         const multiplier = 0.05;
         self.dual_dse_aq_density = (1.0 - multiplier) * self.dual_dse_aq_density +
-            multiplier * @as(f64, @floatFromInt(aq_nonzeros)) * inverse_rows;
+            multiplier * @as(f64, @floatFromInt(counts.aq_nonzeros)) * inverse_rows;
         self.dual_dse_ep_density = (1.0 - multiplier) * self.dual_dse_ep_density +
             multiplier * @as(f64, @floatFromInt(ep_nonzeros)) * inverse_rows;
         self.dual_dse_tau_density = (1.0 - multiplier) * self.dual_dse_tau_density +
-            multiplier * @as(f64, @floatFromInt(tau_nonzeros)) * inverse_rows;
+            multiplier * @as(f64, @floatFromInt(counts.tau_nonzeros)) * inverse_rows;
         self.dual_dse_ap_density = (1.0 - multiplier) * self.dual_dse_ap_density +
             multiplier * self.current_dual_row_ap_density;
         const denominator = @max(
@@ -285,6 +336,110 @@ test "incremental dual steepest-edge recurrence matches the new inverse rows" {
     try std.testing.expectEqual(SolveStatus.optimal, engine.updateDualSteepestEdgeWeights(0, 2.0));
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), engine.basis.?.row_edge_weight[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.25), engine.basis.?.row_edge_weight[1], 1e-12);
+}
+
+test "dual steepest-edge recurrence is representation and support-order invariant" {
+    const aq_values = [_]f64{ 0, 2, 1e-16, -3, 0, 0.5, 0, -1e-14, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const tau_values = [_]f64{ 1, -0.25, 0, 0.75, 0, 1e-16, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const initial_weights = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+
+    var dense_aq = try simplex_nla_module.Vector.init(std.testing.allocator, aq_values.len);
+    defer dense_aq.deinit();
+    var dense_tau = try simplex_nla_module.Vector.init(std.testing.allocator, tau_values.len);
+    defer dense_tau.deinit();
+    @memcpy(dense_aq.values, &aq_values);
+    @memcpy(dense_tau.values, &tau_values);
+    dense_aq.state = .dense;
+    dense_tau.state = .dense;
+
+    var indexed_aq = try simplex_nla_module.Vector.init(std.testing.allocator, aq_values.len);
+    defer indexed_aq.deinit();
+    var indexed_tau = try simplex_nla_module.Vector.init(std.testing.allocator, tau_values.len);
+    defer indexed_tau.deinit();
+    @memcpy(indexed_aq.values, &aq_values);
+    @memcpy(indexed_tau.values, &tau_values);
+    for ([_]u32{ 5, 1, 7, 3, 2 }) |row| try indexed_aq.appendIndex(row);
+    for ([_]u32{ 6, 3, 0, 5, 1 }) |row| try indexed_tau.appendIndex(row);
+    try std.testing.expect(sparseLoopSupport(&indexed_aq) != null);
+    try std.testing.expect(sparseLoopSupport(&indexed_tau) != null);
+
+    var natural_aq = try simplex_nla_module.Vector.init(std.testing.allocator, aq_values.len);
+    defer natural_aq.deinit();
+    var natural_tau = try simplex_nla_module.Vector.init(std.testing.allocator, tau_values.len);
+    defer natural_tau.deinit();
+    @memcpy(natural_aq.values, &aq_values);
+    @memcpy(natural_tau.values, &tau_values);
+    for ([_]u32{ 1, 2, 3, 5, 7 }) |row| try natural_aq.appendIndex(row);
+    for ([_]u32{ 0, 1, 3, 5, 6 }) |row| try natural_tau.appendIndex(row);
+
+    var dense_weights = initial_weights;
+    const dense_counts = applyDualSteepestEdgeRecurrence(
+        &dense_weights,
+        &dense_aq,
+        &dense_tau,
+        3,
+        0.75,
+        -1.25,
+    ).?;
+    var indexed_weights = initial_weights;
+    const indexed_counts = applyDualSteepestEdgeRecurrence(
+        &indexed_weights,
+        &indexed_aq,
+        &indexed_tau,
+        3,
+        0.75,
+        -1.25,
+    ).?;
+    var natural_weights = initial_weights;
+    const natural_counts = applyDualSteepestEdgeRecurrence(
+        &natural_weights,
+        &natural_aq,
+        &natural_tau,
+        3,
+        0.75,
+        -1.25,
+    ).?;
+    var mixed_weights = initial_weights;
+    const mixed_counts = applyDualSteepestEdgeRecurrence(
+        &mixed_weights,
+        &indexed_aq,
+        &dense_tau,
+        3,
+        0.75,
+        -1.25,
+    ).?;
+
+    try std.testing.expectEqualSlices(f64, &dense_weights, &indexed_weights);
+    try std.testing.expectEqualSlices(f64, &dense_weights, &natural_weights);
+    try std.testing.expectEqualSlices(f64, &dense_weights, &mixed_weights);
+    try std.testing.expectEqual(dense_counts, indexed_counts);
+    try std.testing.expectEqual(dense_counts, natural_counts);
+    try std.testing.expectEqual(dense_counts, mixed_counts);
+    try std.testing.expectEqual(@as(usize, 4), dense_counts.aq_nonzeros);
+    try std.testing.expectEqual(@as(usize, 4), dense_counts.tau_nonzeros);
+
+    // Possible zeros may make a valid index stream too dense for profitable
+    // random access. The 40% policy must then retain dense-loop semantics.
+    try indexed_aq.appendIndex(0);
+    try indexed_aq.appendIndex(4);
+    try std.testing.expectEqual(@as(?[]const u32, null), sparseLoopSupport(&indexed_aq));
+    var crowded_weights = initial_weights;
+    const crowded_counts = applyDualSteepestEdgeRecurrence(
+        &crowded_weights,
+        &indexed_aq,
+        &indexed_tau,
+        3,
+        0.75,
+        -1.25,
+    ).?;
+    try std.testing.expectEqualSlices(f64, &dense_weights, &crowded_weights);
+    try std.testing.expectEqual(dense_counts, crowded_counts);
+
+    indexed_weights[1] = std.math.inf(f64);
+    try std.testing.expectEqual(
+        @as(?DseRecurrenceCounts, null),
+        applyDualSteepestEdgeRecurrence(&indexed_weights, &indexed_aq, &indexed_tau, 3, 0.75, -1.25),
+    );
 }
 
 test "dual steepest-edge recurrence matches exact weights for a nontrivial basis" {

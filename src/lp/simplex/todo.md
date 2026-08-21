@@ -1,1213 +1,429 @@
-# Dual simplex 对齐路线
-
-基准源码：本地 HiGHS `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`。
-
-目标：先让 Zig 的 serial/plain dual simplex 在状态机、工作数组、阶段切换、选主元、更新和
-cleanup 上与 `HEkkDual` 源码同构；验证口径为相同模型、presolve off、相同 simplex 选项下的
-committed simplex iterations。稀疏矩阵、primal simplex 和 tasks/multi dual 不在本路线首轮范围。
-
-## 0. 框架收敛原则（2026-08-11 重置）
-
-当前目标从局部性能追赶切回框架完整性：算法、状态转移和数值顺序以本地 HiGHS 为准，Zig 只在
-表达所有权、泛型专门化、错误联合、内存布局和编译期消除分支上发挥语言优势。完成结构等价前，
-不再接受通过模型尺寸、密度区间或固定迭代阈值选择算法行为的新分支。
-
-实施边界：
-
-1. 建立泛型 `IndexedVector(Real)`，覆盖 `HVectorBase<T>` 的 indexed/dense 状态、稀疏清零、
-   `tight/reIndex/pack/norm2/saxpy` 和 synthetic tick；先作为独立基础设施，不接入热路径。
-2. 建立 `SimplexNla` 边界，让 collect/FTRAN/BTRAN/UPDATE 原生接收同一 indexed vector，索引由
-   producer 维护，不允许 solve 后补扫 dense 数组伪造 support。
-3. 建立 serial-dual iteration workspace，对应 `row_ep/row_ap/col_aq/col_BFRT`、`dualRow` 和
-   `dualRHS`；CHUZR 到 UPDATE 的整个迭代共享它，不再把临时向量散落在 `BasisState`。
-4. 用单一 major phase/rebuild controller 接管 B--F 各阶段；新路径通过逐字段/逐 pivot 门禁后，
-   删除旧的模型形状开关和 fallback 拼接，而不是继续为它们增加补偿条件。
-5. 框架验收顺序固定为：单元语义 → 首次 rebuild 全状态 → pivot 前缀 → 完整模型 → 40 模型。
-   在完整 40 模型与 HiGHS 算法路径对齐以前，运行时间只作回归保护，不作设计选择依据。
-
-### F0a — Zig 泛型 indexed vector（完成）
-
-直接参照本地 `HVectorBase.{h,cpp}` 实现拥有内存的 `IndexedVector(Real)`。用显式 enum 表示
-HiGHS 的 `count < 0` dense/unknown sentinel，以类型化状态取代带符号魔数；用 comptime `Real`
-生成 f64 和扩展精度版本；串行框架不携带 PAMI `next` 链。其余清零阈值、reindex 阈值、索引顺序、
-可能非零语义和算术顺序必须与 HiGHS 一致。验收为 ReleaseFast 全测、独立语义测试和零现有求解
-行为变化；接入 iteration workspace/NLA 属于后续 F0b/F0c，不在本提交混合完成。
-
-实现已落在 `indexed_vector.zig`：显式 `.indexed/.dense` 状态替代负 count，f64/f128 由同一
-comptime 类型生成；保留 HiGHS 的 30% clear、10% reindex、possible-nonzero、`1e-14/1e-50`、
-pack snapshot、扩展精度运算顺序、synthetic tick 及 UPDATE scratch 所有权。独立测试覆盖 sparse/
-dense clear、自然序 reindex、tight、pack、norm、跨精度 copy 和 saxpy cancellation；ReleaseFast
-全量测试及 `git diff --check` 通过，现有 solver 尚未接入，因此求解行为为零变化。
-
-### F0b — serial dual iteration workspace（完成）
-
-参照 `HEkkDual` 的成员生命周期，用 `DualIterationWorkspace(Real)` 唯一拥有 `row_ep`、
-`row_ap`、`col_aq`、`col_BFRT` 和 CHUZC 的组合 pack。行向量维度固定为 `num_row`，结构 tableau
-维度为 `num_col`，组合 pack 容量为 `num_col + num_row`；`beginIteration` 只按各自产生者 support
-清零，不触碰跨迭代 factor 状态。扩展精度由同一 comptime 定义生成，不复制 workspace 代码。
-
-本阶段只建立所有权、维度和 pack 顺序语义并完成独立测试，不接入现有 dual kernel；F0c 再让
-SimplexNla 原生消费这些 vector。验收仍是 ReleaseFast 全测和零现有求解行为变化。
-
-实现已落在 `dual_iteration_workspace.zig`：四个 vector 的维度和生命周期互不混用，CHUZC pack
-严格按 `row_ap.index` 后接 `row_ep.index + num_col` 的 producer 顺序形成，f64/f128 共用同一
-定义。独立测试覆盖非自然 support 顺序、logical offset 和逐迭代 sparse clear；ReleaseFast 全测
-通过，尚未接入现有 engine，求解行为零变化。下一步 F0c 建立 NLA 的 vector-native contract。
-
-### F0c — vector-native SimplexNla contract（完成）
-
-建立 concrete `SimplexNla`（无 vtable）并让其拥有 `Factorization`。FTRAN/BTRAN/UPDATE 的公共
-参数改为 `IndexedVector(f64)`：空 indexed RHS 保持空；SparseLU hyper kernel 已发布的 support
-原样保留；dense backend 或尚未支持 producer index 的 FT 路径必须显式把结果标成 `.dense`，禁止
-在 NLA 内全量扫描补造索引。`ftranForUpdate` 保持 captured-Aq 生命周期，UPDATE 必须消费同一
-vector。先用 identity 和非平凡 dense basis 验证数值、状态降级和零 RHS；现有 engine 接入留到
-F0d，因此本阶段仍要求求解行为零变化。
-
-实现已落在 `simplex_nla.zig`：concrete NLA 拥有 factorization，空 indexed RHS 零操作，SparseLU
-hyper FTRAN/BTRAN 的 producer support 保持 indexed，dense/FT 未发布 support 时显式降级 dense。
-同时补齐 indexed RHS 的 stale-complement 边界：只有真正 hyper-sparse dispatch 可以直接消费
-indices，其余 dense consumer 先用 vector 自有 packed scratch allocation-free 物化零补集。identity、
-非平凡 dense basis、stale complement、sparse support 和 captured-Aq UPDATE 测试全部通过；现有
-engine 尚未接入，求解行为零变化。
-
-### F0d — engine NLA ownership migration（完成）
-
-将 `SimplexEngine.factorization` 替换为 `SimplexEngine.nla: SimplexNla`，所有 factor build/solve/
-update、reinversion policy、统计和测试观测显式经 `nla.factorization` 访问。本阶段是机械所有权迁移：
-现有 engine 数值向量仍调用 compatibility slice API，不同时切换 dual iteration 数据流。验收为
-ReleaseFast 全测、40 模型 forced-dual correctness 和 committed pivot 数逐项不变。通过后，F0e 才
-把 `DualIterationWorkspace` 装入 engine 并迁移一条完整的 BTRAN→PRICE→CHUZC 只读链。
-
-`SimplexEngine` 现只拥有 concrete `SimplexNla`，factor build/solve/update、reinversion policy、
-统计、benchmark runner 和 session 内存复用测试均从同一 NLA 所有权边界访问 factorization；旧的
-公开 `engine.factorization` 路径已清零。ReleaseFast 全测通过，forced-dual 40 模型 correctness
-**40/40 PASS**，committed pivots 合计仍为 **6833**，本阶段未改变任何迭代 kernel 的数值输入或顺序。
-
-### F0e — engine-owned serial dual workspace（完成）
-
-把 `DualIterationWorkspace(f64)` 安装为 `SimplexEngine` 的模型形状资源，生命周期与当前 LP 实例
-一致而不再依附 `BasisState`。同尺寸重复 solve 必须复用分配；尺寸变化时以先成功构造、后替换的
-transactional 顺序更新，OOM 不得破坏旧 workspace；`deinit/requestedBytes` 必须覆盖完整所有权。
-
-本阶段不读取或写入 iteration vector，求解数值行为应为零变化。验收为生命周期/内存复用单测、
-ReleaseFast 全测、forced-dual 40 模型 correctness **40/40** 且 committed pivots 合计仍为 **6833**。
-通过后 F0f 才原子迁移 BTRAN→PRICE→CHUZC 的整条只读链，禁止同时保留两套具有不同 support
-顺序的 active tableau row。
-
-`SimplexEngine.dual_iteration` 现拥有唯一的模型形状 workspace；同尺寸请求直接保留 vector 和 pack
-分配，尺寸变化使用 allocate-before-release，solve/reoptimize、deinit 和 requested memory accounting
-均覆盖该生命周期。复用/换形单测及 ReleaseFast 全测通过；forced-dual 40 模型 correctness
-**40/40 PASS**，committed pivots 合计仍为 **6833**，确认尚未改变 iteration 数值路径。
-
-### F0f — workspace-native BTRAN→PRICE→CHUZC chain（完成）
-
-一次性迁移完整的 pivotal-row 只读生命周期：`nla.btran(row_ep)` 产生 BTRAN 结果，PRICE 直接写
-`row_ap`，workspace 按 structural 后 logical 的顺序建立唯一 CHUZC pack。ratio test 改收
-`PivotalRowView`（两段 slice、inline column lookup），不把两段值复制回 `BasisState.tableau`；证书、
-Phase-I 诊断、row/column pivot verify 和 dual reduced-cost update 全部读取同一 workspace。
-
-双单纯形不得再把 `BasisState.dual_row` 或 `BasisState.tableau` 当作该迭代的权威值；前者在所有
-辅助 DSE 路径迁移后删除，后者仅保留 primal pricing。CHUZC candidate/flip prefix 由 workspace pack
-存储，BFRT 不再借用 primal 的 `flip_columns`。验收顺序为 view/pack 单测、ReleaseFast 全测、
-`blend/bore3d/etamacro` pivot trace 前缀、forced-dual 40 模型 correctness 及 **6833** aggregate pivots。
-
-`computeDualTableauRow` 现由 `nla.btran(row_ep)` 和直接写入 `row_ap` 的 PRICE 构成，分段
-`PivotalRowView` 为 scalar consumer 提供 inline global-column lookup，CHUZC/BFRT 只使用 workspace
-pack。证书、Phase-I 诊断、pivot verify、DSE 和 dual reduced-cost update 已迁移至同一权威行；
-`BasisState.dual_row/tableau_count` 已删除，`BasisState.tableau/flip_columns` 仅供 primal 使用。
-
-ReleaseFast 全测与完整构建通过，forced-dual correctness **40/40 PASS**、aggregate pivots
-**6833**。与 F0e 提交逐模型对比的结构 trace 完全一致：`blend 105` digest `15d11cf0…`、
-`bore3d 173` digest `c9af8318…`、`etamacro 484` digest `db4e80c0…`。这确认迁移同时保持了
-数值结果、迭代数和 pivot 顺序。
-
-### F0g — single-owner entering column and UPDATE（完成）
-
-将 dual entering direction 从 `BasisState.pivot_direction` 迁移到 workspace `col_aq`：collectAj 直接
-发布 RHS support，`nla.ftranForUpdate(col_aq)` 保留 SparseLU 的 partial-Aq capture，row/column
-pivot verify、BFRT 后 primal update、DSE/Devex recurrence 和 changed-row gather 均消费该 vector，
-最后由 `nla.update(col_aq, ...)` 提交同一个 captured column。负 entering move 仍原地缩放 vector，
-保持既有算术顺序和 factor update 的 column-scale 约定。
-
-`BasisState.pivot_direction` 暂只保留给 primal simplex 和 residual scratch；公共 `performPivot` 以
-comptime-free algorithm dispatch 绑定一次 direction slice，之后循环不得重复分支。验收为 NLA
-captured-Aq 单测、ReleaseFast 全测、F0f 三模型 trace digest 不变、forced-dual correctness 40/40
-和 aggregate pivots **6833**。
-
-dual iteration 现由 `fillInternalColumnSparse` 直接发布 `col_aq` RHS support，随后
-`nla.ftranForUpdate`、pivot verify、DSE/Devex、basic-value update 和 `nla.update` 始终消费同一
-vector；primal direction 继续由 `BasisState` 独立拥有。初版曾在共享 pivot 内依据可变
-`engine.algorithm` 选择方向，但 `scsd1` 的 primal cleanup 证明 phase kernel 与顶层算法标签并非
-同义（`77→88` pivots、反复 reinvert），因此已改为显式 `performDualPivot/performPivot` 入口，再
-汇合到一个 direction-bound transaction；修复后该负结果未保留。
-
-ReleaseFast 全测、runner 完整构建和 forced-dual correctness **40/40 PASS**，aggregate pivots
-恢复 **6833**；F0f 三模型的 counts/digests 全部不变（`105/15d11cf0…`、`173/c9af8318…`、
-`484/db4e80c0…`）。
-
-### F0h — workspace-native BFRT vector（完成）
-
-将 boxed flips 的 equation-space RHS 和 FTRAN 结果统一放入 `col_bfrt`：CHUZC flip prefix 按顺序
-collect 到 vector，producer 用 byte mark 保证行 support 唯一并保留 cancellation，随后
-`nla.ftran(col_bfrt)`；basic value correction、changed-row gather 和 infeasibility-list update 直接
-消费结果。删除 `residual_work → rhs_work` 的全向量复制，不改变 flip 提交的 transactional 边界。
-
-验收为重复行/抵消 support 单测、ReleaseFast 全测、F0g 三模型 trace digest 不变、forced-dual
-correctness 40/40 和 aggregate pivots **6833**。
-
-BFRT 现直接在 `col_bfrt` 中按 CHUZC flip 顺序聚合；byte mark 让共享 matrix row 只发布一次
-support，同时允许数值抵消继续保留 possible-nonzero 语义。`nla.ftran`、basic correction、changed-row
-gather 和 infeasibility update 消费同一 vector，原先两次 row-sized materialize/copy 已移除。
-重复行 support 单测、ReleaseFast 全测和 runner build 通过；forced-dual correctness **40/40 PASS**、
-aggregate pivots **6833**，三模型 trace counts/digests 继续保持 `105/15d11cf0…`、
-`173/c9af8318…`、`484/db4e80c0…`。
-
-### F0i — complete serial workspace with col_DSE（完成）
-
-修正 F0b 的初始范围遗漏：本地 `HEkkDual::initialiseInstance` 除 `row_ep/row_ap/col_aq/col_BFRT`
-外还显式 setup `col_DSE`。在 `DualIterationWorkspace(Real)` 增加同维 vector；DSE recurrence 由
-`col_dse.copyFrom(row_ep) → nla.ftran(col_dse)` 产生 tau，禁止继续借用 `BasisState.residual_work`。
-copy 必须保留 row_ep producer support 和 synthetic metadata，dense backend 由 NLA 显式降级。
-
-验收为 workspace clear/bytes 与 DSE recurrence 单测、ReleaseFast 全测、F0h 三模型 trace digest
-不变、forced-dual correctness 40/40 和 aggregate pivots **6833**。
-
-workspace 现完整拥有本地 `HEkkDual` serial path 的五个 vector；DSE tau 由 indexed `row_ep`
-直接 `copyFrom` 到 `col_dse` 后经 `nla.ftran` 产生，recurrence 不再占用 basis residual scratch。
-f64/f128 lifecycle/bytes、DSE exact recurrence、ReleaseFast 全测和 runner build 通过；forced-dual
-correctness **40/40 PASS**、aggregate pivots **6833**，三模型 trace digests 保持不变。
-
-### F0j — complete HEkkDualRow ownership（完成）
-
-将 CHUZC 的 per-column ratio/group 和 selected move direction 从 `BasisState` 移入
-`DualIterationWorkspace`，与 pivotal-row pack/candidate prefix 组成同一 `HEkkDualRow` 对应物。
-数组容量固定为 `num_col + num_row`，ratio test 获得 contiguous mutable slices；iteration clear
-只重置有效计数，不全量初始化下一轮必然覆写的 work entries。删除 basis 中两个 dual-only allocation。
-
-验收为 workspace shape/bytes 单测、ReleaseFast 全测、三模型 trace digest 不变、forced-dual
-correctness 40/40 和 aggregate pivots **6833**。
-
-CHUZC ratio/group 与 move direction 现和 pack/candidate prefix 一起由 iteration workspace 拥有，
-`BasisState.dual_ratio/dual_direction` 及其分配、初始化、释放和 memory accounting 已删除。数组保持
-SoA 连续布局且只覆写 active candidates。ReleaseFast 全测、runner build、forced-dual **40/40**、
-**6833** pivots 及三模型 trace digest 全部保持。
-
-### F0k — complete dual RHS candidate ownership（完成）
-
-将旧 hyper-sparse CHUZR 的 retained candidate row/score 从 `BasisState` 移入持久
-`DualWorkState`，使所有 row infeasibility、index/mark、changed-row support 和候选筛选状态均由
-同一个 dual RHS 对应物拥有。`ensureCapacity` 必须事务式扩展候选 SoA，`deinit/requestedBytes`
-覆盖完整内存；basis 删除 dual-only 字段、分配和初始化。
-
-本阶段只修正所有权，不改变候选容量、评分、遍历顺序或启用条件。验收为 candidate lifecycle/
-memory accounting 单测、ReleaseFast 全测、F0j 三模型 trace digest 不变、forced-dual correctness
-40/40 和 aggregate pivots **6833**。通过后，major controller 才能在不依赖 basis scratch 的前提下
-统一 CHUZR 生命周期，并最终删除旧 selector 与模型形状开关。
-
-候选 row/score 现由 `DualWorkState.ensureCapacity` 与其余 RHS SoA 一次性事务扩展，重复小尺寸请求
-保持地址稳定，释放和 requested-memory accounting 均覆盖；`BasisState` 已删除对应 dual-only
-字段。ReleaseFast 全测和 runner build 通过，forced-dual correctness **40/40 PASS**、aggregate
-pivots **6833**；三模型 trace 保持 `105/15d11cf0…`、`173/c9af8318…`、`484/db4e80c0…`。
-
-### F0l — model-independent HEkkDualRHS lifecycle（完成）
-
-删除 `useHighsRhsInfeasibilityList/useHighsBreakpointGroups` 对 CHUZR 状态生命周期的模型行列范围
-门控。只要选择 `.highs` 初始化，cold rebuild、Phase-I bounds 安装、reinversion 和 Phase-II bounds
-恢复都必须无条件重建同一 `DualWorkState` infeasibility list，`chooseRow` 也必须始终消费它；模型
-密度只能决定 indexed/dense 表示，不能决定是否采用 HiGHS 算法。
-
-本阶段不同时启用 CHUZC4 grouping、改变 update limit 或删除 fallback。验收首先要求 ReleaseFast
-全测和 forced-dual correctness 40/40；随后逐模型记录 committed pivot 变化并定位首次分叉。若发生
-正确性退化，不恢复模型尺寸门控，而是补齐 `HEkkDualRHS` 缺失的通用 cutoff/rebuild 语义。
-
-`.highs` 路径现在在 cold/phase/reinversion/restore 四类边界无条件创建或重建 RHS list；旧 selector
-只作为非 HiGHS 初始化的兼容路径存在。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。
-aggregate pivots `6833→8261`，仍低于 HiGHS 的 `8774`，但个别模型暴露出后续未对齐：`refinery
-341→1117`、`blend 105→173`（dual trace）。本地 debug HiGHS 的逐 pivot 检查证明 refinery 新路径
-前 7 个 `(entering,row_out)` 与 HiGHS 完全一致，旧路径从第 0 个就分叉；新路径首次分叉在第 8 个：
-HiGHS `(9,60)`，Zig `(100,118)`。因此保留通用生命周期，下一步从 incremental primal/DSE update
-定位该分叉，不允许恢复尺寸门控。
-
-### F0m — model-independent perturbation and CHUZC grouping（完成）
-
-F0l 后用本地 debug HiGHS 对 `refinery` 逐字段比较：前 5 次 pivot 的 entering/row/alpha/theta 完全
-一致；第 6 次仍选相同 `(92,167)`，但 HiGHS `theta=0.8639937870`、BFRT count 0，Zig
-`theta=0.1438501116`、flip count 1，随后第 8 次 CHUZR 才分叉。根因边界因此确定为 CHUZC/BFRT，
-不是 RHS list 或 FTRAN。
-
-删除 `.highs` 路径 cost perturbation 公式和 CHUZC3/4 breakpoint grouping 的模型形状门控：初始化
-策略决定算法，密度只决定 kernel 表示。保留 update-limit、zero-pivot phase shortcut 和 fallback 的
-独立实验边界。本阶段验收为 refinery 前 8 次 alpha/theta/flip 与 HiGHS、ReleaseFast 全测、forced-
-dual correctness 40/40；若失败，必须修正通用 ratio/update 语义，不得恢复尺寸条件。
-
-`.highs` 现在无条件使用其随机向量 perturbation 公式和 CHUZC breakpoint grouping；baseline 策略
-仍保留原比较路径。`refinery` 的前 12 个 `(entering,row_out)` 已与本地 HiGHS 完全一致，第 6 次
-alpha/theta 从错误的 `1.60953125/0.14385011 + 1 flip` 修正为 HiGHS 的
-`1.60953125/0.86399379 + 0 flip`；首次变量分叉推迟到第 13 次（HiGHS `(107,98)`，Zig
-`(50,68)`）。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。aggregate pivots
-`8261→8753`，接近 HiGHS `8774`；该总数不是完成标准，`refinery 1609 vs 396` 和 `ex72a 594 vs
-139` 表明后续 incremental update/phase exit 仍须逐字段对齐。
-
-### F0n — HVector-tight FTRAN support before RHS update（否定）
-
-F0m 的第 13 次 refinery CHUZR 中，HiGHS rows 68/98 的 infeasibility 和 DSE weight 各自完全相等，
-分叉只来自 retained list/random start。此时 HiGHS `workCount=103`，Zig `infeasibility_count=209`。
-源码边界是 HiGHS FTRAN 的 HVector support 已执行 tiny-value 清理，而 Zig 因 FT backend 尚未发布
-index，随后以 `value != 0` 把数值填充全部当作 changed rows。
-
-在 `col_aq/col_BFRT` 离开 NLA、进入 primal infeasibility update 前应用泛型 `IndexedVector.tight()`，
-再由现有 factor-order gather 产生 changed support；禁止使用模型阈值或 feasibility tolerance 替代
-HVector 的固定 `1e-14` 语义。本阶段验收 refinery 首次分叉、RHS list count、40/40 correctness 和
-aggregate pivots；下一阶段再让 sparse FT 原生发布 index，删除 reconstruction scan。
-
-隔离结果：在 `col_aq/col_BFRT` FTRAN 后执行 `tight()`，refinery 首次分叉仍为第 13 次，完整模型
-`1609→1629`；debug Zig 更证明首次 CHUZR 前 list 已是 `211/dense`，而非迭代更新后逐渐膨胀，
-HiGHS 同点为 `30/sparse`。因此 tiny fill 假设错误，实验代码已撤回。差异发生在第一次 FTRAN
-之前的 Phase-I bounds/nonbasic-value/rebuild 状态，下一步转入 B2 初始化顺序对齐。
-
-### F0o — HiGHS-default cold basis policy（完成）
-
-继续逐字段检查推翻了“同一初始 basis”的隐含前提：本地 HiGHS `simplex_crash_strategy` 默认值为 0，
-refinery 首次 CHUZR 的 basis head 为 logical（row 1 → column 465）；Zig `.automatic` 通过模型尺寸/
-密度规则安装 structural crash（同一 row → column 32）。因此 F0m 的 pivot 前缀只是局部巧合，不能
-作为完整算法等价证据。
-
-将 Zig `.automatic` crash 解析为 HiGHS 默认 logical basis；仅 `.ltssf/.bixby` 显式请求可安装
-structural crash。删除 automatic 的模型形状选择、覆盖率/condition 验收、Bixby 二次尝试、DSE
-预算补偿和 recursive logical fallback；显式 crash 的失败仍原子恢复 logical basis。验收为首次
-basis head/RHS list 与 HiGHS、ReleaseFast 全测、forced-dual 40/40，以及逐模型 pivot 变化。此项
-优先级高于保留既有低迭代数，因为目标是先建立相同算法起点。
-
-`.automatic` 现在严格解析为 logical basis，模型尺寸/密度 crash 选择、coverage/condition 验收、
-Bixby 二次尝试、crash 相关 DSE 补偿及递归 logical fallback 共删除 242 行；`.ltssf/.bixby` 仍是
-独立显式策略。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。统一逻辑基后 aggregate
-pivots 为 `10702 vs HiGHS 8774`，真实暴露出 `refinery 1377 vs 396`、`brandy 813 vs 304`、
-`ex72a 516 vs 139` 等框架差异，不再由数据集 crash 掩盖。
-
-`refinery` 的前 12 个 pivot 仍与 HiGHS 一致；第 13 次 CHUZR 两侧 RNG state、random start、list
-count、rows 68/98 的 basic value、squared infeasibility 和 DSE weight 均逐位一致。首次分叉只来自
-FTRAN HVector support 的插入顺序：HiGHS 在相同 103-row list 中先遇 row 98，Zig 当前 sparse-FT
-reconstruction 先遇 row 68。下一阶段应让 NLA/FT 原生发布 producer-order support，不能再用基维度
-或模型名称规则修补 tie-break。
-
-### F0p — FT-native FTRAN producer support（完成）
-
-F0o 首次分叉的全部数值状态和 RNG 已排除，只剩 `col_aq.index` 的 producer order。HiGHS
-`HFactor::ftranU` 在 mutable U 上按 reverse logical pivot order 求解并直接写 HVector index；Zig
-`SparseForrestTomlin::solveUpper` 只写 dense values，engine 随后错误地用 base LU `pivot_columns`
-重建索引。FT 更新追加的 pivotal rows 因而丢失其真实顺序，CHUZR 在精确 merit tie 时分叉。
-
-让 `SparseForrestTomlin` 在 upper solve 内按实际遍历顺序发布 support，`SparseLU/Factorization/NLA`
-逐层借用该 slice，并让 `IndexedVector` 保持 `.indexed`；engine 只消费 producer-owned support，不再
-推测 factor order。使用固定 `1e-14` HVector tiny 语义在 producer 边界清零。验收为 sparse-FT 单测、
-refinery 第 13 次 pivot、ReleaseFast 全测、forced-dual 40/40 和 aggregate pivots；禁止在 CHUZR
-中加入人为 row tie-break。
-
-`SparseForrestTomlin::solveUpper` 现在按 mutable-U reverse logical traversal 直接发布经过 `1e-14`
-清理的 support；`SparseLU → Factorization → SimplexNla` 保持借用链，`col_aq` 离开 NLA 时仍是
-indexed vector，engine 删除 base-LU `pivot_columns` 重建。新增单测覆盖 FT pivot 追加后的顺序和
-tiny 清零；ReleaseFast 全测、forced-dual correctness **40/40 PASS**。aggregate pivots
-`10702→10571`（HiGHS `8774`），其中 `brandy 813→767`、`vtp-base 175→167`、`lotfi 337→263`；
-`refinery 1377→1391`，第 13 次 tie 仍分叉，因为 Zig 与 HiGHS 的 base LU pivot permutation 不同，
-而非 support 所有权仍错误。后续不应追求 factor-order 逐项相同，应转向影响 Phase-I exit 的状态机
-和 update 语义；该 producer-owned support 作为通用架构修正保留。
-
-### F0q — model-independent HiGHS initialization（完成）
-
-`.automatic` 当前仍由 `shouldUseBaselineDualInitialization` 按 row/column 数、equality 比例、cost 和
-matrix range 为 4 个模型选择旧 baseline。显式 `highs` A/B 已通过 correctness **40/40**：
-`brandy 767→312`（HiGHS 304），同时 `gas11 595→1075`、`klein1 119→436`、`agg 198→225`，
-aggregate `10571→10940`。这证明 baseline 门控既掩盖了成功，也掩盖了待修的统一生命周期缺陷。
-
-删除 `shouldUseBaselineDualInitialization`，令 `.automatic` 无条件选择 `.highs`；`.baseline` 仅保留为
-显式诊断策略。验收为 ReleaseFast 全测、forced-dual 40/40，并以显式 `highs` A/B 数值作为路径锁。
-本阶段允许 aggregate 暂时回退，后续必须在统一 HiGHS 路径修复 gas11/klein1，不得重新增加模型判定。
-
-`shouldUseBaselineDualInitialization` 及其整套尺寸/scaling 扫描已删除，`.automatic` 现在恒等于
-`.highs`，`.baseline` 只能显式请求。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**；
-自动路径逐模型与预先运行的显式 `highs` A/B 完全一致，aggregate `10940 vs 8774`。因此后续所有
-修复都在同一初始化状态上进行，brandy 的接近对齐和 gas11/klein1 的回退都不会再被策略分流隐藏。
-
-### F0r — source-equivalent dual phase entry（完成）
-
-HiGHS 在 perturb 后若无原始 dual infeasibility 会直接进入 Phase II；否则进入 Phase I，由统一 major
-loop 和 rebuild reason 决定退出。Zig 仍仅对两个模型形状开放 zero-pivot Phase-II，按第三种形状缩短
-update chain，并用 `shouldPreflightDualPhaseOneFallback` 在 row/flip/mass 阈值上提前放弃 dual Phase I；
-零 pivot 后还对一个形状强制 Devex。这些都不是 HiGHS 算法状态。
-
-删除 `useHighsRhsInfeasibilityList/useHighsUltrawideLifecycle/useHighsBreakpointGroups/`
-`useShortDualUpdateChain` 和 preflight helper：zero-infeasibility transition 对 `.highs` 路径普遍生效，
-其余模型一律进入同一个 dual Phase-I loop；update limit 和 DSE rule 只由通用控制/观测量决定。
-验收为 ReleaseFast 全测、forced-dual 40/40、逐模型 phase iteration 与 aggregate；失败只能修统一
-phase/rebuild 语义，不得恢复形状阈值。
-
-上述 5 个 helper、preflight fallback、shape-specific update-limit 和 zero-pivot Devex override 已删除；
-无原始 dual infeasibility 现在统一进入 perturbed Phase II。ReleaseFast 全测和 forced-dual correctness
-**40/40 PASS**。aggregate `10940→11936`，但三组强证据说明统一入口正确：`ex72a 516→136`
-（HiGHS 139）、`klein1 436→134`（HiGHS 134）、`etamacro 557→532`（HiGHS 532）。回退集中为
-`shell 568→1367`、`scorpion 335→833`、`brandy 312→695`，共同指向 zero-pivot Phase-II 入口缺少
-HiGHS `computeDual → correctDualInfeasibilities → computePrimal → rebuild RHS` 顺序，而不是 phase
-选择错误。下一阶段在该统一入口补齐 rebuild，不回滚模型分流。
-
-### F0s — zero-pivot Phase-II rebuild（完成）
-
-源码核对确认 F0r 的 regression 边界：HiGHS 决定 Phase II 后，`solvePhase2` 首先执行完整 `rebuild`，
-顺序为 perturbed `computeDual → correctDualInfeasibilities(force_phase2) → computePrimal → RHS list`。
-Zig zero-pivot 分支仅 `createPrimalInfeasibilityList` 后直接 iterate，漏掉 fixed/boxed flip 和 one-sided
-cost shift，导致 Phase II 虽选择正确却不是 dual-feasible work state。
-
-zero-pivot 分支改用现有 `rebuildDualState(use_work_costs=true, correct_dual=true)`，禁止复制另一套 correction；
-只有 correction 后 free infeasibility 为零且 basis dual feasible 才进入 Phase II，否则沿统一失败边界返回。
-验收重点为 shell/scorpion/brandy，另跑 ReleaseFast 全测与 forced-dual 40/40。
-
-zero-pivot 分支现复用 `rebuildDualState`，并在 free infeasibility/dual feasibility 检查后进入 Phase II。
-ReleaseFast 全测和 forced-dual correctness **40/40 PASS**，aggregate 及 shell/scorpion/brandy pivot
-数均不变。这一否定结果说明这些逻辑基在 perturbed cost 下无需 correction，缺失 rebuild 不是长路径
-根因；调用仍保留，因为它补齐了 source-equivalent phase boundary 和未来非逻辑 warm basis 的正确性。
-下一步比较 Phase-II DSE recurrence/切换，而不是继续修改初始化。
-
-### F0t — model-independent DSE lifecycle（完成）
-
-当前 DSE 有两层数据集补丁：recurrence 仅在 65–95 row/超宽形状使用 HiGHS 的 expanded evaluation
-order；automatic budget 又按 10 组 row/column/flip/crash 阈值设为 0/1/4/8/16/20/32。HiGHS 对所有
-模型使用同一 recurrence，并仅由 costly-DSE density/frequency 或 weight error 切换 Devex。
-显式 budget=0 A/B 已 40/40，aggregate `11936→12044`，其中 `refinery 1391→1091`、
-`etamacro 532→514`，但 `grow7 387→851`，表明 grow7 依赖人为 20-pivot cap，必须由通用 costly-DSE
-观测修复。
-
-删除全部 initial-flip/shape budget 改写；automatic 只运行已有 HiGHS density/error criterion，显式数字
-budget 保留为诊断控制。DSE recurrence 对所有模型固定使用 HiGHS expanded expression，禁止按尺寸选择
-浮点表达式。验收为 ReleaseFast、40/40、DSE switch 统计和 aggregate；grow7 回退作为下一步观测量
-对齐目标，不恢复模型 cap。
-
-所有 shape/flip budget 分支已删除；automatic 不再读取 hard cap，显式数字 budget 的既有诊断语义
-保留。DSE recurrence 对所有模型固定为 HiGHS expanded evaluation order。ReleaseFast 全测和
-forced-dual correctness **40/40 PASS**，aggregate `12021 vs 8774`；相对 F0r，`refinery
-1391→1091`、`etamacro 532→514`、`agg 225→205`，主要回退仅 `grow7 387→851`。下一步校正
-costly-DSE density 的 HVector count（当前错误地按 simplex `1e-12` 扫 dense values），使 grow7 由
-通用观测触发 Devex。
-
-### F0u — HiGHS HVector density streams（完成）
-
-源码核对进一步定位到密度的维度错误，而不仅是 tiny threshold：HiGHS 独立维护
-`row_ep.count / num_row`、`col_aq.count / num_row`、`row_DSE.count / num_row` 和
-`row_ap.count / num_col`；Zig 却把 `row_ep + row_ap` 合并后除以 `num_row + num_col`，再作为
-`row_ap_density` 输入 costly-DSE。该值在长宽不平衡模型上没有相同物理意义，会错误延迟或提前
-DSE→Devex。
-
-恢复四条独立的 producer-owned density stream：优先读取 `IndexedVector.activeIndices().len`，仅在 dense
-producer 撤销 support 时用 HiGHS `1e-14` 计数；`row_ap` 只除以结构列数，hyper-sparse PRICE 的算法
-判据仍保留其现有 tableau support 口径，避免把观测修复混入定价策略。costly-DSE frequency 和 5%/10%
-切换条件保持源码常数。验收为 ReleaseFast、40/40、grow7 DSE 统计及全 corpus aggregate；不得恢复任何
-模型预算。
-
-四条 density stream 现已按各自 HVector 维度独立更新，并统一使用 `kHighsTiny=1e-14` 的 support
-语义；`row_ap` 不再混入逻辑列，cost switch 也只在当前 iteration costly 时触发，匹配
-`HEkk::switchToDevex`。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**，aggregate 保持
-`12021 vs 8774`，grow7 仍为 851 且其 `row_DSE / max(Ep,Aq,Ap)` 不满足 costly 条件。这一否定结果排除
-了 DSE 切换作为 grow7 长路径根因，同时保留了正确的通用控制框架；下一步转向 basis update/reinvert
-lifecycle，其 18 次 update-growth reinversion 明显偏离 HiGHS。
-
-### F0v — remove foreign growth-tier reinversion（完成）
-
-HiGHS 的正常 update lifecycle 只有显式 `simplex_update_limit`、solve/pivot numerical trouble 与 factor
-synthetic clock；它不按 `max(abs(FTRAN column))/abs(pivot)` 的 `1e2/1e4/1e7/1e10` 四档缩短 update
-chain。Zig 这套档位是早期稳定性补丁：grow7 的 `max_update_growth=1.10e7` 将 100-update chain 强制缩到
-16，产生 18 次非源码 reinversion，并改变 rebuild 后的定价路径。
-
-删除 growth-tier 对 reinversion decision 的影响，但保留 maximum growth 作为只读诊断；稀疏 FT 依
-显式 update limit，dense Eta 依 retained capacity，residual/pivot warning 仍可提前 rebuild。后续单独实现
-producer synthetic tick，不能把 growth ratio 冒充 tick。先验收 ReleaseFast、grow7 correctness/pivots/
-reinversion，再跑 40-model corpus；若失败只能修 factor update/residual，不能恢复尺寸或模型阈值。
-
-四档 growth policy 已从 decision path 删除，maximum ratio 仅保留为统计；update limit、Eta capacity 和
-numerical warning 继续生效。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。grow7
-`851→482`（HiGHS 339），factor reinversion `20→5`，其中 2 次 update-limit、3 次 solve-residual；全 corpus
-aggregate `12021→11725`（HiGHS 8774）。另有 `scorpion 833→824`、`scfxm1 482→480`，主要回退
-`israel 139→155`。结果确认外加 growth 档位同时增加 rebuild 和 pivot，不应保留；下一步对齐 HiGHS
-synthetic tick 与 numerical-trouble 的 producer 边界，并单独追踪 israel 的 residual-trigger divergence。
-
-### F0w — abort pivot on dual numerical trouble（完成）
-
-HiGHS `updateVerify` 比较 `alpha_col`/`alpha_row` 后，一旦 numerical trouble 便设置 rebuild reason；同次
-iteration 的 `updateDual/updatePrimal/updatePivots` 全部跳过，outer loop 完整 rebuild 后重新 CHUZR/CHUZC。
-Zig 当前却立刻 refactor、重新 FTRAN，然后沿用 rebuild 前选出的 row/tableau/ratio candidate 提交 pivot。
-这违反 reason-driven rebuild 边界，也解释了 F0v 后 grow7 的 3 次 solve-residual 会改变长路径。
-
-引入内部 typed direction result `ready/rebuild_required/numerical_failure`。pivot mismatch 只发布 reason，不在
-direction producer 内继续旧 transaction；各 dual loop 在自己的 work-cost/bounds 语境完成 rebuild 并
-重新选择，warm zero-cost repair 保持其零 reduced-cost 状态。验收 ReleaseFast、grow7/israel 的
-solve-residual 路径、40-model corpus；禁止在 mismatch 后复用旧 pivotal row。
-
-dual direction producer 现返回 typed internal status；mismatch 不再自行 refactor/FTRAN 并复用旧 row，而由
-Phase I、Phase II 或 zero-cost repair controller 在各自 work state 中 rebuild 后重新选择。ReleaseFast
-全测和 forced-dual correctness **40/40 PASS**，aggregate 与逐模型 pivot 保持 `11725 vs 8774`；grow7
-的 3 次 solve-residual 均未经过该 dual mismatch 分支，确认它们来自 primal `B*x-a_q` 周期检查。该修复
-保留为 source-equivalent transaction boundary；下一步处理 primal 路径中 HiGHS 不存在的每 8 update
-全列残差 gate。
-
-### F0x — HiGHS primal pivot verification（完成）
-
-HiGHS primal 不每 8 updates 构造 `B*x-a_q`；它在 CHUZR 确定 row 后执行一次 unit BTRAN + PRICE，并用
-`alpha_col` 对比 `alpha_row`，阈值同 dual 为 `1e-7`。mismatch 只请求 rebuild，禁止提交旧 pivot。
-Zig 当前的 whole-column `1e-10` gate 既早于 CHUZR，又立即 refactor 后复用旧 entering candidate；grow7
-F0v 后的 3 次 solve-residual 正来自这里。
-
-删除 periodic dense residual/refinement state，在现有 primal reduced-cost pivotal-row producer 中加入 O(nnz
-entering column) 的 alpha-row 独立校验，并返回 typed `ready/rebuild_required/failure`；Phase I/II controller
-各自 exact reprice 后重新选择。终局 residual validation 不变。验收 ReleaseFast、grow7 路径和 40-model
-correctness/aggregate；数值 trouble 不得通过调宽模型阈值规避。
-
-periodic whole-column residual/refinement 及其跨 pivot 状态已删除；primal pivotal-row producer 现在先完整
-生成 BTRAN/PRICE row，按 HiGHS `1e-7` 比较 `alpha_col/alpha_row`，通过后才更新 reduced costs，失败则
-由 Phase I/II controller rebuild、exact reprice 并重新选择。ReleaseFast 全测和 forced-dual correctness
-**40/40 PASS**。grow7 `482→486`（HiGHS 339），solve-residual `3→1`、总 reinversion `5→4`；全 corpus
-aggregate `11725→11729`（HiGHS 8774）。4-pivot 增量来自唯一真实 mismatch 后重新选择，是正确 transaction
-语义；下一步清除 pivot commit 中剩余的模型形状分支，并继续对齐 basis move/status lifecycle。
-
-### F0y — bound-derived leaving status（完成）
-
-HiGHS `updatePivots` 对所有模型先检查 outgoing variable 的 `workLower == workUpper`：相等时 value 取唯一
-bound、nonbasic move 为 0；否则才按 `move_out` 选择 lower/upper。Zig 仅对 65–95 row 且超宽模型把相等
-bounds 提交为 `.fixed`，其他模型错误保留 `.at_lower/.at_upper`，使后续 pricing/flip 把 fixed variable 当作
-可移动 nonbasic。
-
-删除尺寸判断，对任意 finite/infinite 表示下的相等 bound 统一提交 `.fixed`；非 fixed 继续使用 ratio test
-给出的 leaving side。复用 `nonbasicStatusForBounds` 的状态语义，不增加 hot-loop 动态分派。验收
-ReleaseFast、40-model correctness/aggregate 和 fixed-bound unit coverage。
-
-模型尺寸分支已删除，所有 outgoing fixed variable 统一提交 `.fixed` 和唯一 bound；非 fixed 仍保留 ratio
-test side，并增加纯状态单测。ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。aggregate
-`11729→9930`（HiGHS 8774，差距 `33.7%→13.2%`）；`shell 1367→558`（HiGHS 623）、
-`scorpion 824→322`（精确等于 HiGHS）、`brandy 695→304`（精确等于 HiGHS），另有
-`lotfi 254→229`、`etamacro 514→495`。这确认 fixed move 的模型补丁是三条最大长路径的共同根因；下一步
-删除 setup scaling 中同形状的 unit-scale override，恢复统一 HiGHS scaling policy。
-
-### F0z — range-derived scaling decision（完成）
-
-HiGHS `scaleLp` 的默认入口先对所有模型计算 matrix range；若全部绝对值位于 `[0.2, 5]`，直接跳过
-matrix scaling，否则执行 forced equilibration。Zig 已复现六轮 equilibration，却只对 65–95 row 且
-超宽模型执行该 range gate，仍是数据形状补丁而非算法策略。
-
-把原始 matrix min/max audit 提升为所有模型共享的 setup decision，完全删除 ultrawide 条件；range 内统一
-保留 unit row/column scale，range 外运行现有 HiGHS 六轮 power-of-two equilibration。该分支只在 solve
-setup 执行，不进入 hot loop。验收 ReleaseFast、40-model correctness/aggregate，并逐模型记录路径变化。
-
-matrix range audit 现对所有模型执行，`[0.2,5]` 内跳过 scaling，范围外才运行六轮 equilibration；原
-ultrawide 条件及先计算后覆盖的无效 setup 工作均已删除。ReleaseFast 全测和 forced-dual correctness
-**40/40 PASS**，aggregate `9930→9926`（HiGHS 8774），`forest6 80→77`、`sc50b 49→48` 均与
-HiGHS 完全相同，其余模型稳定。下一步审计剩余按列/行比例选择行为的分支，区分合法 work-estimate 与
-模型 patch，并继续删除后者。
-
-## 1. HiGHS serial dual simplex 算法路径
-
-1. `HEkkDual::solve`
-   - `initialiseSolve`；无扰动 cost → `computeDual` → 原始 dual infeasibility。
-   - 计算 `force_phase2/near_optimal/perturb_costs`；重新初始化 work cost。
-   - 初始化 DSE/Devex；扰动后重新 `computeDual`，fixed/boxed flip 后决定 Phase I/II。
-   - 在同一个 major phase loop 内运行 Phase I、Phase II、cleanup 和 phase re-entry。
-2. `solvePhase1/solvePhase2`
-   - 安装对应 work bounds/value/move。
-   - outer loop: `rebuild`；inner loop: `iterate`，由 `rebuild_reason` 统一中断和恢复。
-3. `rebuild`
-   - 按 reason 决定 reinvert；随后固定顺序执行 `computeDual → correctDualInfeasibilities →
-     computePrimal → rebuild primal infeasibility list → dual objective`。
-4. `iterate`
-   - `chooseRow` → `chooseColumn` → bad-basis guard。
-   - `FTRAN(BFRT)` → `FTRAN(pivot)` → `FTRAN(DSE)` → row/column pivot verify。
-   - `updateDual` → `updatePrimal + weights` → `updatePivots/factor/matrix/infeas-list`。
-5. `chooseRow`
-   - weighted CHUZR；`BTRAN(e_p)`；exact DSE 只拒绝低估超过 4 倍的权重并重选。
-6. `chooseColumn`
-   - CHUZC0 free move；CHUZC1 pack row；CHUZC2 candidate；CHUZC3 large-step；
-     CHUZC4 breakpoint groups/large-alpha/strict prior-group flips。
-   - 小 pivot 时 iterative-refinement BTRAN + quad PRICE；仍小时删除 pivot 并重跑 CHUZC。
-7. `updateDual/updatePrimal/updatePivots`
-   - 增量维护 `workDual/workShift/workValue/baseValue/infeasibility list/DSE`；basis 更新最后提交。
-8. Phase-I exit 和 cleanup
-   - fresh rebuild 后按 Phase-I dual objective、原始 LP dual infeasibility判断。
-   - remove/re-perturb cost、free-variable shift、Phase I/II re-entry 都在同一 work state 上完成。
-
-## 2. Zig 源码差异矩阵
-
-| 路径 | Zig 现状 | 判定 | 必须对齐的内容 |
-|---|---|---|---|
-| solve controller | shifted dual、独立 Phase-I、snapshot retry、primal fallback 分支拼接 | 未对齐 | 单一 `solve_phase + rebuild_reason` major loop |
-| work state | model bounds 与 `DualPhaseOneWorkspace` 临时数组混用 | 未对齐 | 持久 `workCost/workShift/workLower/workUpper/workRange/workValue/nonbasicMove` |
-| cost init | 扰动公式、启用时机、scaling 与 HiGHS 不同 | 未对齐 | 两次 cost init、near-optimal policy、精确 RNG、cost scale |
-| phase selection | 预先调用多个 solver 尝试并 fallback | 未对齐 | fixed/boxed flip 后在同一 controller 决定 Phase I/II |
-| Phase-I bounds | bounds 形状基本存在，但生命周期独立 | 部分 | 由统一 work state 安装/恢复，禁止重建另一套求解路径 |
-| rebuild | 分散在周期 reprice/refactor/fallback | 未对齐 | reason-driven 固定 rebuild 顺序和 fresh 标志 |
-| CHUZR/DSE | exact row 校验、DSE/Devex recurrence 已有 | 部分 | framework 生命周期、scaled norm、拒绝/重选和 reinvert 保留语义 |
-| PRICE | BTRAN/tableau row 已有 | 部分 | pack 顺序、scale、small-pivot refinement/quad retry |
-| CHUZC0-4 | CHUZC2/3 和 gated CHUZC4 已有 | 部分 | 统一 work state 输入；free move、完整 retry、启用 CHUZC4 |
-| BFRT/FTRAN | Zig 先直接 apply flips，再计算 entering FTRAN | 未对齐 | 先形成 BFRT RHS/FTRAN，再 pivot FTRAN，再统一更新 primal |
-| dual update | Zig pivot 后 recurrence + 周期 exact reprice | 未对齐 | `theta_dual`、`shiftCost/shiftBack`、workDual 增量顺序 |
-| primal update | basic value 更新与 BFRT 分散 | 部分 | BFRT correction、pivot column update、infeasibility list 同序 |
-| pivot verify | 有 residual guard，但不是 row/column alpha 对照 | 未对齐 | `alpha_row/alpha_col` 数值 trouble → rebuild reason |
-| factor/basis update | eta update 和 basis commit 已有 | 部分 | 必须作为 iteration 最后一步，失败不提交半状态 |
-| Phase-I assessment | 恢复 original 后重新分类并可能切 primal | 未对齐 | objective/cleanup/unperturbed assessment/exit reset duals |
-| Phase-II cleanup | recursion、fallback 与证书分支 | 未对齐 | remove perturbation → dual count → optimal/primal cleanup/phase re-entry |
-| status/certificate | correctness gate 已有 | 部分 | 只允许 fresh rebuild 后形成最终结论，匹配 HiGHS phase exit |
-
-## 3. 实现顺序和验收门槛
-
-每项只能在前置项完成后启用；实验失败必须回退行为开关，但源码差异仍保留为未完成。
-
-### A. 统一 controller 和 work state
-
-- [x] A1a 定义 HiGHS 同构的 `DualSolvePhase`、`DualRebuildReason`、fresh rebuild 和
-  perturb/shift/cleanup flags；接入 root reset、Phase-I/II entry 与 refactor fresh lifecycle。
-  ReleaseFast PASS；四模型路径保持 `114/293/1738/1079`，correctness 4/4 PASS。
-- [x] A1b 删除 original-cost cleanup 中递归 `solveDual` 的第二次 solver 入口；在同一
-  controller/iteration 生命周期切换 Phase II，并用 `dual_control.costs_shifted` 取代独立的
-  `shifted_dual_accounting_active`。ReleaseFast 与 highs-strategy 40-model correctness
-  **40/40 PASS**，四模型迭代数不变。
-- [x] A2a 将 engine 字段重命名为持久 `dual_work`，补齐 `workShift/workRange`，并用
-  `DualWorkView` 将 BasisState 的 live lower/upper/value/dual 作为唯一数组暴露；exact work
-  reprice 已按 `workCost + workShift` 计算；新增数组计入 `requestedBytes`。ReleaseFast PASS，
-  未启用半迁移行为时四模型 correctness 4/4 PASS、迭代数不变。
-- [x] A2b 枚举并迁移 basis status/bound/value mutation，使 pivot 和 bound flip 在 Phase I/II
-  都持续同步 `nonbasicMove`；move 初始化改为由 work bounds 判定 fixed/free，不再信任可能陈旧的
-  status 标签。实现源码同构的 `correctDualInfeasibilities` 后，Phase-II CHUZC 已正式切换 explicit
-  move。此前 `bore3d` 24 iterations 错判 infeasible 的根因是 `lower==upper` 变量从 at-lower/
-  at-upper 标签错误得到非零 move；修复后四模型恢复 `114/293/1738/1079`，highs-strategy
-  forced-dual correctness **40/40 PASS**，无模型特例。
-- [ ] A2c 全部 iteration kernel 只读取 `DualWorkView`；原始 bounds/costs 只作初始化源。
-  CHUZC 的 dual/move/lower/upper/value 以及 leaving target 已迁移；其余 update/rebuild 调用点待迁移。
-- [ ] A3 用一个 major phase loop 替换 shifted-dual/Phase-I/snapshot retry 的求解器拼接；
-  暂保留旧 controller 作为 correctness fallback，但不计入“对齐路径”。
-- 验收：logical basis 上 Phase 选择、work bounds/value/move、cost/dual snapshot 与 HiGHS
-  iteration 0 逐字段一致；40-model correctness 40/40。
-
-### B. 初始化和 rebuild
-
-- [x] B1a 显式实现第一次无扰动 cost initialization：Phase-I 入口现在先把原始 scaled structural
-  cost、零 logical cost 和零 workShift 写入持久 work arrays，再执行 `computeDual` 和
-  unperturbed dual/primal infeasibility、`force_phase2/near_optimal` assessment，不再依赖上层碰巧
-  留下的 reduced costs。ReleaseFast PASS；九模型迭代数和状态完全不变。
-- [ ] B1 对齐两次 cost initialization、near-optimal、perturbation 和 cost scale。
-  精确移植单次 HiGHS 扰动公式的实验已完成但未启用：仅替换为
-  `(1+random)*(abs(cost)+1)*base`、logical cost=0 和全变量 boxed-rate 后，`etamacro`
-  `1079 → 2073`。第一次 unperturbed cost/computeDual 和 infeasibility assessment 已由 B1a 补齐；
-  当前剩余工作是把第二次初始化按 `near_optimal` 原子切换为原始 cost 或精确 perturbation，并使其
-  phase selection 与 B2 生命周期消费同一份 assessment。已保留 `force_phase2`、`near_optimal` 状态，
-  并对齐 logical row perturbation `(0.5-random)*1e-12`；禁止按模型筛选。
-  B1a 完成后再次隔离精确第二初始化：`blend 114→117`、`etamacro 1079→2073`，其余七个目标
-  模型不变，故再次撤回。固定 HiGHS 日志确认 `etamacro` 参考路径为 `DuPh1 152 + DuPh2 372 +
-  PrPh2 cleanup 8 = 532`；当前安全路径则含 `dual Phase-I 384 + primal Phase-I 398 + primal
-  Phase-II 297`，差距主要来自 dual Phase-I fallback，而非单次迭代内核。
-  2026-07-23 用 gdb 截取固定 HiGHS 首次 Phase-I rebuild 后发现：cold solve 会连续调用两次
-  `initialiseSimplexLpRandomVectors`，且中间不重置 `random_`；原 `highs_random.zig` 只模拟一轮。
-  现已修正双轮 RNG 生命周期、第二轮 permutation/random vector 和 correction RNG 起点，并加入固定
-  HiGHS 数值测试。精确 perturbation 实验下 `workCost` 与 permutation 已二进制完全一致，workDual
-  最大差仅 `6.35e-14`，dual objective 为 HiGHS `-29.562269393289178`、Zig
-  `-29.562269393289181`。由于后续 CHUZR sparse list 尚未对齐，精确公式行为开关仍暂时撤回。
-- [ ] B2 对齐 `initialiseBound + initialiseNonbasicValueAndMove` 的 Phase I/II 生命周期。
-  通用 nonbasic value/move 初始化已按 work bounds 对齐 fixed/free/one-sided/boxed-invalid。完整 phase
-  transition 实验确认两个剩余源码差异：HiGHS 进入 Phase I 前不翻 boxed，退出后 move=0 boxed
-  固定到 lower；孤立启用使 `bore3d 293→361`，已撤销行为并等待统一 controller/rebuild。
-  初始 `force_phase2` 分支实验通过 40/40 correctness，产生 `brandy 1738→894`、`grow7
-  993→413`，但也产生 `klein1 105→265`、`scorpion 358→434`、`scsd1 104→115`、
-  `shell 670→686`。拆分确认全部来自 force-phase2，说明 Phase II 更新链仍未对齐；分支已撤销，
-  禁止按模型筛选。
-  gdb 全数组快照进一步确认 `etamacro` 首次 Phase-I rebuild 的 `basicIndex/workLower/workUpper/
-  nonbasicMove/baseValue/baseLower/baseUpper/workShift` 已与 HiGHS 二进制一致。46 个 workValue 差异
-  全部是 basic 变量在 Zig full-primal 镜像中的值；HiGHS basic 值只存 baseValue，且两边 baseValue
-  完全一致，不构成 CHUZR/CHUZC 输入差异。B2 的首次 rebuild 验收已完成，剩余是 phase exit 生命周期。
-- [ ] B3 实现 reason-driven rebuild：reinvert、computeDual、correct dual、computePrimal、
-  infeasibility list、objective、fresh flag 固定顺序。已完成初始 Phase-II 的
-  `computeDual → correctDualInfeasibilities → computePrimal → fresh`，并接入与 HiGHS 连续的 RNG
-  状态；已增加 rebuild primal-infeasibility dense state、汇总和 work dual objective。periodic reinvert
-  已统一 exact reprice，但 full computePrimal 暂未启用：完整实验使 `blend 114→111`、`bore3d
-  293→280`、`brandy 1738→1710`，同时使 `etamacro 1079→1777`；拆分确认奇异值来自
-  computePrimal，而非 correctDual。须先完成 B2 的 nonbasic value 生命周期和 rebuild reason 对齐，
-  再统一启用，不能保留三优一退的行为。
-  追加 no-entering reason-driven fresh rebuild 实验：`etamacro` 首次失败在 iteration 155，仍有 10 个
-  符号合格候选，但 CHUZC 返回 non-positive expanded step/no entering。按 HiGHS 请求 fresh rebuild
-  后没有结束 Phase-I，反而使 `etamacro 1079→2367`（dual Phase-I 累计 1674），其余八模型不变；
-  已撤回。证明 B3 不能在陈旧的 B2 work value/move 状态上孤立启用。
-- 验收：`blend/brandy/bore3d/etamacro` 首次 rebuild 全量 snapshot 一致。
-
-### C. CHUZR 和 edge weights
-
-- [x] C1 对齐 DSE 初始化、scaled-space norm、1/4 低估拒绝和候选重选。数值 recurrence 和低估重选
-  已完成。`HEkkDualRHS` 的 serial-corpus sparse infeasibility `workIndex/workMark/workCount`、平方
-  infeasibility、20% dense 切换、动态追加、连续 RNG 随机起点已实现；FTRAN 输出索引按 HiGHS
-  `ftranU` 的 reverse-U-pivot 顺序发布，而不是对 dense 结果做自然行号扫描。尚缺 `workCutoff`
-  的 >500-candidate hyper-sparse nth-element 路径，故 C1 暂不整项勾选。
-  2026-08-12 C1 完成：`workCutoff` 的 >500-candidate hyper-sparse 路径已实现（`count >
-  max(numRow*0.01, 500) && col_aq_density < 0.05` 时按 merit 序统计量裁 list、cutoff 持久化到
-  updateInfeasList、`bestMerit <= cutoff*0.99` 时按 chooseNormal 语义重建并递归重选，深度护栏 4）；
-  engine 新增原始 `col_aq_density`（dense 时 -1.0，镜像 HiGHS 负 count）。forced-dual 40/40、
-  aggregate 9892 不变——本语料无模型同时满足 >500 候选与 <5% 密度，路径暂未被触发。gas11
-  分叉定位：迭代 ~57 处 dense-DSE CHUZR 少选一个微步长 pivot（HiGHS 在 57/58 之间多做一次
-  目标几乎不变的 pivot），后续轨迹整体偏移直至 453 处提前 no-row；下一步需 gdb 对比 HiGHS
-  chooseRow 的 DSE 权重拒绝循环与 RNG 流消耗。
-- [ ] C2 对齐 DSE recurrence、Devex framework reset、phase/reinvert 生命周期。
-- 验收：四模型前 20 次 leaving row、weight、computed weight 一致。
-
-  `etamacro` 精确初始状态 + CHUZC4 实验的首个 pivot 已与 HiGHS 一致（entering 44、leaving row
-  284/variable 972）。首次分叉在 iteration 2：row 190 与 row 270 都是 `value=±4、weight=1、
-  squared merit=16`；HiGHS 的 64 项 sparse list 从随机位置 9 扫描，动态顺序使 row 270 先被访问，
-  Zig dense row-order 扫描选择 row 190。禁止用任意 tie-break 补丁替代，下一步完整移植 RHS list。
-
-  2026-07-23 C1 serial 路径验收：精确 B1 cost + C1 list + D3 CHUZC4 下，Zig 与固定 HiGHS 的
-  `etamacro` 前 **60/60** 次 `(entering, leaving variable, step)` 逐项一致。iteration 13
-  曾是第二个分叉点：两边 `workCount=105/randomStart=56` 且集合相同，但 Zig 正向 pivot-column
-  收集使 row 223 先于 row 222；改为与 `HFactor::ftranU` 一致的 reverse-U 顺序后，第 13--24 次也
-  全部对齐；随后又补齐 `HVector::reIndex` 超过 10% density 时恢复自然行序的规则。该组合完整运行时
-  `blend=109`，已等于 HiGHS；但 `grow7` 仍被后续未对齐的 B/E/F 路径
-  错判 infeasible，其他模型也在 25 次之后分叉。因此 exact B1/C1/D3 的联合行为开关仍关闭，安全
-  基线保持不变；下一首分叉已移动到单次迭代更新/phase controller。
-  默认安全开关恢复后，ReleaseFast 全测通过；按既定公平口径
-  `phase_one=dual + dual_initialization=highs + dual_edge_weight=steepest-devex` 的端到端正确性门禁
-  **40/40 PASS**。若把 edge-weight 留为 `inherit`，`agg/grow7` 会走另一条已知未对齐路径并失败，
-  因而该配置不能混入本轮与 HiGHS DSE 的迭代数比较。
-
-### D. PRICE 和 CHUZC
-
-- [x] D1a 对齐 CHUZC0 free move：显式 `nonbasicMove` 存在时，`move=0` 只允许真正
-  free/superbasic 且双侧无限的列按 `alpha*move_out` 获得本次 ratio test 的临时方向；fixed 和
-  bound-active 零 move 不再由 status 隐式复活，且不修改持久 move。ReleaseFast PASS；九模型
-  `114/293/1738/1079/413/105/358/104/670` 与安全基线完全一致。诊断 trace 证实 `bore3d`
-  没有 bound-active missing move。CHUZC1 pack 顺序与 row scale 仍待逐项 trace 对齐。
-- [ ] D2 对齐 CHUZC2 dynamic Ta/Td 和 CHUZC3 large-step 的输入/输出。
-  2026-08-12 CHUZC2 非正 workTheta 前置检查已实现：候选保留负松弛比率，CHUZC2 最小值 <=0
-  时在 CHUZC3 扩张前返回 no-entering（对应 HiGHS `workTheta<=0 → PossiblyDualUnbounded`
-  rebuild 边界），替换原 per-candidate 负 ratio 早退。forced-dual 40/40、aggregate 9892
-  不变——gas11 的当前分叉在 CHUZR no-row 而非 CHUZC。gas11 差分复核：Phase-I 目标轨迹与
-  HiGHS 偏移 1 个退化 pivot 后重合，zig 在 453 处 CHUZR no-row 提前退出（HiGHS DuPh1 485、
-  objective≈-12266、Du: 14(10987.7) Possibly optimal）；随后 zig 冷回退 primal Ph1 520 +
-  Ph2 154，HiGHS 从当前基热切 PrPh1 97 + PrPh2 109 + PrSwap 88 = 691。下一根因指向 C1
-  的 RHS infeasibility list/CHUZR 生命周期（F0n 曾记录 workCount 103 vs 209 的 list 差异），
-  而非 CHUZC 或 phase exit。
-- [ ] D3 启用已实现的 CHUZC4 grouping/large-alpha/strict flip set/permutation tie。
-- [ ] D4 实现 small-pivot iterative refinement、quad PRICE、删除 pivot后重跑。
-- 验收：四模型前 20 次 entering column、alpha、theta、flip set 一致。
-
-  CHUZC4 隔离记录（2026-07-22）：完整开启 grouping 后仍出现 `bore3d 293→521`、
-  `brandy 1738→1078`、`scorpion 358→1418`、`scsd1 104→1431`、`shell 670→1313`，且
-  `grow7` 被错误判 infeasible，因此行为开关保持关闭。源码核对确认 CHUZC4 选中列满足
-  `dual*move<=0` 时 HiGHS 设置 `theta_dual=0`，随后走 `shiftCost(variable_in,-workDual)`；Zig
-  当前统一使用 `r_q/alpha` 更新。曾把所有路径直接改成 ratio-test theta，导致多个模型在几十次
-  迭代内误判 infeasible；撤回后安全基线完全恢复。结论：D3 不能孤立启用，必须先完成 E3 的
-  `theta_dual==0` shiftCost/shiftBack 和 workShift 生命周期，再重新验收 CHUZC4。
-
-  后续已将 `zero_dual_step` 显式接入现有 `shiftCost/shiftBack` 存储，并保证普通路径仍使用已验证的
-  tableau recurrence；重新开启 CHUZC4 后上述九模型结果逐项完全不变，说明这些模型在首次分叉前
-  没有走零 theta 分支。进一步源码核对得到当前更早的结构差异：HiGHS CHUZC1 按动态 row-wise
-  matrix 的 `row_ap.index` 顺序、再按 `row_ep.index + num_col` 顺序形成 pack；Zig 当前按全局列号
-  dense 扫描。CHUZC3/4 的原位 swap/reduce 对 pack 顺序敏感，因此 D3 的下一前置项是对齐
-  CHUZC1 pack 顺序，而不是继续修改 grouping 公式。CHUZC4 行为开关再次关闭。
-
-  追加隔离（2026-07-22）：曾把 CHUZC4 theta 改成 `dual/(tableau*move_out*move)`，会使
-  `blend/bore3d/brandy/grow7/scorpion/shell` 很快误判 infeasible。复核源码确认 CHUZC2 写入
-  `workData.second` 时已经乘过一次 `move_out*move`，CHUZC4 形成 `workAlpha` 时再乘一次，符号平方
-  后恢复原始 tableau alpha；因此 `dual/tableau` 原实现正确，effective-alpha theta 方案已撤回。
-  随后的静态 CSR pack-order 实验在 CHUZC4 开启时仅改变 `blend 114→132`、`etamacro
-  1079→1229`，其余退化和 `grow7` 错判完全不变；关闭 CHUZC4 后八模型全部恢复原基线。HiGHS
-  的真实 pack 还依赖 HVector 非零顺序及动态 partition swap，静态 CSR 不是源码等价实现，相关
-  实验代码已撤回。当前结论：在 B1/B2 初始 work state 尚未对齐前，不能用 CHUZC4 轨迹判定
-  kernel 差异，执行顺序回到 B1→B2→B3，再重新开启 D3。
-
-  2026-07-23 在双轮 RNG、精确 cost 和首次 rebuild 全数组对齐后重开 D3：`etamacro` 首个 CHUZC4
-  选择已正确从 236 变为 HiGHS 的 44，前 25 个 pivot 的变量集合高度一致；但由于 C1 sparse
-  CHUZR 顺序尚缺，完整路径仍产生 `grow7/shell` 错判，故 CHUZC4 开关再次撤回，安全路径不变。
-
-### E. 单次迭代更新顺序
-
-- [ ] E1 BFRT collect/FTRAN 与 pivot-column FTRAN 同构。
-  2026-08-08 已对齐 `HEkkDual::updateFtranBFRT` 的 residual ownership：BFRT 仅聚合 RHS 并执行
-  一次 FTRAN，紧随其后的 entering-column FTRAN 统一负责本迭代的 residual/reinversion guard；删除
-  每个 flip batch 额外的完整基矩阵乘积。forced-dual 40-model correctness **40/40 PASS**，默认策略
-  40-model + 四条锁定 trace **40/40 PASS**，八个目标模型 committed iterations 完全不变。
-  31 次交错 ReleaseFast A/B 中，`etamacro`（229 个 BFRT batch）中位数
-  `39.93 → 39.34 ms`（-1.5%），`shell`（29 batch）`43.95 → 43.74 ms`（-0.5%）；
-  无 BFRT 的 `brandy/scorpion` 为噪声对照。E1 仍待把 flip value/status 的提交边界与后续
-  pivot-column FTRAN/rebuild reason 合并成完整原子 iteration，因此暂不整项勾选。
-- [ ] E2 row/column pivot verify 产生 rebuild reason，不在半更新状态直接退出。
-- [x] E3 对齐 incremental dual shift/update、primal/BFRT update、DSE/Devex update。当前首要项：
-  `theta_dual==0 → shiftCost` 和 `shiftBack(out)` 已接入持久 `workShift`；剩余源码差异是非零 theta
-  packed-row update、`workDual[in]=0/workDual[out]=-theta` 的严格更新顺序。禁止把 CHUZC theta
-  直接塞入现有 tableau recurrence。
-  2026-07-23 已删除 dual Phase-I 的“每个 pivot 后 full reprice”旁路：Phase-I 现在与 Phase-II
-  共用增量 dual/shiftBack 更新，只在真实 reinversion 后 exact reprice，符合
-  `HEkkDual::updateDual` 生命周期。ReleaseFast 全测及固定配置 40-model correctness **40/40 PASS**；
-  八模型 committed iterations 均不变，因此该项只记为结构和单次迭代开销修复，不记作迭代收益。
-  当前 40 模型横向结果为 Zig 胜 7、平 3、负 30，总迭代 `13509 vs 8774`（1.540x）；
-  最大差距 `brandy 1735 vs 304`。E3 尚未完成，下一步是消除 dense tableau recurrence 与
-  HiGHS packed-row `updateDual(theta)` 的数据流差异。
-  2026-08-12 E3 dual 更新已对齐：`updateReducedCostsAfterDualPivot` 现在消费 CHUZC 产出的
-  `theta`（不再重算 `rc/alpha_pq`），非零 theta 走 `workDual -= theta*pack` 的 packed-row 更新，
-  严格顺序 `workDual[in]=0 → workDual[out]=-theta → shiftBack(out)`；sort 路径返回 CHUZC2
-  最小松弛比率（zig 符号约定）。forced-dual 40/40 PASS，aggregate 保持 `10889`——门禁中
-  CHUZC4 的 theta 恰等于旧重算值、sort 路径进入列即最小比率候选，故逐模型 pivot 数不变；
-  该结论与 CHUZC2 最小比率语义在非 CHUZC4 配置下的差异（含 Td 项符号）留待 D3 重开
-  CHUZC4 时以差分 trace 复核。E3 剩余：primal/BFRT update 与 DSE/Devex update 的
-  E1/E4 原子提交边界。
-- [ ] E4 basis/factor/matrix/infeasibility-list 最后原子提交。
-- 验收：四模型前 20 次 pivot 后 workDual/baseValue/weights/basis head 一致。
-
-### F. Phase exit、cleanup 和结论
-
-  2026-08-12 暖成本型 primal Phase I 机制已实现（`solveWarmPhaseOne`/`recomputeWarmPhaseOneReducedCosts`/
-  泛型 `solvePhaseOneGeneric`，Dantzig 定价修正——不继承 dual DSE 权重）。**调用已撤销**：gdb 逐 pivot
-  对比确认 warm Phase-I 在 pivot 0 即与 HiGHS 分叉（entering 41 vs 40）——入口基不同（dual 轨迹
-  226 处分叉的下游），幽灵方向无法消除；净亏 gas11 +228（1157→1305）无收益，故回退到冷回退
-  路径（gas11 1157、aggregate 9354）。机制保留为 pub API，待 dual 226 处 DSE 权重接受漂移
-  （ulp 级）解决后重新启用。
-  2026-08-12 暖成本型 primal Phase I 机制已实现并提交：`solveWarmPhaseOne`（±1 基成本 +
-  5e-7 确定性扰动 + BTRAN，镜像 `HEkkPrimal::phase1ComputeDual`）在 dual 失败后从保留基运行，
-  成功则直接进 primal Phase II；unbounded 视为失败安全回退冷路径（证书不损坏）。gas11 的暖
-  Phase I 在 63 pivots 处撞到幽灵 unbounded 方向（entering 762、rc=-1、[0,inf) 单侧列）：ray
-  验证失败后回退，净 +63 pivots（aggregate 9354→9417）。HiGHS 对照：其 PrPh2 unbounded 且
-  bounds 扰动时走 cleanup→重入 Phase 1 循环，仅未扰动 Phase 2 unbounded 才存 ray；zig 的
-  63-pivot 态与 HiGHS 97-pivot 态的轨迹差异产生幽灵方向，下一轮按该 cleanup-loop 协议对齐
-  暖 Phase I 的 unbounded 处理（546-pivot 路径的解锁点）。
-- [ ] F1 对齐 Phase-I objective assessment、remove perturbation 和 Phase-I re-entry。
-  2026-08-12 gas11 差分收口（gdb 捕获 HiGHS (iter, in, out, theta_dual, theta_primal, update_count,
-  flip_count) 与 zig trace 逐项对比）：pivot 序列 0-225 完全一致，primal step 在 117 处出现
-  1-ulp 漂移并在 120 被小 alpha 放大（轨迹仍一致）；组合分叉在 226（CHUZR 选行 194 vs 28，
-  HiGHS 的 row-28 pivot 出现在其 262）。结构性根因修复已提交：Phase-I CHUZC no-entering 且
-  flip_count==0 从硬退出改为 possibly-optimal rebuild+重选、小 pivot 从硬退出改为 small_pivot
-  rebuild+重选、zero-objective 分支 free infeasibility 温重入 Phase I。gas11 现在以 HiGHS 的
-  精确 possibly-optimal 态退出（objective -12266.4、483 vs 485 pivots、15 dual infeasibilities），
-  aggregate 暂 9324→9354。否定实验（已撤销）：从 dual 可能最优态直接暖换 artificial 的
-  暖 primal Phase I——对结构性旧基的直接列交换使基奇异（refactorize pivot_factorization 失败），
-  需要 HiGHS 式的 basis crossover/Phase-I 转换设计（下一轮）；installArtificialPhaseOneBasis
-  的旧基退役泛化（冷路径等价）保留。
-
-  2026-08-12 源码协议核对（HiGHS `HEkkDual::solvePhase1`、`rebuild`、
-  `assessPhase1Optimality`）：CHUZR 返回 no-row 只产生 `possibly_optimal` rebuild reason，不能直接
-  退出 Phase I。控制器必须先以当前 Phase-I bounds/cost 完成一次完整 fresh rebuild（必要时
-  reinvert、重算 dual/base value/infeasibility list 和 dual objective），然后再次 CHUZR；仅 fresh
-  状态仍无 leaving row 才允许移除 cost perturbation 并判断 Phase-I objective。Zig 当前在首次
-  no-row 后立即恢复原始 bounds，随后把双/原可行性组合映射成 cold primal fallback，是
-  `refinery 1087 vs 396` 和 `gas11 1127 vs 699` 的主要控制器差异。F1a 将先引入独立
-  `possibly_optimal` 数值 rebuild reason 和“首次 no-row 请求 rebuild、fresh no-row 才提交”的
-  原子边界；定向验收 refinery/gas11/grow7，随后跑 forced-dual 40-model correctness 和 aggregate。
-  F1a 实现结果：新增的 reason 已贯通数值 rebuild 分类和 benchmark 诊断；Phase-I no-row 在
-  `has_fresh_rebuild=false` 时请求完整 rebuild，只有 fresh no-row 才提交。ReleaseFast 全测通过，
-  定向 3/3 和 forced-dual 40-model correctness **40/40 PASS**。refinery 确实新增 1 次
-  `possibly_optimal` reinversion，但 committed iterations 保持 `1087`；gas11/grow7 仍为
-  `1127/486`，全语料 aggregate 仍为 `9926 vs 8774`。因此旧状态提前提交已被排除，F1 的下一根因
-  是 fresh no-row 后缺少 `assessPhase1Optimality` 的 objective/去扰动/重入协议，而不是 rebuild
-  本身。
-  F1b 按 `HEkkDual::cleanup` 拆成两个可验证提交边界：第一步在 fresh perturbed objective 非零时，
-  保持 Phase-I bounds/nonbasic values，恢复原始 scaled `workCost`、清空 shift/perturbation、exact reprice，
-  并记录 unperturbed Phase-I objective 与 dual infeasibility；不得在该边界恢复 Phase-II bounds。
-  第二步仅在实测 Phase-I dual infeasibility 非零时重新初始化 Phase-I nonbasic value/move 并回到 rebuild/
-  iterate 外循环。这样先验证 gas11 是否复现 HiGHS cleanup 的 `objective≈-12266、dual infeas=15`，再引入
-  re-entry，避免同时改变 objective、bounds 和 basis 三类状态。
-  F1b 第一步已实现并提交：fresh no-row 且 `costs_perturbed` 时按 `HEkkDual::cleanup` 恢复精确 scaled
-  cost（保留 Phase-I bounds/nonbasic value），记录 unperturbed objective 与 dual infeasibility 统计，
-  runner 同步输出。forced-dual 40/40 PASS、aggregate 10889 不变。全语料扫描显示 40 个模型当前 fresh
-  Phase-I final objective 全为 0，该分支暂未被触发；HiGHS 的 gas11 走非零 objective cleanup
-  （objective≈-12266、dual infeas=15），说明分叉在上游 fresh rebuild/objective 计算，F1b 第二步
-  （重入协议）需先定位该差异。
-- [ ] F2 对齐 `exitPhase1ResetDuals`、free dual shift、Phase-II transition。
-  2026-08-12 F1a 后用本地同 commit HiGHS 的开发日志确认：`refinery` 正确路径为
-  `DuPh1 96 + DuPh2 300 = 396`。HiGHS 在 fresh Phase-I objective 恰为零时保留已扰动的
-  `workCost`，只恢复 Phase-II bounds/nonbasic values，随后由 Phase-II rebuild 重新计算
-  workDual/baseValue；Zig 当前在 90 次 Phase-I pivot 后立即恢复原始 cost，发现原始 dual infeasible
-  就冷启动 artificial primal Phase I，额外产生 997 pivots。F2a 将把“零 objective”转移改为同一
-  `DualWorkState` 所有权下的 bounds transition，并直接进入 `solveDualLoop(use_work_costs=true)`；
-  原始 cost 仍只允许在 Phase-II no-row cleanup 中恢复。该改动不绑定模型，只由 fresh objective 和
-  controller phase 决定。
-  F2a 实现后 ReleaseFast 全测和 forced-dual correctness **40/40 PASS**。`grow7 486→316`
-  （HiGHS 339）、`israel 155→143`（HiGHS 146），adlittle/agg/blend 等转为与 HiGHS exact；同时修复
-  shifted Phase-II 在 fresh Farkas 校验失败后仍无条件返回 infeasible 的错误，现在与 exact-cost path
-  一样先尝试 Devex framework，仍不能形成证书则以 numerical reason 返回控制器。该阶段也真实暴露
-  了此前被 cold primal fallback 遮住的 Phase-II CHUZC 差异：bore3d/capri/etamacro/finnis/klein1/
-  vtp-base 在 `phase_two_no_entering` 后叠加旧回退，aggregate 暂由 `9926→11258`（HiGHS 8774）。
-  这是控制器对齐后的待修内核问题，禁止撤回正确的 cost/bounds 生命周期再用低但不可比的 primal
-  fallback 数字掩盖；下一步按 fresh no-entering 的首次分叉回到 D3/E3。
-  D3/F2 首次失败核对：Zig CHUZC2 在 relaxed ratio
-  `(workDual*move + Td)/effectiveAlpha <= 0` 时直接返回 no-entering；HiGHS `choosePossible` 只把该值
-  更新到 `workTheta`，从不在这里退出，随后 CHUZC3/4 仍可选中候选，并在
-  `workDual[pivot]*move<=0` 时提交 `theta_dual=0`、清空 BFRT flip set、执行 `shiftCost`。F2a 失败簇
-  的 fresh Farkas 全部无效，与该伪 no-entering 完全一致。D3a 将删除过早退出并用“reduced cost 位于
-  -Td 边界仍选中 zero-dual-step”单测锁定；然后重测 bore3d/capri/etamacro/finnis/klein1/vtp-base。
-  隔离结果：允许所有负 ratio 后前述八模型完全不变，但全量运行在 gas11 的负 `workTheta` CHUZC3
-  扩张中不终止，证明 gas11 当前 work dual 尚违反 HiGHS 的 CHUZC dual-feasible 前置条件。D3a 因此
-  收窄为只删除 `ratio == 0` 的错误退出并保留 `ratio < 0` 状态保护；边界单测通过。负值保护只能在
-  F1b cleanup/rebuild 对齐并证明 CHUZC 入口 dual feasible 后删除，不能靠热循环 iteration cap 掩盖。
-  随后对 `phase_two_no_entering` 做 dense-vs-pack 审计发现两个 Zig 所有权错误：(1) CHUZC2 的只读
-  `packed_indices` 与原位排序/发布 BFRT prefix 的 `candidate_work` 传入同一切片，producer support 会
-  被 consumer 覆盖；(2) Phase-I collapsed boxed variable 的 move=0 在恢复原始 bounds/status/primal
-  后未同步回 ±1，导致 CHUZC 跳过合法 bound-active 变量。现已给 `DualIterationWorkspace` 增加独立
-  `candidate_indices`，并在 `restoreOriginalBounds` 原子恢复 move。ReleaseFast 全测、forced-dual
-  correctness **40/40 PASS**；aggregate `11258→10889`，逐模型 Zig 胜/平/负为 **10/25/5**。
-  `bore3d/capri/vtp-base` 与 HiGHS exact，`finnis 353 vs 354`、`grow7 296 vs 339`。剩余落后仅
-  `refinery 1359 vs 396 / etamacro 1094 vs 532 / gas11 1127 vs 699 / klein1 434 vs 134 /
-  scsd1 87 vs 86`；前四项必须从新的真实路径首次分叉继续追踪。
-- [ ] F3 对齐 Phase-II optimal/possibly-unbounded fresh rebuild、cleanup levels和最终状态。
-  2026-08-12 F1b 第二步/phase exit 已实现并提交：扰动 Phase II 的 CHUZC no-entering 不再放弃——cleanup
-  扰动、以精确 cost 分类后，(a) dual+primal 可行则 finishOptimal；(b) dual 可行 + primal 不可行
-  （possibly-dual-unbounded）在 cleaned 状态重验 Farkas 证书，有效即返回 infeasible；(c) dual
-  不可行则温重入 dual Phase I（`phase_one_reentries` 深度护栏 3）。CHUZR no-row 的 cleanup 分支
-  同样接入重入协议。refinery `1359→362`（HiGHS 396），证书 `infeasibility_ray_valid=true`；
-  全语料 aggregate `10889→9892`（1.127x），胜/平/负 `10/25/5→11/25/4`，40/40 PASS。剩余落后
-  gas11/etamacro/scsd1/klein1 待从新真实路径首次分叉继续追踪。
-  2026-08-12 差分工具与 refinery 首次分叉复核：`PivotTraceEvent` 增加 trace-only 的
-  `dual_objective`（行尾字段，不影响 trace lock 列位），与本地 HiGHS 逐迭代 objective 日志
-  逐项对比。当前状态 refinery 首个 objective 分叉在 zig pivot 12/HiGHS iter 13
-  （`-860.4972919350e2 vs -860.4972911000e2`），与 F0p 记录的 base LU pivot permutation
-  tie-break 一致。结构确认：zig = DuPh1 90（HiGHS 96）+ 主 dual Phase II 272（HiGHS 300，
-  use_work_costs 记账为 shifted）→ CHUZR no-row（primal 可行）→ 恢复原始 cost 后分类
-  dual infeasible → 冷回退 primal Phase I 997（HiGHS 无）。Phase-II no-entering 全程仅
-  2 次 `chuzc_exit reason=no_candidate`，272 处来自 CHUZR no-row 而非 CHUZC 早退。
-  下一根因：HiGHS 在 DuPh2 300 后 original-cost cleanup 成功判 optimal，zig 在 272 后
-  同协议分类为 original dual infeasible——需比对 cleanup 的 remove-perturbation/reprice
-  顺序与 dual 可行性判定（F1b 第二步的 re-entry 是否应触发）。
-- 验收：禁止 snapshot retry 和非 HiGHS primal fallback 后，40-model correctness 40/40。
-
-### G. 迭代数验收（2026-08-12 剩余四模型分类）
-
-- gas11（1127 vs 699，unbounded）：dense-DSE CHUZR 在迭代 ~57 少选一个微步长 pivot（HiGHS 在
-  57/58 间多做一次目标几乎不变的 pivot），之后轨迹偏移直至 453 处提前 CHUZR no-row（HiGHS DuPh1
-  485、objective≈-12266、Du 14(10987.7) possibly optimal），随后冷回退 primal Ph1 520。根因在
-  chooseRow 的 DSE 权重拒绝/接受循环或 RNG 流消耗，需 gdb 对比。
-- etamacro（1094 vs 530，optimal）：已修复为 **526 vs 530**。根因：shifted Phase II 371 处
-  primal 可行后 cleanup 剩 5 个边际 dual infeasibility（|rc|~1e-7，扰动后符号翻转使 Phase-I
-  无法编码），温重入 Phase I 空转 3 次后冷回退（primal Ph1 348 + Ph2 233）。对齐 HiGHS 的
-  dual-to-primal cleanup（其日志即 PrPh2 6）：cleaned 状态 dual infeasible + primal feasible
-  时从当前基热切 primal（约 13 pivots），Phase-I 重入仅保留给 dual+primal 均不可行的情形。
-  CHUZR no-row 与 CHUZC give-up 两个 cleanup 边界同改。全语料 aggregate `9892→9324`（1.063x），
-  胜/平/负 `11/25/4→12/25/3`。
-- klein1（434 vs 126，infeasible）：phase 选择已按 HiGHS 对齐（扰动后 duals 判定 + force_phase2，
-  本语料 gate-neutral，见 B1 提交）。证书基础设施已扩展：ray 验证重构为 `validateInfeasibilityRay`，
-  新增 full-dual 变体——cleanup 前快照累加 logical dual（HiGHS 的 proof 即终止时 workDual，
-  其 klein1 proof 为 8 行组合 5.24e6/-2.65e6/…），单行 ray 失败后按原坐标验证快照（无系数下限，
-  gap 反号重试）。klein1 的快照 ray 有真实值（row_mass 4.4e9）但仍 `infinite_column_bound`
-  （column_mass 6.9e13）——135-pivot 轨迹的累加 dual 不满足无限界列的 Farkas 条件，而 HiGHS
-  126-pivot 轨迹满足。结论：klein1 证书是轨迹锁定，根治在 pivot-1 的 1-ulp 级 CHUZC4 分叉
-  （33 vs 30）而非证书构造；full-dual 机制行为中性保留（40/40、aggregate 9417 不变）。
-（扰动后 duals 判定 + force_phase2，
-  本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
-  ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
-  HiGHS 的完整证书，随后冷回退 primal Ph1 299。gdb 差分（break HEkkDual::updateDual 捕获
-  (iteration, variable_in, variable_out)）定位首次分叉在 **pivot 1**：leaving row 62 相同、
-  entering 33(HiGHS) vs 30(zig)，CHUZC4 均单组、large-alpha 逻辑逐项等价，差异来自 klein1
-  极微系数（dual ~1e-12）下的 1-ulp 级候选集/比率敏感。否定实验（已撤销）：ray 失败后从
-  dual-feasible-primal-infeasible 基暖切 primal（仿 kSolvePhasePrimalInfeasibleCleanup）使
-  klein1 `434→611`（shifted 405 + primal 206），暖 primal 不比冷回退便宜，撤销并记录。
-  下一轮：全 y 向量 Farkas ray 或对 klein1 的 ulp 敏感路径做 HCD/扩展精度审计。
-  2026-08-12 否定实验（已撤销）：暖 Phase-I 幽灵 unbounded 方向的 repairs-check（沿方向所有违反
-  基都向界移动则判定 feasible-in-the-limit → .optimal）使 gas11 `1220→1247`（暖 Phase II 27 pivots
-  后仍失败回退，浪费 90 pivots）。幽灵方向（entering 762、rc=-1、[0,inf)）的根治在暖 Phase-I
-  轨迹对齐：zig 63-pivot 态 vs HiGHS 97-pivot 态的分叉需 gdb 逐 pivot 对比 HEkkPrimal
-  solvePhase1（下一轮）。
-
-（扰动后 duals 判定 + force_phase2，
-  本语料 gate-neutral，见 B1 提交）。真实缺口：Phase II 135（HiGHS 126）no-entering 后 cleaned
-  ray 校验失败 `infinite_column_bound`——单行 ray（leaving row 的 BTRAN）触及无限界列，弱于
-  HiGHS 的完整证书，随后冷回退 primal Ph1 299。下一轮：按 HiGHS 语义构建全 y 向量 Farkas ray，
-  或先对齐 Phase II 轨迹使 no-entering 基与 HiGHS 一致。
-- scsd1（87 vs 86）：仅差 1，忽略。
-
-### G. 迭代数验收（2026-08-12 对齐墙结论与 Phase 3 转场）
-
-- 对齐墙：gas11 的 226 CHUZR 分叉与 klein1 的 pivot-1 CHUZC4 分叉均为 1-ulp 级数值漂移
-  （klein1 系数 ~1e-12；gas11 的 DSE 权重递推自 117 处起漂移）。逐位对齐要求：预缩放矩阵
-  物化（HiGHS `A*(colScale*rowScale)` 顺序）、成本缩放坐标统一、以及三角求解/FT 更新的
-  运算顺序与 HFactor 完全一致——后者正是 F 系列明确放弃的 factor-order 对齐。结论：迭代数
-  平价（≤8774）在 ulp 墙处不可达，对齐战役收口于 **9354 vs 8774（1.066x）**、40/40 正确、
-  胜/平/负 12/25/3，etamacro/refinery 已反超 HiGHS。
-- 转场 Phase 3（时间指标）：2026-08-12 性能基线（11 轮交替中位数，与 08-08 冻结基线同法）
-  shell 3.37x、capri 1.79x、scrs8 1.97x、seba 2.78x。目标改为逐模型中位数时间之和低于
-  HiGHS；H 系列协议（ns/pivot、31/101 轮交替、负结果删除并记录）继续生效。gas11 的
-  rebuild/invert 风暴（112 次 invert）随 546-pivot 路径解锁自然消除；纯 dual 模型的
-  per-pivot 成本在 FTRAN/BTRAN/PRICE，按 H 系列假设逐一实验。
-
-### Phase 3 画像（2026-08-12 shell）
-
-- 每 pivot ~32μs：CHUZR+BTRAN+PRICE+DSE 验证 13.7μs（42%）、pivot commit（factor update+
-  基交换+primal 镜像+DSE 更新+list）11.5μs（35%）、FTRAN+dual update 5.6μs、CHUZC 1.4μs。
-  PRICE 7.7μs/调用 ≈ HiGHS 的 2-3 倍——逐项 `row_scale*coefficient*column_scale*dual`
-  表达式比 HiGHS 预缩放矩阵上的 `A_s*dual` 多 2 次乘法 + 2 次查表/nonzero。
-- 预缩放矩阵已实现并提交：`materializeScaledCoefficients`（HiGHS `A*(colScale*rowScale)`
-  顺序，dropped 系数置 0），column PRICE 全迁移到 `A_s*dual`（recomputeReducedCostsFromWork/
-  recomputeReducedCosts/priceStructuralColumns/recomputePhaseOneReducedCosts/Warm 五处）。
-  40/40、aggregate 9354 不变；性能在环境噪声带内（shell 11 轮 -4.3% 但 31 轮确认 ±5% 漂移，
-  本机 WSL2 共享宿主使 zig 单次求解方差 ~5%，比值测量需更严格的同会话交替协议）。
-  剩余 per-pivot 目标：pivot commit 的 11.5μs（factor update+基交换+primal 镜像+DSE 更新）与
-  FTRAN 的逐项缩放迁移（collectAj/fillInternalColumn）。
-  2026-08-12 perf 战役（同会话 sudo perf stat cycles/instructions A/B 验收，共享宿主噪声由
-  同会话对比控制）：(a) finite-scan 融合 O(n)→O(pack)；(b) priceStructuralColumns 计数折叠
-  （-4.0% cycles/instructions）；(c) CHUZR 两段扫描去取模（-2.7% cycles）；(d) factor update
-  方向扫描去分支（-0.8% instructions）。累计 shell 同会话 68.5M→64.0M cycles（-6.5%），
-  31 轮中位数 17.92→15.67ms（-12.6%）。40/40、aggregate 9354 全程不变。下一目标：FT
-  solveUpper/solveUpperTranspose 内核（15%）、FTRAN/DSE 物化 memsets（14%，HiGHS 同样
-  支付）、factor update 的 FT apply 路径。
-  2026-08-12 perf 采样（sudo perf，shell）：priceStructuralColumns 29.2%、dual update 18.2%、
-  memset 14.0%（FTRAN/DSE 结果向量的稠密物化，HiGHS 同样支付）、FT update 11.1%+4.3%、
-  BTRAN upper 7.5%、CHUZR 5.0%。已提交 finite-scan 融合（updateReducedCostsAfterDualPivot 的
-  全向量有限性扫描移入 packed 循环，O(n)→O(pack)，归纳论证等价；40/40、aggregate 9354、
-  shell 中位数 16.74ms 为本环境最优读数）。注意：共享宿主噪声 ±5%，perf 相对基线（git stash
-  对比）是更可靠的验收方式。
-
-### G. 迭代数验收
-
-- [ ] G1 四模型完整 pivot trace 与 HiGHS 对齐。
-- [ ] G2 完整 40-model 逐模型记录 Zig/HiGHS committed iterations 和奇异值。
-- [ ] G3 所有未对齐模型回到首次分叉所属模块，不允许跨模块补丁。
-
-当前执行点：**E1 BFRT/FTRAN → E3 incremental update → F1/F2 phase exit**。只接受两类成果：
-40-model correctness 不退化；相同配置下完整 committed iterations 降低并最终不高于 HiGHS。
-局部 tick、前缀轨迹和源码相似度只用于定位，不计入验收结果。
-
-#### 已拒绝并删除的实验（2026-07-23）
-
-曾为复现 HiGHS synthetic-clock reinversion 增加独立 U/UR shadow graph。它能让 `etamacro` 与
-HiGHS 同在 update 54 触发 rebuild，但累计 tick 仍差 30，未改善任何完整模型迭代数，并使
-ReleaseFast 热路径约退化 10%。该实验层、字段、开关和额外接口参数已全部删除；仅保留结论：
-reinversion 时点是后续差异，不是当前最大收益点。若未来重做，必须直接复用真实 factor graph，
-不得再引入平行 shadow 状态。
-
-清理后 ReleaseFast 全测、`git diff --check` 均通过。固定公平配置的八模型安全基线为：
-`blend 114 / bore3d 293 / brandy 1735 / etamacro 1095 / grow7 413 / scorpion 358 /
-scsd1 104 / shell 670`，状态全部 optimal。后续改动必须按 E1/E3/F 的模块边界完成，禁止
-模型特例、固定 iteration 阈值或跨模块补偿。
-
-## 4. 可维护性注释补全进度
-
-本节只追踪文档工作，不改变上述算法对齐状态。注释必须说明数据所有权、缩放坐标、
-状态生命周期、数值失败条件和热路径约束，不能用重复函数名的空泛描述代替。
-
-- [x] simplex 公共模型与基础状态：`problem.zig`、`solution.zig`、`basis.zig`、
-  `basis_snapshot.zig`、`numerical.zig`、`root.zig`。
-- [x] simplex 定价与比率测试：`pricing.zig`、`pricing_workspace.zig`、
-  `ratio_test.zig`。
-- [x] dual 工作状态与算法内核：`dual_state.zig`、`dual_phase_one.zig`、
-  `highs_random.zig`、`engine_dual.zig`、`engine_dual_candidate.zig`、
-  `engine_dual_edge_weight.zig`。
-- [x] primal、pivot、basis 与 solve controller：`engine_primal.zig`、
-  `engine_pivot.zig`、`engine_basis.zig`、`engine_setup.zig`、
-  `engine_finish.zig`、`engine_progress.zig`、`engine_degeneracy.zig`。
-- [x] factorization、crash 与退化工作区：`factorization.zig`、`crash.zig`、
-  `degeneracy.zig`。
-- [x] 2026-07-23 simplex 注释批次验证：`zig fmt`、ReleaseFast 全量测试和
-  `git diff --check` 全部通过；未修改求解行为。
-- [x] matrix 注释补全。
-  - [x] 核心表示与乘法/缓存首批：`csc.zig`、`csr_view.zig`、`dense_lu.zig`；
-    已补齐所有权、packed/page-colored 布局、字段语义、checked/assume-valid 边界和
-    核心乘法/求解路径说明。
-  - [x] 首批验证：`zig fmt`、ReleaseFast 全量测试和 `git diff --check` 全部通过。
-  - [x] builder/vector/transform/edit/store。
-  - [x] sparse symbolic/kernel/LU/Forrest--Tomlin：已说明所有 SoA 平行数组、
-    intrusive list/free-list、有效前缀、置换坐标、symbolic/numerical 分界及更新链生命周期。
-- [x] io 注释补全：通用输入输出与资源限制、语义 builder、packed `ModelData`、
-  string arena、LP lexer/parser/writer、MPS parser/writer 均已覆盖。
-- [x] 最终机械审计：`simplex`、`matrix`、`io` 中每个函数声明前均存在作用说明；
-  三个模块的主要结构体字段均说明所有权、有效范围或状态含义。
-- [x] 最终验证：全模块 `zig fmt`、ReleaseFast 全量测试及 `git diff --check` 通过。
-- [x] 2026-08-12 语义化字段组织（行为零变化，各轮均以 forced-dual 40/40 且逐模型
-  pivots 与重构前一致为门禁）：`SimplexEngine` 的 9 个 dual Phase-I 度量标量收进
-  `DualPhaseOneAssessment` 并按 Resources/Policy/Lifecycle/Certificates/Dual
-  observations/Strategy knobs/Phase-I metrics/Diagnostics 八个横幅分区；
-  `DualPhaseOneWorkspace` 的 RHS list/checkpoint/rebuild 度量收进 `DualRHSState`/
-  `BasisCheckpoint`/`RebuildMeasurements` 并按生命周期分区；非基移动方向从 `i8` 魔数
-  升级为 `NonbasicMove` 枚举（`i8` 保底、`sign()/negated()` 内联助手）。
-
-## Round 9 perf: FT correction ep_touched support iteration (landed -2%)
-
-`SparseForrestTomlin::update` 构造下一条 FT 行修正时，部分 BTRAN（`captureEp`
-产物）只存在于 `ep_touched` 记录的 pivot 上。把原来的全 n 稠密 work 扫描改为
-按 `ep_touched` support 迭代：语义完全等价（support 清零不变式保证其余位置为 0，
-leaving pivot 是后缀第一个被触 pivot 必须保留排除），shell 63.9M -> 62.7M
-cycles（-2%），40/40 门禁 PASS、pivots 与 lock 逐模型一致。提交 2be4049。
-
-## Round 9 perf: memset 消除战役（未落地，记下全部发现供下轮接力）
-
-目标：消除 sparse_lu 三处稠密物化 memset（solveAdaptive save/memset/restore、
-solveForUpdateSparse hyper 前置、solveHyperSparse FT 前置，合计 self ~6-8%，
-且失败实验显示其缓存副作用远超自身成本）。三个设计均失败/未收口：
-
-1. **restore 设计（错误）**：solve 结束把 (active ∪ FT 散射 \ output) 归零。
-   错在 in-place FT 上三角求解把向量在每个位置都算对了——非输出活跃位置的
-   L 值就是正确终值（DSE 更新、RHS 更新都要读它们），归零即损坏。memset+restore
-   组合通过（memset 掩盖了 restore 的错误），纯 restore 在 pivot 302 失败。
-
-2. **纯移除（错误）**：直接删三处 memset。前置检查（Debug 下扫描非输入位置）
-   显示迭代起点状态干净、求解 in-place 正确，但仍在 302 失败。原因：**泄漏不在
-   当前迭代，而在下一迭代**——in-place 求解留下的中间值（L-fill + FT 散射）
-   不在向量 support（= ftran_output）里，下一迭代的 clear 漏清零，稀疏超路径
-   的求解把这些陈旧值当 spike 读入。
-
-3. **merged support 设计（90%，未收口）**：向量 support 扩展为
-   active ∪ ftran_output ∪ ftran_scatter（sparse_ft 用 write_stamp 去重记录
-   FT 写入，sparse_lu 用 marked 去重合并），下一迭代 clear 覆盖全部写入。
-   结果：**仅 site B（solveForUpdateSparse 前置 memset）+ merged = optimal 但
-   556 pivots ≠ 基线 558**（残余轨迹分歧，机制未查明——候选：clear 的
-   稠密/稀疏决策、或某个未枚举的 support 消费者）。40/40 门禁必败（pivots
-   必须 lock-exact），故回退。
-
-关键诊断手段（下轮复用）：
-- **分配器布局敏感性 = 未初始化内存实锤**：no-trace 在 302 失败；trace 开 →
-  optimal 558；no-trace 但分配同样的 8MB 哑缓冲 → optimal 558；显式
-  `-Doptimize=Debug`（GPA 清零）→ optimal。未初始化读的候选：merged 构建里
-  `marked[column_position[column]]` 的映射读。注意 `zig build
-  build-simplex-end-to-end` 默认构建不是 Debug（std.builtin.mode 守卫不触发），
-  Debug 验证必须显式 `-Doptimize=Debug`。
-- 轨迹 diff：`trace` 参数写 stderr，`grep ^pivot` 得 pivot 序列；首个分歧 =
-  shell pivot 214：同进入 1594，基线离开行 182 / 失败配置 181（CHUZR 邻近
-  近平局被 ulp/列表顺序打破）。CHUZR 走 hyper 路径（bestDualCandidate +
-  rebuildDualCandidateList，engine_dual_candidate.zig），score =
-  violation/sqrt(max(edge_weight,1))。
-- 三个 vector（col_aq/col_dse/col_bfrt）生命周期：col_aq = clear+fill+
-  ftranForUpdate；col_dse = copyFrom(row_ep)+ftran（输入密 → 稠密路径，无
-  影响）；col_bfrt = accumulateBoundFlipRhs（先 clear）+ftran。行 141-143 的
-  changed_row_index 拷入（喂 performPivotWithDirection:278 的
-  updatePrimalInfeasibilityList）与 col_aq_density（喂 createPrimal
-  InfeasibilityList 的 >500 && density<0.05 截断）都必须保持 ftran_output
-  精确语义，不能吃 merged support。
-
-下轮建议：修 556/558 残余分歧——先 diff site-B+merged 配置的 pivot 序列定位
-分歧点，重点排查 merged support 对 `IndexedVector.clear()` 稠密/稀疏决策
-（30% 阈值）的影响，以及 buildMergedFtranSupport 的 marked/column_position
-未初始化读（先 @memset(marked,false) 验证）。若 merged 语义无法与基线完全
-一致，改走"双 support"（published=精确、clear=merged）或放弃本项。
-
-## Round 10 perf: packed pre-U Aq snapshot（否定）
-
-按本地 HiGHS `HVector.packFlag → HFactor::updateFT` 边界，把 FT 的 pre-U Aq
-从 dense memcpy + UPDATE dense scan 改为自然行序 `(index,value)` pack；随后又
-试验只对 hyper-sparse L 分支 pack、dense FTRAN 保留原 snapshot。两种实现都保持
-shell **558 pivots**，ReleaseFast 全测通过，但收益不足以接受：indexed-only 版本
-在 8 模型、每项 11 轮 `perf stat` 门禁中 instructions 合计下降约 **0.42%**，cycles
-只下降约 **0.11%**，且 shell/grow7/seba 分别回退约 1.49%/1.28%/0.73%；10 模型
-31 轮交替墙钟总和也在 `-2.9%` 与 `+4.3%` 间翻转。新增 pack 分支和额外 SoA
-读流抵消了省下的 dense 访问，两个实现均已完整删除。下一项不再给现有 dense-
-visit FT 路径附加 support bookkeeping，转向与 HiGHS 一致的连续 U/UR 存储和
-无链式指针的 solve/update 遍历。
-
-### Round 10b: mutable-U contiguous column read mirror（否定）
-
-为避免一次性重写 U/UR，曾保留 intrusive pool 作为 UPDATE 权威结构，同时增量维护
-按当前链表次序排列的连续 U-column 镜像供 `solveUpper` 使用。实现保持 shell 558
-pivots 和 ReleaseFast 全测，但双写成本压倒读侧收益：8 模型各 11 轮硬件门禁中除
-grow7 外 7 个 cycles 上升，shell `66.0M→71.5M`（+8.3%）、scrs8
-`70.5M→74.0M`（+4.9%）、seba `39.1M→41.6M`（+6.5%）。影子镜像已完整
-删除。结论与此前 synthetic-clock shadow graph 一致：下一次 U/UR 布局工作必须
-直接替换权威表示，不能在 pivot UPDATE 上并行维护第二套结构。
-
-### Round 10c: whole-row/whole-column unlink specialization（否定）
-
-将 pivotal row 删除专门化为只修复 column 链、pivotal column 删除专门化为只修复
-row 链，避免维护即将整体作废的另一方向；free-list 顺序和剩余遍历顺序不变。
-ReleaseFast 全测与 shell 558 pivots 通过，8 模型硬件 cycles 合计仅约 -0.13%，
-独立 512 阶/64-update FT microbench 的 UPDATE 中位数反而 `2769→2779 ns`。
-编译器已内联原通用 remove 并消除了足够多的死写，手工专门化没有越过噪声门槛，
-实现已删除。
-
-## Round 11 perf: retain moved alpha in CHUZC work state（落地 -0.75%）
-
-对齐 HiGHS `HEkkDualRow::workData(index, alpha)`：把原 `work_direction` SoA 改为
-保存 `moved_alpha = tableau_alpha * move_out`。候选成立后，其符号精确恢复
-nonbasic direction，绝对值就是 effective alpha，乘回 `move_out` 恢复原 alpha；
-因此 CHUZC3/4、large-alpha、BFRT 和最终 theta 不再反复经分段 pivotal-row view
-读取 tableau，也没有新增数组或改变浮点比较。
-
-ReleaseFast 全测和 forced-dual 40/40 PASS；与 98d9a16 基线逐模型 pivot 完全一致，
-aggregate `9365→9365`。8 模型各 11 轮硬件门禁 cycles/instructions 合计约
--0.22%/-0.18%，完整 40 模型 31 轮同会话交替门禁的 solve 中位数之和
-`272.980→270.935 ms`（**-0.75%**），27 胜 13 负。该项保留。
-
-## Round 12 perf: delete obsolete scaled-row scratch（落地 -0.82%）
-
-预缩放矩阵落地后，column PRICE 已直接计算 `A_scaled^T * row_ep`，但旧 H2e
-路径仍在 exact-DSE 扫描中写 `basis.rhs_work = row_ep * row_scale`，并在非 exact
-分支单独物化同一向量；PRICE 不再读取它，后续 BFRT 也会覆盖该 scratch。删除两条
-死写流，不改变 DSE norm/count 顺序或 PRICE 算术。
-
-ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 11 基线完全
-一致（aggregate 9365）。8 模型硬件 instructions 合计约 -0.28%；完整 40 模型
-31 轮交替门禁的 solve 中位数之和 `279.529→277.250 ms`（**-0.82%**）。
-
-## Round 13 perf: skip overwritten column-PRICE clear（落地）
-
-`computeDualTableauRow` 原先无条件 `row_ap.clear()`；但 column PRICE 会给每个
-结构列赋值，包括精确零，因此旧 numerical support 无需先清除。现在 row-pricing
-scatter 路径仍完整 clear，column 路径只 `clearScalars()` 重置 index/pack 生命周期。
-这利用了 Zig 中明确的 producer contract，数值赋值和 support 发布顺序不变。
-
-ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots lock-exact（aggregate
-9365）。8 模型 11 轮硬件门禁 instructions 合计约 **-1.41%**、cycles 约 -0.27%；
-两轮完整 40 模型 31 轮交替墙钟分别 +1.19%/-1.98%，仍处于共享宿主调度噪声，
-但硬件工作量下降明确，因此保留。
-
-## Round 14 perf: HiGHS-tiny PRICE producer support（落地 -2.43%）
-
-对齐本地 `HighsSparseMatrix::priceByColumn`：row_ap producer 只发布
-`abs(alpha) > kHighsTiny (1e-14)` 的结构项，其余显式写零；row-pricing scatter
-完成后采用相同边界。此前所有 `alpha != 0` 的数值填充都会进入 CHUZC pack 和
-packed reduced-cost update，虽然未改变 pivot，却放大了每轮工作集。
-
-ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivots 与 Round 13 完全一致
-（aggregate 9365）。8 模型 11 轮硬件 cycles 合计约 **-1.66%**；完整 40 模型
-31 轮交替门禁的 solve 中位数之和 `261.139→254.783 ms`（**-2.43%**），
-34 胜 6 负。该项保留。
-
-### Round 14b: column PRICE direct-to-CHUZC pack（否定）
-
-利用 column PRICE 覆盖全部 `row_ap.values`、且 Round 13 已不依赖结构 support
-清零的 producer contract，试验在 PRICE 内直接按自然列序写 CHUZC pack，跳过
-`row_ap.indices` 发布及紧随其后的结构 pack 复制；row-pricing 路径保持不变。
-ReleaseFast 全测通过，forced-dual 40 模型 pivot 与 Round 14 完全一致（aggregate
-9365）。8 模型各 31 轮硬件门禁 instructions/cycles 合计约 -0.33%/-0.25%，但
-完整 40 模型 31 轮交替门禁的 solve 中位数之和 `262.174→263.847 ms`
-（**+0.64%**，23 胜 17 负）。这点微小的读写减少没有覆盖 producer 中新增的
-双目标存储流，未形成稳定端到端收益，代码已删除。
-
-### Round 14c: HiGHS column-PRICE nonbasicFlag（否定）
-
-对齐 `HEkk::tableauRowPrice`，曾在 column PRICE 发布 support 后将基本结构列的
-tableau 值置零。Zig 的 CHUZC 已通过 `col_status` 排除这些列；基本 reduced cost
-的中间值不参与选择，并在变量离基时由 `updateDual` 覆盖，因此 40 模型 pivot
-仍与 Round 14 完全一致（aggregate 9365）。把 `col_status` 读流并入最热的 PRICE
-循环反而破坏点积吞吐：8 模型各 31 轮硬件门禁 instructions **+0.08%**、cycles
-**+1.34%**，且 7/8 模型周期回退。该机械移植已删除；后续不在 column PRICE
-内增加与点积无关的状态读流。
-
-## Round 15 perf: sequential CSC PRICE cursor（落地）
-
-column PRICE 改为沿 `col_starts` 保留单一 `begin` 游标，并用位置循环同时读取
-row/coefficient；不再为每列重复读取起点和构造两组切片。每列内非零项访问及浮点
-累加顺序完全不变。ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivot
-lock-exact（aggregate 9365）。8 模型各 31 轮硬件门禁 instructions 约 -0.04%、
-cycles **-0.46%**，6/8 模型周期改善。完整 40 模型墙钟在高系统负载下两轮分别
-+1.89%/-0.17%（总耗时漂移 316→330 ms），故按稳定的硬件周期门禁保留。
-
-### Round 15b: reuse BTRAN ep in FT UPDATE（否定）
-
-对照 HiGHS `unitBtran(packFlag=true) → btranU tight/pack → btranFT → btranL →
-updateFT(ep)`，试图消除 Zig `captureEp` 对 partial BTRAN 的重复计算（shell profile
-约 5%）。最终 `row_ep` 直接传入导致 31/40 模型分歧、aggregate pivots
-`9365→15475`；补 `ep /= leaving basic scale` 后仍有 23 个分歧。进一步在 unit
-hyper-BTRAN 中从 leaving logical suffix 求解并捕获 pre-correction ep，仍得到同一
-23 模型分歧（aggregate 13639），因为当前 intrusive mutable-U 的全 BTRAN 必须从
-logical 0 开始，不能像 HiGHS U/UR reachability 那样跳过前缀。实现已完整删除。
-结论：消除此 5% 重算必须直接替换权威 U/UR 图/顺序，使 BTRAN 的中间 pack 与
-UPDATE correction 原生共享；不能在现有表示上复用最终 row_ep 或缩短求解起点。
-
-### Round 15c: force-inline column PRICE（否定）
-
-ReleaseFast profile 中 `priceStructuralColumns` 保留独立符号，故试验 `inline fn`
-让 ProblemView/CSC/output 跨调用边界传播。40 模型 pivot lock-exact（9365），但
-8 模型各 31 轮硬件门禁 instructions 仅 -0.01%、cycles **+0.22%**，scrs8 与
-scorpion 回退最明显。调用摊销本就可忽略，强制内联只增加 solve-loop 指令体，
-实现已删除。
-
-## Round 16 perf: hyper-sparse ep support statistics（落地 -1.59%）
-
-BTRAN 已发布精确 HVector support，但 `computeDualTableauRow` 原先总是稠密扫描
-整个 `row_ep.values` 来计算 exact-DSE norm 与两种非零计数。现在 support ≤10%
-时直接遍历 producer indices；较密路径仍按自然行序扫描，保持其浮点累加顺序。
-同时合并了两个完全重复的 exact-weight 分支。
-
-ReleaseFast 全测、forced-dual 40/40 PASS，逐模型 pivot lock-exact（aggregate
-9365）。8 模型各 31 轮硬件门禁 instructions **-1.04%**、cycles **-0.94%**；
-完整 40 模型 31 轮交替门禁 solve 中位数之和 `270.411→266.101 ms`
-（**-1.59%**，26 胜 14 负）。该项保留。
+# Simplex 实施看板
+
+更新时间：2026-08-21
+范围：以 serial revised simplex 为当前交付主线；目标不是逐行翻译 C++，而是在相同模型、
+presolve off、串行及相同策略下，得到可验证的状态、目标、证书、残差和稳定性能。
+
+## 1. 当前结论
+
+### 1.1 现在进行到哪一步
+
+```text
+模型/矩阵输入
+    ↓ 已有
+scaling + logical/crash basis
+    ↓ 已有
+SparseLU INVERT + FTRAN/BTRAN + Forrest–Tomlin UPDATE
+    ↓ 已有
+primal/dual Phase I → CHUZR/PRICE/CHUZC/BFRT → pivot commit
+    ↓ 已有
+Phase II → cleanup → optimal/infeasible/unbounded certificate
+    ↓ 当前工作区
+大语料稳定性 + HiGHS 路径差分 + 稀疏热路径性能
+    ↓ 尚未形成产品闭环
+presolve/router/public API 接线，以及 IPM/MIP/QP 等 HiGHS 其余求解器族
+```
+
+结论：**serial simplex 已经是能真实求解 MPS 模型的实现，不是骨架；当前约处于“算法闭环完成，
+正确性和性能收口”阶段。** 不能据此宣称“HiGHS 已重写完成”：multi/task dual、完整 presolve、
+顶层算法路由、IPM、PDLP、QP、MIP 和稳定 C ABI 仍未完成。
+
+### 1.2 已有的真实实现
+
+| 能力 | 主要 Zig 文件 | 当前状态 |
+|---|---|---|
+| basis、缩放、crash、warm start | `basis.zig`, `basis_snapshot.zig`, `engine_setup.zig`, `crash.zig` | 已实现并接入 solve |
+| 稀疏数值线性代数 | `factorization.zig`, `simplex_nla.zig`, `matrix/sparse_lu.zig`, `matrix/sparse_ft.zig` | SparseLU + FT 更新已进入主路径 |
+| primal revised simplex | `engine_primal.zig`, `pricing.zig`, `ratio_test.zig` | Phase I/II 已实现；大语料仍有历史缺陷待重验 |
+| serial dual revised simplex | `engine_dual.zig`, `dual_state.zig`, `dual_phase_one.zig` | Phase I/II、rebuild、cleanup 已形成闭环 |
+| dual iteration 数据流 | `dual_iteration_workspace.zig`, `indexed_vector.zig` | `row_ep/row_ap/col_aq/col_bfrt/col_dse` 已单一所有者化 |
+| dual pricing 与更新 | `engine_dual_candidate.zig`, `engine_dual_edge_weight.zig` | CHUZR、CHUZC、BFRT、DSE/Devex 已接入 |
+| pivot 与最终结果 | `engine_pivot.zig`, `engine_finish.zig`, `solution.zig` | 原子 pivot、残差检查、ray/certificate 已实现 |
+| 可观测性 | `engine_progress.zig`, `bench/simplex/end_to_end_runner.zig` | callback、stats、pivot trace 和 corpus runner 可用 |
+
+静态规模仅用于判断实现不是占位：`src/lp/simplex/` 当前约 13.8k 行，含 97 个具名测试；
+其中 `engine_dual.zig` 约 2.2k 行，`engine_primal.zig` 约 1.2k 行，factorization 约 0.9k 行。
+
+### 1.3 2026-08-20 实测基线
+
+| 门禁 | 本次结果 | 解释 |
+|---|---:|---|
+| `zig build test -Doptimize=ReleaseFast` | 166/166 PASS | 当前工作树通过全量单元/模块测试 |
+| forced-dual 40-model 状态/目标/残差/ray | 40/40 PASS | 包含 DSE sparse support、两级 SIMD clear、automatic PRICE 与 warm Phase-I/certificate rescue |
+| committed pivots | zhighs 8479 / HiGHS 8774 | 约 0.966x；胜/平/负 13/26/1，唯一负例为 `scsd1` 87/86 |
+| patch A/B 完整 pivot trace | 40/40 byte-exact | 保存的改动前 runner 与当前 runner；正式策略专属 lock 仍由 P0.2 补齐 |
+
+同机 36-model 性能门禁（31 轮、3 次预热、2026-08-20）在 SIMD clear 前为 zhighs
+`227.539 ms`、HiGHS `118.909 ms`，即 **1.914x**；SIMD clear 后、column PRICE 为
+`219.369 / 119.727 ms = 1.832x`；当前 automatic PRICE 工作树为
+`201.946 / 118.351 ms = 1.706x`；接通 warm Phase-I fallback 后的独立门禁为
+`190.500 / 126.986 ms = 1.500x`，6/36 模型达到 `<0.98x`。接着 `klein1` certificate rescue 与
+IndexedVector SIMD clear 后，独立门禁为 `165.327 / 118.718 ms = 1.393x`；UPDATE growth support
+优化并修复 CPU pinning 后，当前严格门禁为 **`152.334 / 114.807 ms = 1.327x`**，8/36 达标。
+该门禁跨轮次受系统频率变化影响，
+改动收益以下述同会话、固定 CPU 的 A/B 为准。
+当前仍明显没有达到“性能超过 HiGHS”的项目目标。两次 HiGHS 数据都受下述 dirty reference 限制，
+仅用于本机开发排序，不是可发布 benchmark。
+
+本次 forced-dual 命令口径：
+
+```sh
+ALLOW_HIGHS_VERSION_MISMATCH=1 VERIFY_TRACES=0 \
+PHASE_ONE_STRATEGY=dual \
+DUAL_EDGE_WEIGHT_STRATEGY=steepest-devex \
+DUAL_INITIALIZATION_STRATEGY=highs \
+bench/simplex/run_end_to_end_corpus.sh
+```
+
+注意：以上对比只可作为当前 Zig 回归结果。本地 HiGHS checkout 是
+`dcc25308d890237531422fc4d0e2e8a4740c8608` 且为 dirty，corpus 脚本锁定的却是
+`de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d`。在 P0 完成前，不发布新的正式性能结论。
+
+历史 Stage 7（2026-07-20）记录为 zhighs 90 optimal / 2 numerical failure / 1 timeout，
+HiGHS 为 93 optimal；其中 `pilot87` 是已确认的 zhighs 特有正确性缺陷。该结果时间较早，必须在
+固定参考版本后重跑，不能直接当作当前结果。
+
+## 2. 执行顺序
+
+```text
+P0 固定参考和门禁
+ ├── P1 收口当前 DSE sparse-support 改动
+ └── P2 重跑 93-model，建立当前缺陷清单
+          ├── P3 dual 路径差分：gas11 / klein1
+          └── P4 primal 数值缺陷：pilot87
+                    ↓
+          P5 权威 U/UR + FT 内核（由证据决定是否启动）
+                    ↓
+          P6 simplex 产品化接线与发布门禁
+```
+
+规则：任何优化先过策略专属 trace 和 40-model 正确性；任何数值修复再过 93-model；禁止模型名分支、
+固定迭代号补丁、为了追平 pivot 数而放宽残差或证书阈值。
+
+## 3. 可执行 TODO
+
+### P0 — 固定唯一 HiGHS 参考与可重复门禁（最高优先级）
+
+- [ ] **P0.1 选择并冻结参考提交。** 优先恢复一个干净的
+  `de09bbad9fb7c5d39a1a464a7641bbb5531c6e9d` worktree；若决定升级到 `dcc25308…`，必须在独立
+  clean worktree 重建 CMake Release runner，并一次性更新脚本、文档和 lock 元数据。
+  - 修改：`bench/simplex/run_end_to_end_corpus.sh`, `end_to_end_*.tsv`, `README.md`。
+  - 产物：输出 Zig commit、HiGHS commit、dirty 标记、Zig/C++ 编译参数和模型 hash。
+  - 验收：不设置 `ALLOW_HIGHS_VERSION_MISMATCH` 也能运行；dirty reference 必须立即失败。
+
+- [ ] **P0.2 把 trace lock 按策略分开。** 至少建立 `default` 与
+  `forced-dual+highs-init+steepest-devex` 两套 lock，lock 头记录全部策略参数。
+  - 修改：`run_end_to_end_corpus.sh`, `end_to_end_trace.*.tsv`。
+  - 验收：两种策略各自 40/40 PASS；错误使用另一套 lock 时在运行模型前失败，而不是末尾假阴性。
+
+- [ ] **P0.3 生成机器可读摘要。** corpus gate 结束时输出
+  `status_pass/objective_pass/max_residual/pivots/win-tie-loss`，并保存 TSV；不再人工从日志相加。
+  - 验收：本看板当前的 8479/8774 可由单条命令重现，并与逐模型表求和一致。
+  - 已完成子项：`run_per_model_performance_gate.sh` 现真正执行 `CPU=<id>` pinning，并输出 aggregate
+    time/ratio、总 pivots 和 pass count；当前 36-model 摘要为
+    `152.334 / 114.807 ms = 1.32687x`、`8272 / 8566` pivots、`8/36`。
+
+### P1 — 收口当前 `engine_dual_edge_weight.zig` 未提交改动
+
+当前改动把 DSE recurrence 从整行扫描改成：`col_aq` 为 indexed 时只遍历 producer support，
+`col_dse` 的非零统计也优先读 support。它已通过 ReleaseFast 和 40-model 数值门禁，但尚不能直接落地。
+
+- [x] **P1.1 增加 dense/indexed 等价单测。** 同一 `col_aq/col_dse` 数值分别以 `.dense`、自然序
+  support、乱序 support 表示，断言 edge weights、`aq/tau` density 统计、fallback 决策完全一致。
+  - 文件：`engine_dual_edge_weight.zig`。
+  - 必测边界：空 support、仅 leaving row、低于 `highs_tiny`、精确零、support 超过 clear/reIndex
+    阈值和非有限更新拒绝。
+  - 结果：新增 representation/support-order invariant test；作为独立 test root 执行为 1/1 PASS，
+    并在 `simplex/root.zig` 显式纳入 engine fragment 测试发现。
+
+- [x] **P1.2 锁定 producer contract。** 证明 `ftranForUpdate(col_aq)` 在 `.indexed` 状态下的
+  `activeIndices()` 覆盖 recurrence 所需的所有可能非零；在 `simplex_nla.zig` 测试 FT correction
+  产生的新 support，防止漏更新 edge weight。
+  - 结果：新增 64 阶 sparse identity + FT correction 测试，输入 support 仅 row 0，更新后新增的
+    row 5 数值也必须出现在 published support；直接执行该文件时该测试 PASS。
+
+- [ ] **P1.3 做 HEAD vs patch A/B。** 同一 clean 基线、同一语料、交替执行；先比逐模型 pivot
+  digest，再比 8 个代表模型各 31 轮 `cycles/instructions`，最后比完整 40 模型 solve 中位数之和。
+  - 保留条件：40/40、策略专属 trace lock-exact、逐模型 pivots 不意外漂移，并有稳定硬件工作量收益。
+  - correctness：40/40 的结果字段与结构 pivot digest 均 0 mismatch，HEAD/patch aggregate 都是
+    9360；旧文档的 9365 已确认是陈旧记录。
+  - 40% possible-support 阈值：完整 40 模型、每项 31 轮、固定 CPU、交替顺序，中位数之和
+    `215.434 → 214.565 ms`（**-0.40%**），29 胜 11 负，最坏 `seba +0.91%`。
+  - 负实验：无阈值 sparse loop 为 +1.47%；20% 阈值四模型收益从 -0.61% 降为 -0.29%；10%
+    阈值为 +0.004%，均拒绝。保留与 HiGHS `sparseLoopStyle` 一致的 40% 版本。
+  - 未完成门禁：宿主 `perf_event_paranoid=4`，普通和受控非 sudo `perf` 均无 CAP_PERFMON；
+    `sudo -n` 无缓存凭据。不得把密码写入命令/stdin/脚本，待用户在外部预热 sudo 或调整 sysctl 后
+    补测 31 轮 `cycles,instructions,branches,branch-misses,cache-misses`。
+
+- [x] **P1.4 保留清零语义，替换 SparseLU 的标量 `memset` 热点。** `matrix/memory.zig` 已有显式、
+  目标相关的 volatile SIMD clear；把 `solveForUpdateSparse`、hyper FTRAN scatter 和
+  `solveAdaptive` materialization 的 4 个 dense `f64` clear 改为该 kernel，不改变 support、遍历次序或
+  FT 数值路径。
+  - 因果验证：`shell` Callgrind 从 `167,236,646` 降到 `146,608,500` instructions
+    （**-12.36%**）；此前仅给 runner/core module 设置 `link_libc` 仍调用
+    `compiler_rt.memset`，instructions 基本不变，因此链接方案已撤销。
+  - correctness：40/40 结果签名一致，40/40 完整 stderr pivot trace 与保存的改动前二进制逐字节一致；
+    ReleaseFast 全量测试 PASS。
+  - 性能：固定 CPU、3 次预热、交替顺序、40 模型各 31 轮，中位数之和
+    `215.568 → 203.111 ms`（**-5.78%**），31 胜 9 负；最差 `klein1 +2.81%`。
+    4 个热点模型各 101 轮合计为 `42.0427 → 38.8289 ms`（**-7.51%**）。
+  - 后续门禁：取得 perf 权限后补硬件 counters；若不同 CPU/target 上 aggregate 不再为正，允许按
+    `target_policy` 选择 SIMD clear 或 `@memset`，不得按模型选择。
+
+- [x] **P1.5 将 PRICE 默认策略从强制 column 改为 automatic。** automatic 按 `row_ep` support 和 CSR
+  实际触达量，在一次 PRICE 开始时选择行式或列式 kernel；两种 coefficient inner loop 内均无表示分支。
+  HiGHS 同样根据密度在 `priceByColumn` 与 `priceByRowWithSwitch` 间选择，显式 `column` 仍保留作诊断。
+  - correctness：165/165 tests PASS；forced-dual 40-model 状态、目标、残差、ray 全 PASS。38 个模型与
+    column 的结果/计数相同；`israel 158 → 143`、`lotfi 240 → 238` pivots，目标不变且残差过门禁。
+  - 性能：固定 CPU、3 次预热、交替顺序、40 模型各 31 轮，column/auto 中位数之和
+    `202.705 → 197.115 ms`（**-2.76%**），21 胜 19 负、最差 `sc105 +1.66%`；5 个热点模型各
+    101 轮合计 **-3.15%**，其中 `seba -17.17%`、`shell -3.74%`、`gas11 -1.72%`。
+  - Callgrind：`shell` 从 SIMD-column 的 `146,608,500` 降至 `140,210,390` instructions
+    （再降 **4.36%**）；row/column dispatch 为 421/149。
+
+- [x] **P1.6 将 IndexedVector 的 dense `f64` clear 接入同一个 SIMD kernel。** `init`、packed values、
+  dense `clear` 和 `materializeZeroComplement` 统一经 `clearValues` 分派；非 `f64` 泛型仍使用
+  `@memset`，不改变 indexed support 的所有权和发布顺序。
+  - correctness：165/165 tests PASS；40/40 结果字段及 40/40 完整 stderr pivot trace 与保存的改动前
+    runner 逐字节一致。
+  - Callgrind：`shell` 从 `140,209,274` 降至 `128,042,115` instructions（**-8.68%**）。
+  - 性能：固定 CPU、3 次预热、交替顺序、40 模型各 31 轮，中位数之和
+    `166.976 → 157.672 ms`（**-5.57%**），39 胜 1 负；4 个热点模型各 101 轮合计 **-6.11%**。
+
+- [x] **P1.7 用 `col_aq` producer support 计算 UPDATE growth。** `PivotUpdateView` 可携带 exact
+  `direction_indices`；仅在 dimension ≥128 且 support ≤10% 时做 indexed gather，小维度或较稠密列仍走
+  可向量化的连续 dense scan。
+  - contract：新增 stale NaN/Inf complement 与越界 support 单测；当前 166/166 tests PASS，40/40 结果与
+    完整 pivot trace byte-exact。
+  - 因果：`shell` Callgrind `128,042,115 → 125,718,085`（**-1.82%**）。
+  - 同代码布局严格 A/B：40 模型各 31 轮 `157.233 → 154.808 ms`（**-1.54%**），32 胜 8 负，
+    最坏 `sc50b +0.84%`；`shell -2.65%`、`seba -4.09%`。4 模型各 101 轮合计 **-2.61%**。
+  - 阈值实验：无 dimension gate 时 `klein1 +4.08%`、`adlittle +2.23%`；加入 dimension ≥128 后分别
+    `-0.40%/+0.07%`，因此拒绝无条件 indexed gather。
+
+### P2 — 重建当前 93-model correctness 矩阵
+
+- [ ] **P2.1 用冻结参考重跑 Netlib 93-model。** 分别跑默认策略、forced dual、forced primal，记录
+  status、objective、primal/dual residual、certificate、failure site、iterations 和 timeout。
+  - 文件：`run_stage7_corpus.sh`, `stage7_netlib.lock.tsv`。
+  - 验收：结果写到新的日期化 TSV；`stage7_results.md` 只引用机器产物。
+
+- [ ] **P2.2 将失败分为三类。** `wrong status/certificate`、`numerical_failure`、`timeout`；每个失败
+  保存最后 fresh rebuild snapshot 和末 64 个 pivot，不允许只记模型名。
+
+- [ ] **P2.3 建立发布底线。** 先达到 93/93 与 HiGHS 状态一致、共同 optimal objective 在
+  `1e-7` 相对容差内、published residual/ray 不超过现有 gate，再做全局性能优化。
+
+### P3 — dual 路径剩余差异：先解决额外 fallback，不追逐任意 pivot 相等
+
+当前 40-model 总量已比 HiGHS 少约 295 pivots；这不是“更正确”或“更快”的充分条件，仍需按模型锁定
+状态、证书和生命周期。当前重点回归模型为：
+
+| 模型 | zhighs / HiGHS | 已知现象 | 下一观测点 |
+|---|---:|---|---|
+| `gas11` | 593 / 699 | 已消除 cold fallback；Zig 现少 106 pivots | 锁定 dual→warm-primal 生命周期与 unbounded ray |
+| `klein1` | 134 / 134 | raw ray 仅因绝对尺度触发 infinite-column tail；严格失败后归一化 rescue 已消除 299-pivot cold Phase-I | 锁定 raw-first 证书语义，禁止对已有效 ray 做无条件缩放 |
+| `scsd1` | 87 / 86 | 仅差 1 pivot | 只做回归样本，不为它写特例 |
+| `etamacro` | 526 / 532 | Zig 已少 6 pivots | 保持为 phase transition/cleanup 正向门禁 |
+| `israel` | 143 / 146 | automatic row PRICE 比 column 少 15 pivots，且已少于 HiGHS | 锁作 automatic PRICE 正向门禁 |
+
+- [ ] **P3.1 为 HiGHS runner 加同构 trace。** 每 pivot 输出 phase、enter/leave、row、alpha、theta、
+  update count、DSE updated/computed weight、rebuild reason、dual objective；浮点同时输出 hex bits。
+- [ ] **P3.2 自动找首次分叉。** 新增脚本对两个 trace 做 longest-common-prefix，并把分叉归属到
+  CHUZR、PRICE、CHUZC、FTRAN、UPDATE 或 phase transition；输出可直接贴进 issue 的最小报告。
+- [ ] **P3.3 只修首次分叉所属模块。** `gas11` 和 `klein1` 的已知 fallback 已收口；后续新差异仍按
+  trace 首次分叉选择模块，不在 cleanup 中增加补偿分支或模型特例。
+
+- [x] **P3.4 接通 dual Phase-I 退出后的 warm primal Phase-I。** 本地 HiGHS 开发日志证明 `gas11`
+  在 dual Phase-I iteration 484 清除 cost perturbation 后仍有 2 个 Phase-I dual infeasibilities，随后
+  保留 basis 进入 primal cleanup；zhighs 此前在相同诊断（2 个、max `1.069e-5`）处返回
+  `not_implemented`，外层丢弃 483 个 pivots 并从 logical basis 冷启动。
+  - 修改：`engine_dual.zig` 在恢复原始 bounds、确认 basis 同时 primal/dual infeasible 后调用已有但未
+    接线的 `solveWarmPhaseOne`；成功后直接进入 primal Phase II，失败仍保留原 cold fallback。
+  - `gas11`：`1157 → 593` pivots（HiGHS 699），warm primal Phase-I 80 pivots；状态仍 unbounded，
+    improving ray residual `9.85e-14`。forced-dual 40-model certificate gate PASS，165/165 tests PASS。
+  - 严格 A/B：保存的改动前二进制 vs 当前、固定 CPU、3 次预热、交替顺序、40 模型各 31 轮，
+    中位数总和 `212.926 → 168.702 ms`（**-20.77%**），39 胜 1 负；`gas11 -69.54%`。
+  - 参考一致性：HiGHS 日志为 `DuPh1 485; PrPh1 97; PrPh2 109; PrSwap 88; Total 691`，随后验证
+    cleanup 到 699；Zig 不要求逐阶段 pivot 相等，但必须保留证书和 warm-basis 生命周期。
+
+- [x] **P3.5 以 raw-first、normalized-rescue 修正 `klein1` 的 full-dual Farkas 验证。** 临时
+  `Highs::getDualRay` 诊断证明 Zig pivotal-row ray 与 HiGHS 几乎逐分量一致（例如 row 0
+  `217.052134376 / 217.052134686`，row 50 `669251.273741 / 669251.274701`）；失败来自最大值约
+  `6.69e5` 时累计的绝对舍入尾，而不是 ray 来源、符号或约束语义错误。
+  - 实现：先用原始 ray 运行严格 validator；仅在失败原因是 `infinite_column_bound` 时重建 pivotal ray，
+    且只向下归一化到 max 1 后重试。不会放大小 ray，也不会掩盖其他 certificate failure。
+  - 负实验：无条件归一化虽修好 `klein1`，却令 `refinery 361 → 1369` pivots，因此撤销；当前
+    raw-first 设计保持 `refinery 361`。
+  - 回归：新增 `1e12` scale-invariance validator 用例；165/165 tests 与 40-model certificate gate PASS。
+    `klein1 434 → 134`，primal Phase-I `299 → 0`，与 HiGHS 同为 134 pivots。
+  - 严格 A/B：40 模型各 31 轮 `169.613 → 166.568 ms`（**-1.79%**），`klein1 -62.91%`。
+
+### P4 — primal simplex 正确性收口
+
+- [ ] **P4.1 首先复现 `pilot87`。** 固定 forced-primal、presolve off、60 s/迭代双限制，锁定
+  `direction_column` 或 `optimality_check` 的实际 failure site；若当前版本已通过，则把模型加入回归。
+- [ ] **P4.2 保存失败前数值证据。** pivotal column residual、row/column alpha、condition estimate、
+  FT update count 和 fresh-factorization 重试结果必须进入 trace。
+- [ ] **P4.3 修复后跑三层门禁。** 最小回归模型 → 40-model 三策略 → 93-model forced primal；不能只让
+  `pilot87` 返回 optimal 而不验证 KKT。
+
+### P5 — 直接替换 mutable U/UR 权威表示（下一性能主线）
+
+现在已有足够证据启动本阶段：`shell` 的 FT UPDATE self cost 为 12.14M instructions，BTRAN 中
+`solveUpperTranspose` 单独约 9.03M inclusive；多个“在 intrusive 表示外围再加 support/heap/marker”的
+实验都降低不了真实时间。本地 HiGHS `HFactor::updateFT` 的生产表示不是逐 entry 双向链，而是连续 U
+列加带余量的 UR 行 slab。
+
+- [x] **P5.1 写清 HiGHS 对照 contract。** 本地源码位置：`highs/util/HFactor.h` 和
+  `HFactor.cpp:updateFT`。
+  - U：`u_start/u_last_p/u_index/u_value` 为 append-only 连续列；旧 logical pivot 标 `-1`，新 pivotal
+    column 追加到尾部，`u_pivot_lookup/index/value` 保持 stable row ↔ logical position。
+  - UR：`ur_start/ur_lastp/ur_space/ur_index/ur_value` 为每行连续 slab；空间用尽时按
+    `row_count * 1.1 + 5` 搬到尾部。删除 reciprocal entry 用 swap-with-last，不维持 row 内排序。
+  - UPDATE：先从所有 U 列删除 pivotal row，再从所有 UR 行删除 pivotal column；随后按 Aq pack 顺序
+    追加新 U 列并写回 UR；FT correction 仍按 Ep pack 顺序追加，pivot 更新为 `old_pivot * alpha`。
+  - FTRAN/BTRAN：分别顺序遍历 U column segment / UR row segment；logical holes 跳过，浮点遍历顺序由
+    segment 内存顺序决定。
+
+- [x] **P5.2 先实现 test-only packed FT oracle。** `src/matrix/sparse_ft_packed.zig` 已实现
+  `reset/prepareFtran/solveUpper/solveUpperTranspose/captureEp/update`，U 为连续列、UR 为带余量行 slab。
+  固定 4 次 replacement 和确定性随机 32 次 replacement 均与 intrusive oracle 逐位一致；`validate`
+  同时检查 U→UR、UR→U reciprocal entry 唯一性。首次差分曾发现 reset 借用 `work` 计数后未清零，
+  已改为复用未发布的 `row_space` 元数据计数并由测试锁定。
+  原验收要求：只接 `reset/solveUpper/solveUpperTranspose/update`
+  四个接口；用固定和随机 replacement 序列逐次对比当前 intrusive 实现的向量、pivot lookup、U/UR
+  reciprocal invariants。测试阶段允许两份表示，production solve 禁止双写。
+
+- [x] **P5.3 切换 production 权威表示。** 纯 packed 版本已实际接入并验证，不是 shadow/double-write；
+  FTRAN、BTRAN、`captureEp`、UPDATE 全部只读写 packed streams。严格数据证明小维度 dense FT 不适合该
+  表示，因此 production 已改为 tagged-union adaptive backend：`n < 128` 用 linked，`n >= 128` 用 packed，
+  任一时刻只存活并更新一个后端，仍禁止每 pivot shadow synchronization。
+  - 新文件：`src/matrix/sparse_ft_adaptive.zig`；`SparseLU` 当前源码已导入它，并把测试改为
+    `updateCount()` accessor。
+  - 验证：`sparse_ft_adaptive.zig` 单测、linked/packed differential、ReleaseFast 全测、runner build
+    和 forced-dual 40-model correctness 均通过；40 模型逐模型 committed pivots 与 linked 基线一致。
+  - 修正：linked FT 的 producer-order 单测不再使用会被新 pivotal column 精确消掉的全 1 spike，避免
+    测试期待不存在的 support。
+
+- [ ] **P5.4 门禁与删除旧路径。** 先要求 randomized differential 及 40/40 byte-exact；再测
+  `shell/seba/scagr25` 101 轮和完整 40 模型 31 轮。保留条件：aggregate 至少 -3%、热点三模型无
+  >1% 稳定回退、
+  `requested_bytes` 不超过当前 1.5x；随后跑 93-model 并删除旧 production 路径。
+  - 已过门禁：linked 基线 vs adaptive、CPU 2、交替顺序。4 热点模型各 101 轮为
+    `46.362 → 45.366 ms`（**-2.15%**），`shell -2.31%`、`scagr25 -5.86%`、`gas11 -0.39%`、
+    `seba +1.34%`。完整 40 模型各 31 轮为 `157.789 → 151.481 ms`（**-4.00%**），32 胜 8 负，
+    最坏 `klein1 +3.01%`；迭代数逐模型一致。
+  - 内存：40 模型 stats 的 `requested_bytes` 合计 `20.479M → 20.003M`（0.977x），最坏
+    `etamacro 1.006x`，低于 1.5x；peak RSS 基本不变。
+  - 剩余：跑 93-model correctness；linked 后端作为 small-dimension backend 仍是 production 的一部分，
+    后续只能删除旧的公开绕行入口，不能删除 adaptive 需要的小维度实现。
+
+#### P5 暂停检查点（2026-08-21）
+
+已完成且有可复现证据：
+
+- 纯 packed production 在每个实验版本上均通过 40/40 结果字段和完整 pivot trace byte-exact；adaptive
+  wrapper 加入后已重跑 `sparse_ft_adaptive.zig` 单测、ReleaseFast 全测、runner build 和 40-model
+  correctness，均通过。
+- 初版 UPDATE 对 `captured_aq` 做三次全维扫描：4 热点模型各 101 轮为 **+3.72%**，`shell` Callgrind
+  `125.72M → 130.97M` instructions，否决该实现。
+- 把“筛选新列、计算 UR relocation、预写未发布列”融合为一次 dense scan 后，`shell` 降到
+  `125.49M` instructions，但 4 模型仍约 **+3.84%**。cache simulation 给出根因：D1 misses
+  `2,094,190 → 2,188,081`（+4.48%），I1 misses `50,743 → 59,678`（+17.60%），LLd 基本不变。
+- 当 abandoned U entries 超过 live entries 的 50% 时原地压缩连续列，完整 40 模型、31 轮、3 次预热、
+  CPU 2、交替顺序为 **`154.447 → 149.904 ms`（-2.94%）**，29 胜 11 负；`agg -9.42%`、
+  `brandy -9.51%`、`israel -8.37%`，但最坏 `klein1 +5.39%`，尚未满足 P5.4 尾部门禁。
+- 阈值负实验：25% 在 4 模型 101 轮仅 -0.05%，100% 为 +0.05%；50% 为 -0.72%，因此保留 50%。
+  给压缩加 dimension ≥128 gate 和 `noinline` 后，4 模型仍为 -0.77%，`klein1 +4.72%`；组件计时显示
+  packed 使该 55 阶模型的 FTRAN 约慢 13%，故下一步采用维度自适应而非继续调压缩阈值。
+- 尚未跑：93-model correctness，以及当前 zhighs/HiGHS 36-model 比率。adaptive 40-model A/B 与
+  `requested_bytes` 1.5x 门禁已通过，纯 packed 的 -2.94% 不再作为保留结论。
+
+恢复工作的第一组命令：
+
+```sh
+zig fmt --check src/matrix/sparse_ft_adaptive.zig src/matrix/sparse_ft_packed.zig src/matrix/sparse_lu.zig
+zig test src/matrix/sparse_ft_adaptive.zig -OReleaseSafe
+zig build test -Doptimize=ReleaseFast
+zig build build-simplex-end-to-end -Doptimize=ReleaseFast
+bash /tmp/zhighs-ft-correctness.sh
+CPU=2 RUNS=101 WARMUPS=5 bash /tmp/zhighs-linklibc-ab.sh
+CPU=2 RUNS=31 WARMUPS=3 bash /tmp/zhighs-full-ab.sh
+```
+
+其中 `/tmp/zhighs-btran-support-baseline` 是 retained linked-FT 基线；临时脚本和二进制可能在重启后消失，
+若不存在，应先从当前记录重建等价 baseline，不能拿 stale `zig-out` 代替。
+
+2026-08-20 SIMD clear 前的 instrumentation 画像（31 轮中位数，stats 运行本身含计时开销）：
+
+| model | total ms | FTRAN | BTRAN | PRICE | UPDATE | rebuild |
+|---|---:|---:|---:|---:|---:|---:|
+| `shell` | 15.475 | 4.016 | 2.114 | 2.275 | 1.588 | 0.395 |
+| `seba` | 8.577 | 1.776 | 1.145 | 1.715 | 1.012 | 0.382 |
+| `scagr25` | 16.734 | 4.960 | 3.349 | 0.854 | 1.778 | 1.307 |
+| `gas11` | 55.394 | 8.434 | 8.415 | 13.659 | 2.805 | 17.008 |
+
+SIMD clear + automatic PRICE + IndexedVector clear 后，`shell` 整体 Callgrind 为 128.04M instructions；
+当前最大 self hotspot 是 FT UPDATE 路径的 `applyForrestTomlinUpdate`，约 12.14M（9.48%）。行级审计
+显示 `captureEp` 的逻辑后缀三角遍历是必要工作，但它把精确零也记录进 `ep_touched`，导致后续 clear
+和 correction support 二次遍历。
+
+2026-08-20 已完成两个 sparse-`ep_touched` 负实验，均不保留：分支版把 `shell` Callgrind
+`128.04M → 125.07M`（-2.32%），但 40 模型 31 轮实际时间 **+0.94%**（8 胜/32 负）；无分支计数版
+Callgrind 为 `125.70M`（-1.83%），实际时间 **+1.71%**（3 胜/37 负）。这说明当前 CPU 上新增的
+逐逻辑 pivot 数据依赖/比较比省掉后续 support 访问更贵。后续 FT 优化应优先减少三角遍历本身，或让
+FTRAN producer 直接发布 `captured_aq` support；不能仅凭 Callgrind 指令下降保留改动。
+
+同日也否决了 sparse `captured_aq` 镜像：直接使用 factor-order support 会令 `agg` trace 分叉；升序排序
+虽恢复 40/40 byte-exact，却使 `shell` Callgrind **+0.13%**、4 模型 101 轮 **+6.25%**。排序/marker
+成本超过省下的 memcpy 与 dense scan，因此实现已完整撤销。
+
+另外三项布局/遍历负实验也已撤销：BTRAN output support + pivot-order sort 虽 byte-exact、Callgrind
+`-0.54%`，但 4 模型 **+2.31%**（`shell +3.94%`）；max-heap sparse upper byte-exact，却令 Callgrind
+`+1.55%`、4 模型 **+10.47%**（`seba +25.42%`）；新列优先 high-water 连续分配仅 **+0.11%** 且增加
+链内存占用。这些结果共同否定“给 intrusive pool 继续叠索引”的方向。
+
+### P6 — simplex 产品闭环
+
+- [ ] **P6.1 接通 solver → presolve → simplex → postsolve。** 当前 `solver.solveLp` 直接调用 simplex；
+  `presolve.zig` 已有 fixed-column reduction，但尚未进入统一 solve pipeline。
+- [ ] **P6.2 公开稳定结果语义。** 对 optimal/infeasible/unbounded/limit/numerical failure，统一 basis、
+  primal/dual、reduced cost、ray、iteration 与 callback 生命周期。
+- [ ] **P6.3 补齐 basis/solution I/O 和 warm reoptimization corpus。** 除一次 cold solve 外，验证导出 basis、
+  导入 basis、修改 bounds/cost 后 reoptimize 与 HiGHS 状态/目标一致。
+- [ ] **P6.4 明确非目标。** serial simplex 发布不等待 multi/task dual、IPM、PDLP、QP、MIP；这些进入
+  项目级 roadmap，不能继续塞进 simplex engine。
+
+## 4. 每次提交的 Definition of Done
+
+```sh
+zig fmt --check src build.zig
+zig build test -Doptimize=ReleaseFast
+git diff --check
+```
+
+算法或数值路径改动还必须满足：
+
+1. 最小语义测试覆盖本次 contract，而不是只靠 corpus 碰巧经过；
+2. default 与 forced-dual 各使用自己的 trace lock；
+3. 40-model 状态、目标、残差和 ray 全通过；
+4. 可能影响鲁棒性的改动再过 93-model；
+5. 性能提交记录同会话交替 A/B 的 commit、命令、样本数、median、cycles、instructions；
+6. 负实验删除实现，只在简短实验日志中保留假设、数据和拒绝原因。
+
+## 5. 下一次动手顺序
+
+- [ ] 先做 P0.1/P0.2，消除参考版本和 trace 策略混用。
+- [ ] 取得 perf 权限后补完 P1.3 硬件 counters；DSE 40% 阈值、SparseLU SIMD clear 与 automatic
+  PRICE、IndexedVector SIMD clear 暂保留；不使用或记录用户密码。
+- [ ] 跑 P2.1 得到当前 93-model 真相；若仍有错误状态/数值失败，暂停全局 perf。
+- [ ] correctness 达标后推进 P4 的 primal `pilot87`；P3 的 `gas11`/`klein1` fallback 已收口。
+- [ ] 从“P5 暂停检查点”恢复：先让 `sparse_ft_adaptive.zig` 编译并通过边界切换测试，再跑全测和
+  40/40 byte-exact；失败时先修 wrapper，不要用磁盘上 stale 的纯 packed runner 做结论。
+- [ ] adaptive 正确后先跑 4 模型 101 轮；只有 `klein1/adlittle` 回归显著收窄且 aggregate 为正，才跑
+  完整 40 模型和 HiGHS gate。若 tagged-union dispatch 抵消收益，则撤销 adaptive wrapper并重新设计
+  backend selection，不保留未过门禁的 production 切换。
+
+完成上述五步后的可验收结果不是“又写了一批代码”，而是：参考可复现、两套策略门禁无假阴性、
+当前 DSE 优化有明确结论、93-model 缺陷清单可归零，并且每个剩余迭代差距都能定位到首次分叉模块。

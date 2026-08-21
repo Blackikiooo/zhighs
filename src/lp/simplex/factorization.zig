@@ -98,6 +98,10 @@ pub const PivotUpdateView = struct {
     entering_col: u32,
     /// Updated tableau column `B^-1 a_entering`.
     direction: []const f64,
+    /// Exact producer-owned support for `direction`, when it is still in
+    /// HVector indexed form. Entries outside this support are logical zeros
+    /// and need not participate in update-growth diagnostics.
+    direction_indices: ?[]const u32 = null,
     /// Converts a signed movement direction back to the actual entering
     /// basis column. Primal simplex uses -1 when entering from an upper bound.
     column_scale: f64 = 1.0,
@@ -587,12 +591,11 @@ pub const Factorization = struct {
         const pivot_row: usize = @intCast(update_view.leaving_row);
         if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
         const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
-        // Scan the direction vector for the largest magnitude; non-finite
-        // entries propagate through `max` (NaN or infinity) and are rejected
-        // once after the loop, removing the per-entry branch.
-        var maximum_magnitude: f64 = 0.0;
-        for (update_view.direction) |value|
-            maximum_magnitude = @max(maximum_magnitude, @abs(value * update_view.column_scale));
+        const maximum_magnitude = try maximumDirectionMagnitude(
+            update_view.direction,
+            update_view.direction_indices,
+            update_view.column_scale,
+        );
         if (!std.math.isFinite(maximum_magnitude)) return error.NumericalFailure;
         if (pivot_magnitude <= self.dense_lu.pivot_tolerance)
             return error.Singular;
@@ -800,8 +803,37 @@ pub const Factorization = struct {
     }
 };
 
+/// Compute the update-growth numerator from either a dense vector or its
+/// producer-owned exact support. Non-finite values propagate through `max`
+/// and are rejected once after the loop.
+fn maximumDirectionMagnitude(direction: []const f64, indices: ?[]const u32, column_scale: f64) FactorizationError!f64 {
+    var maximum_magnitude: f64 = 0.0;
+    if (indices) |support| {
+        for (support) |index| {
+            if (index >= direction.len) return error.DimensionMismatch;
+            maximum_magnitude = @max(maximum_magnitude, @abs(direction[index] * column_scale));
+        }
+    } else {
+        for (direction) |value|
+            maximum_magnitude = @max(maximum_magnitude, @abs(value * column_scale));
+    }
+    return maximum_magnitude;
+}
+
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "update growth uses indexed direction support" {
+    const direction = [_]f64{ 2, std.math.nan(f64), -5, std.math.inf(f64) };
+    try std.testing.expectEqual(
+        @as(f64, 10),
+        try maximumDirectionMagnitude(&direction, &.{ 0, 2 }, -2),
+    );
+    try std.testing.expectError(
+        error.DimensionMismatch,
+        maximumDirectionMagnitude(&direction, &.{4}, 1),
+    );
 }
 
 test "eta update applies FTRAN and BTRAN without refactorization" {

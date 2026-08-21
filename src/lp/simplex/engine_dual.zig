@@ -654,10 +654,33 @@ pub fn buildAndValidateInfeasibilityRay(
         return false;
     }
     const move_out: f64 = if (leaving.bound == .at_lower) -1.0 else 1.0;
-    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale) |*ray_value, scaled_ep, row_scale| {
+    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale) |*ray_value, scaled_ep, row_scale|
         ray_value.* = move_out * scaled_ep * row_scale;
+    if (self.validateInfeasibilityRay(problem, true)) return true;
+    if (self.infeasibility_certificate_failure != .infinite_column_bound) return false;
+    // Retry a scale-invariant form only after the strict raw certificate has
+    // failed. Validation may zero incompatible row components, so rebuild the
+    // original pivotal ray before normalizing it.
+    for (basis.infeasibility_ray, iteration.row_ep.values, basis.row_scale) |*ray_value, scaled_ep, row_scale|
+        ray_value.* = move_out * scaled_ep * row_scale;
+    if (!normalizeInfeasibilityRay(basis.infeasibility_ray, self.numerical.zero_tolerance)) {
+        self.infeasibility_certificate_failure = .nonfinite_ray;
+        return false;
     }
     return self.validateInfeasibilityRay(problem, true);
+}
+
+fn normalizeInfeasibilityRay(ray: []f64, zero_tolerance: f64) bool {
+    var scale: f64 = 0.0;
+    for (ray) |value| {
+        if (!std.math.isFinite(value)) return false;
+        scale = @max(scale, @abs(value));
+    }
+    if (scale <= zero_tolerance) return false;
+    if (scale > 1.0) {
+        for (ray) |*value| value.* /= scale;
+    }
+    return true;
 }
 
 /// Full-dual-vector Farkas ray attempt: the row duals at a dual-feasible,
@@ -701,6 +724,20 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
     self.infeasibility_certificate_failure = .none;
     self.infeasibility_certificate_infinite_row_mass = 0.0;
     self.infeasibility_certificate_infinite_column_mass = 0.0;
+    // Check the raw scale here; callers may retry a normalized ray after a
+    // strict infinite-bound compatibility failure.
+    var ray_scale: f64 = 0.0;
+    for (basis.infeasibility_ray) |value| {
+        if (!std.math.isFinite(value)) {
+            self.infeasibility_certificate_failure = .nonfinite_ray;
+            return false;
+        }
+        ray_scale = @max(ray_scale, @abs(value));
+    }
+    if (ray_scale <= self.numerical.zero_tolerance) {
+        self.infeasibility_certificate_failure = .zero_ray;
+        return false;
+    }
     // `residual_work` is dead after the fresh BTRAN at this decision point.
     // Reuse it allocation-free to measure each ray component in the same
     // relative form as HiGHS: |y_i| * max_j |A_ij|.
@@ -714,7 +751,6 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
         }
     }
     var proof_lower: f64 = 0.0;
-    var ray_max: f64 = 0.0;
     for (basis.infeasibility_ray, basis.residual_work, problem.row_lower, problem.row_upper) |
         *ray_value,
         row_max,
@@ -722,10 +758,6 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
         upper,
     | {
         var value = ray_value.*;
-        if (!std.math.isFinite(value)) {
-            self.infeasibility_certificate_failure = .nonfinite_ray;
-            return false;
-        }
         const relative_contribution = @abs(value) * row_max;
         // Match the model's canonical coefficient floor before validating the
         // proof. Any remaining ray is still re-evaluated against the original
@@ -755,11 +787,6 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
             }
         }
         ray_value.* = value;
-        ray_max = @max(ray_max, @abs(value));
-    }
-    if (ray_max <= self.numerical.zero_tolerance) {
-        self.infeasibility_certificate_failure = .zero_ray;
-        return false;
     }
     if (!std.math.isFinite(proof_lower)) {
         self.infeasibility_certificate_failure = .nonfinite_proof;
@@ -1170,6 +1197,15 @@ pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
         self.pricing.rule = saved_pricing_rule;
         return self.solvePrimal(problem, control);
     }
+    // HiGHS preserves the Phase-I exit basis when the unperturbed dual
+    // objective proves only "unbounded or infeasible".  Its primal cleanup
+    // then establishes primal feasibility from that retained basis before
+    // Phase II.  Falling through to solveProblem's cold fallback discards all
+    // useful dual Phase-I pivots (gas11: 483) and repeats the work from the
+    // logical basis.
+    self.pricing.rule = saved_pricing_rule;
+    const warm_status = self.solveWarmPhaseOne(problem, control);
+    if (warm_status == .optimal) return self.solvePrimal(problem, control);
     return .not_implemented;
 }
 
@@ -2164,6 +2200,14 @@ test "Farkas validation ignores only sub-floor infinite-bound column mass" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
+    try std.testing.expect(engine.buildAndValidateInfeasibilityRay(accepted_problem, leaving));
+    try std.testing.expectApproxEqAbs(@as(f64, 5e-10), engine.infeasibility_certificate_infinite_column_mass, 1e-20);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), engine.infeasibility_certificate_gap, 1e-12);
+
+    // Certificate acceptance is scale invariant: normalization must reduce
+    // both the proof and the harmless infinite-bound residual consistently.
+    engine.infeasibility_ray_valid = false;
+    engine.dual_iteration.?.row_ep.values[0] = 1e12;
     try std.testing.expect(engine.buildAndValidateInfeasibilityRay(accepted_problem, leaving));
     try std.testing.expectApproxEqAbs(@as(f64, 5e-10), engine.infeasibility_certificate_infinite_column_mass, 1e-20);
     try std.testing.expectApproxEqAbs(@as(f64, 1), engine.infeasibility_certificate_gap, 1e-12);
