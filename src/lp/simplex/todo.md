@@ -236,6 +236,10 @@ P0 固定参考和门禁
   - 阈值实验：33% 为 `140.106 → 139.443 ms`（**-0.47%**），但 `blend 109 → 111` 且最坏
     `blend +1.66%`；50% 为 `140.088 → 139.056 ms`（**-0.74%**），同样 `blend 109 → 111` 且最坏
     `blend +1.77%`。为降低路径漂移和尾部风险，保留 25%，拒绝 33%/50%。
+  - 负实验：BFRT FTRAN 后若 `col_bfrt` 仍为 indexed，则只按 support 检查 finite、更新
+    `basic_value/primal` 和发布 changed rows。40-model correctness 仍 PASS，但 `sc105 119 → 121`，
+    A/B 为 `140.119 → 139.573 ms`（**-0.39%**）且热点退化：`sc105 +2.36%`、`seba +1.43%`、
+    `shell +0.42%`。FTRAN support order 改变 RHS infeasibility list 生命周期，尾部风险超过收益，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
