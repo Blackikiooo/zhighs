@@ -207,6 +207,13 @@ P0 固定参考和门禁
   status、objective、primal/dual residual、certificate、failure site、iterations 和 timeout。
   - 文件：`run_stage7_corpus.sh`, `stage7_netlib.lock.tsv`。
   - 验收：结果写到新的日期化 TSV；`stage7_results.md` 只引用机器产物。
+  - 2026-08-21 当前机器只找到 30/93 个锁定 MPS（`scipoptsuite/soplex/check/instances`），hash 全部匹配；
+    其余 63 个（含 `pilot87/dfl001/tuff`）本地不可见，完整 93 门禁暂被数据集缺失阻塞。
+  - 30-model forced-dual 子集：zhighs **30/30 optimal**，HiGHS **30/30 optimal**；目标 30/30 在
+    `1e-7` 相对容差内匹配；committed pivots `7109 / 7241`，最大残差 `1.54e-9 / 3.73e-9`。
+  - 同一 30-model 子集用 Stage7 脚本默认 `primal logical legacy` 路径时，zhighs 为
+    **5 optimal / 25 numerical_failure**，HiGHS 为 **30 optimal**；这属于 P4 primal 数值收口，不归因于
+    adaptive FT forced-dual 路径。
 
 - [ ] **P2.2 将失败分为三类。** `wrong status/certificate`、`numerical_failure`、`timeout`；每个失败
   保存最后 fresh rebuild snapshot 和末 64 个 pivot，不允许只记模型名。
@@ -316,8 +323,8 @@ P0 固定参考和门禁
     最坏 `klein1 +3.01%`；迭代数逐模型一致。
   - 内存：40 模型 stats 的 `requested_bytes` 合计 `20.479M → 20.003M`（0.977x），最坏
     `etamacro 1.006x`，低于 1.5x；peak RSS 基本不变。
-  - 剩余：跑 93-model correctness；linked 后端作为 small-dimension backend 仍是 production 的一部分，
-    后续只能删除旧的公开绕行入口，不能删除 adaptive 需要的小维度实现。
+  - 剩余：补齐缺失 Netlib MPS 后跑完整 93-model correctness；linked 后端作为 small-dimension backend
+    仍是 production 的一部分，后续只能删除旧的公开绕行入口，不能删除 adaptive 需要的小维度实现。
 
 #### P5 暂停检查点（2026-08-21）
 
@@ -337,8 +344,9 @@ P0 固定参考和门禁
 - 阈值负实验：25% 在 4 模型 101 轮仅 -0.05%，100% 为 +0.05%；50% 为 -0.72%，因此保留 50%。
   给压缩加 dimension ≥128 gate 和 `noinline` 后，4 模型仍为 -0.77%，`klein1 +4.72%`；组件计时显示
   packed 使该 55 阶模型的 FTRAN 约慢 13%，故下一步采用维度自适应而非继续调压缩阈值。
-- 尚未跑：93-model correctness，以及当前 zhighs/HiGHS 36-model 比率。adaptive 40-model A/B 与
-  `requested_bytes` 1.5x 门禁已通过，纯 packed 的 -2.94% 不再作为保留结论。
+- 尚未跑：完整 93-model correctness（当前缺 63 个锁定 MPS），以及当前 zhighs/HiGHS 36-model 比率。
+  adaptive 40-model A/B、30-model forced-dual Stage7 子集和 `requested_bytes` 1.5x 门禁已通过，纯 packed
+  的 -2.94% 不再作为保留结论。
 
 恢复工作的第一组命令：
 
