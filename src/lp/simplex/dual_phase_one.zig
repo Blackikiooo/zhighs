@@ -310,10 +310,14 @@ pub const DualPhaseOneWorkspace = struct {
         return violation * violation;
     }
 
+    const sparse_list_dense_denominator: usize = 4;
+
     /// Rebuild `HEkkDualRHS::work_infeasibility/workIndex/workMark` in row
-    /// order. The hyper-sparse cutoff is intentionally left at zero until its
-    /// >500-candidate selection workspace is migrated; dense-vs-sparse mode
-    /// and the 20% boundary are exact for the serial corpus path.
+    /// order. The hyper-sparse cutoff matches HiGHS; zhighs keeps the
+    /// sparse list active until 25% density before switching to the dense
+    /// row scan, since this SoA workspace has lower sparse-list iteration
+    /// overhead while preserving the same candidate scoring and rebuild
+    /// semantics.
     pub fn createPrimalInfeasibilityList(
         self: *DualPhaseOneWorkspace,
         basis: *const basis_module.BasisState,
@@ -390,7 +394,7 @@ pub const DualPhaseOneWorkspace = struct {
                 }
             }
         }
-        if (self.rhs.infeasibility_count * 5 > num_rows) self.rhs.infeasibility_dense = true;
+        if (self.rhs.infeasibility_count * sparse_list_dense_denominator > num_rows) self.rhs.infeasibility_dense = true;
         self.rhs.infeasibility_list_active = true;
         return true;
     }

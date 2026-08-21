@@ -223,6 +223,20 @@ P0 固定参考和门禁
     correctness 和 pivots 不变，但 4 热点模型各 101 轮为 `41.697 → 42.631 ms`（**+2.24%**），
     `seba +4.96%`、`shell +2.74%`。代码膨胀/指令局部性损失超过分发开销，因此实现已撤销。
 
+- [x] **P1.9 将 dual Phase-I RHS sparse-list dense 边界从 20% 放宽到 25%。** HiGHS 在
+  `HEkkDualRHS` 中超过 20% infeasible rows 时切到 dense scan；Zig 当前 SoA sparse-list 遍历更轻，
+  保留到 25% 能减少 CHUZR 全行扫描，同时不改变候选 merit、cutoff 和 rebuild 语义。
+  - correctness：ReleaseFast 全测 PASS；forced-dual 40-model corpus PASS。仅 `share2b` pivot
+    `104 → 99`，目标和残差通过；40-model 总 pivots `8272 → 8267`。
+  - A/B：support-aware 基线 vs 25% 边界、CPU 2、auto PRICE、40 模型各 31 轮、3 次预热、交替顺序，
+    中位数总和 `140.283 → 139.910 ms`（**-0.27%**），33 胜 3 负，最坏 `grow7 +0.23%`；
+    `share2b -4.19%`、`seba -0.98%`、`scfxm1 -0.43%`。
+  - 当前 zhighs/HiGHS 36-model gate（auto PRICE）：aggregate `141.067 / 115.237 ms = 1.224x`，
+    **11/36 PASS**，committed pivots `8267 / 8566`。
+  - 阈值实验：33% 为 `140.106 → 139.443 ms`（**-0.47%**），但 `blend 109 → 111` 且最坏
+    `blend +1.66%`；50% 为 `140.088 → 139.056 ms`（**-0.74%**），同样 `blend 109 → 111` 且最坏
+    `blend +1.77%`。为降低路径漂移和尾部风险，保留 25%，拒绝 33%/50%。
+
 ### P2 — 重建当前 93-model correctness 矩阵
 
 - [ ] **P2.1 用冻结参考重跑 Netlib 93-model。** 分别跑默认策略、forced dual、forced primal，记录
