@@ -215,6 +215,10 @@ P0 固定参考和门禁
     touched 列，保持 40-model correctness 和 pivots 不变，但完整 40 模型各 31 轮为
     `143.247 → 159.712 ms`（**+11.49%**），1 胜 39 负；`shell +29.49%`、`scrs8 +25.17%`。
     mark/sort 和额外写流成本明显超过省下的自然顺序 dense scan，因此实现已撤销。
+  - 负实验：在 `RatioTest.chooseDualEntering` 中对 ≤8 个 CHUZC candidates 使用手写 insertion sort，并跳过
+    0/1 个 BFRT flip 的通用 sort，保持 40-model correctness 和 pivots 不变。4 热点模型各 101 轮为
+    `41.466 → 41.391 ms`（**-0.18%**），但完整 40 模型各 31 轮仅
+    `140.001 → 139.923 ms`（**-0.056%**），最坏 `scsd1 +1.79%`；收益小于噪声和尾部风险，因此实现已撤销。
 
 ### P2 — 重建当前 93-model correctness 矩阵
 
