@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
             .{ .name = "lp", .module = lp_module },
+            .{ .name = "presolve", .module = presolve_module },
         },
     });
     const io_module = b.createModule(.{

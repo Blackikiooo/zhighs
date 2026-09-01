@@ -673,6 +673,26 @@ test "Model.optimize publishes an LP solution and basis attributes" {
     try std.testing.expectEqual(@as(usize, 2), model.lp_session.reoptimizations);
 }
 
+test "Model.optimize postsolves fixed columns into public attributes" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "fixed_column_lp");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 5.0, "demand");
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, "x");
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 2.0, 3.0, 3.0, .continuous, "fixed_y");
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 8.0), model.obj_val, 1e-9);
+    try std.testing.expectEqual(BasisStatus.non_basic_lower, model.vbasis[1]);
+    try std.testing.expectEqual(@as(usize, 2), model.reduced_cost.len);
+    try std.testing.expectEqual(@as(usize, 1), model.pi.len);
+    try std.testing.expectEqual(@as(usize, 1), model.basis_head.len);
+}
+
 test "matrix-value revisions invalidate a persistent LP session" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();
