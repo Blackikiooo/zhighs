@@ -209,6 +209,11 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
             clearPublishedSolution(self);
             return;
         };
+        if (!result_view.primal_valid or !result_view.dual_valid or !result_view.basis_valid) {
+            self.status = .numeric;
+            clearPublishedSolution(self);
+            return;
+        }
         publishLpSolution(self, problem, result_view) catch |err| {
             self.status = .numeric;
             return err;

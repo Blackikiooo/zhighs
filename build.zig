@@ -110,6 +110,12 @@ pub fn build(b: *std.Build) void {
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
+    const presolve_tests = b.addTest(.{ .root_module = presolve_module });
+    const run_presolve_tests = b.addRunArtifact(presolve_tests);
+
+    const solver_tests = b.addTest(.{ .root_module = solver_module });
+    const run_solver_tests = b.addRunArtifact(solver_tests);
+
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -123,6 +129,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(foundation.test_step);
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_presolve_tests.step);
+    test_step.dependOn(&run_solver_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     const hcd_bench = b.addExecutable(.{

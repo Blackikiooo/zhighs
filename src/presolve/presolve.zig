@@ -316,8 +316,10 @@ pub fn postsolve(
     result.primal = try allocator.alloc(f64, orig_cols);
     result.dual = try allocator.alloc(f64, orig_rows);
     result.reduced_cost = try allocator.alloc(f64, orig_cols);
-    result.unbounded_ray = try allocator.alloc(f64, orig_cols);
-    result.infeasibility_ray = try allocator.alloc(f64, orig_rows);
+    if (solution.unbounded_ray.len > 0)
+        result.unbounded_ray = try allocator.alloc(f64, orig_cols);
+    if (solution.infeasibility_ray.len > 0)
+        result.infeasibility_ray = try allocator.alloc(f64, orig_rows);
 
     // ── Primal: copy preserved, set fixed ──
     @memset(result.primal, 0.0);
@@ -350,8 +352,8 @@ pub fn postsolve(
     }
 
     // ── Ray: zero for fixed columns ──
-    @memset(result.unbounded_ray, 0.0);
-    if (solution.status == .unbounded and solution.unbounded_ray.len > 0) {
+    if (result.unbounded_ray.len > 0) {
+        @memset(result.unbounded_ray, 0.0);
         for (0..pp.num_cols) |rc| {
             result.unbounded_ray[pp.reduced_to_original_col[rc]] = solution.unbounded_ray[rc];
         }
@@ -359,8 +361,8 @@ pub fn postsolve(
 
     // Fixed-column elimination does not alter row coordinates, so a Farkas
     // certificate is copied verbatim.
-    @memset(result.infeasibility_ray, 0.0);
-    if (solution.status == .infeasible) {
+    if (result.infeasibility_ray.len > 0) {
+        @memset(result.infeasibility_ray, 0.0);
         const count = @min(result.infeasibility_ray.len, solution.infeasibility_ray.len);
         @memcpy(result.infeasibility_ray[0..count], solution.infeasibility_ray[0..count]);
     }

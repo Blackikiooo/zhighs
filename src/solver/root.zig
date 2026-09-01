@@ -32,6 +32,9 @@ pub const LpRevisionStamp = struct {
 /// Every slice is invalidated by `LpSolveResult.deinit`.
 pub const LpSolveResultView = struct {
     status: LpSolveStatus,
+    primal_valid: bool,
+    dual_valid: bool,
+    basis_valid: bool,
     primal: []const f64,
     dual: []const f64,
     reduced_cost: []const f64,
@@ -66,6 +69,9 @@ pub const LpSolveResult = struct {
         const basis = if (self.engine.basis) |*value| value else return null;
         return .{
             .status = self.status,
+            .primal_valid = self.status == .optimal,
+            .dual_valid = self.status == .optimal,
+            .basis_valid = basisIsValid(problem, basis),
             .primal = solution.primal,
             .dual = solution.dual,
             .reduced_cost = solution.reduced_cost,
@@ -100,7 +106,7 @@ pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: Lp
     const projection = PostsolveProjection.init(allocator, problem, &pp, &engine, status) catch null;
     return .{
         .engine = engine,
-        .status = status,
+        .status = if (projection == null) .numerical_failure else status,
         .presolved_problem = pp,
         .projection = projection,
     };
@@ -192,6 +198,9 @@ pub const LpSolveSession = struct {
         const basis = if (self.engine.basis) |*value| value else return null;
         return .{
             .status = status,
+            .primal_valid = status == .optimal,
+            .dual_valid = status == .optimal,
+            .basis_valid = basisIsValid(problem, basis),
             .primal = solution.primal,
             .dual = solution.dual,
             .reduced_cost = solution.reduced_cost,
@@ -221,6 +230,16 @@ fn hasFixedColumns(problem: LpProblemView) bool {
     return false;
 }
 
+fn basisIsValid(problem: LpProblemView, basis: *const lp.simplex.basis.BasisState) bool {
+    const view = LpBasisView{
+        .structural_status = basis.col_status[0..problem.num_cols],
+        .logical_status = basis.col_status[problem.num_cols..][0..problem.num_rows],
+        .basic_index = basis.basic_index,
+    };
+    view.validate(problem.num_cols, problem.num_rows) catch return false;
+    return true;
+}
+
 /// Owning original-coordinate result produced after solving a reduced LP.
 const PostsolveProjection = struct {
     allocator: std.mem.Allocator,
@@ -229,6 +248,7 @@ const PostsolveProjection = struct {
     logical_status: []LpBasisStatus,
     basic_index: []u32,
     row_scale: []f64,
+    basis_valid: bool = true,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -264,10 +284,20 @@ const PostsolveProjection = struct {
             result.basic_index[row] = if (reduced_col < pp.num_cols)
                 pp.reduced_to_original_col[reduced_col]
             else if (reduced_col < pp.num_cols + pp.num_rows)
-                original_problem.num_cols + (reduced_col - pp.num_cols)
-            else
-                std.math.maxInt(u32);
+                @intCast(original_problem.num_cols + (reduced_col - pp.num_cols))
+            else blk: {
+                result.basis_valid = false;
+                break :blk std.math.maxInt(u32);
+            };
         }
+        const mapped_basis = LpBasisView{
+            .structural_status = result.structural_status,
+            .logical_status = result.logical_status,
+            .basic_index = result.basic_index,
+        };
+        mapped_basis.validate(original_problem.num_cols, original_problem.num_rows) catch {
+            result.basis_valid = false;
+        };
         return result;
     }
 
@@ -283,6 +313,9 @@ const PostsolveProjection = struct {
     fn view(self: *const PostsolveProjection, iterations: usize) LpSolveResultView {
         return .{
             .status = self.solution.status,
+            .primal_valid = self.solution.status == .optimal,
+            .dual_valid = self.solution.status == .optimal,
+            .basis_valid = self.basis_valid,
             .primal = self.solution.primal,
             .dual = self.solution.dual,
             .reduced_cost = self.solution.reduced_cost,
@@ -325,12 +358,68 @@ test "solveLp returns fixed-column solutions and basis in original coordinates" 
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
     const view = result.resultView(problem).?;
+    try std.testing.expect(view.primal_valid);
+    try std.testing.expect(view.dual_valid);
+    try std.testing.expect(view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, view.primal);
     try std.testing.expectApproxEqAbs(@as(f64, 8.0), view.objective_value, 1e-9);
     try std.testing.expectEqual(LpBasisStatus.fixed, view.structural_status[1]);
     try std.testing.expectEqual(@as(usize, 2), view.structural_status.len);
     try std.testing.expectEqual(@as(usize, 1), view.logical_status.len);
     try std.testing.expect(view.basic_index[0] < problem.num_cols + problem.num_rows);
+}
+
+test "postsolve preserves unbounded certificates and validity semantics" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ -1.0, 3.0 },
+        .col_lower = &.{ 0.0, 2.0 },
+        .col_upper = &.{ std.math.inf(f64), 2.0 },
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 0, 0 }, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.unbounded, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(!view.primal_valid);
+    try std.testing.expect(!view.dual_valid);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, view.unbounded_ray);
+    try std.testing.expectEqual(@as(usize, 0), view.infeasibility_ray.len);
+}
+
+test "postsolve preserves infeasibility certificates independently of basis validity" {
+    const problem = LpProblemView{
+        .num_rows = 2,
+        .num_cols = 2,
+        .col_cost = &.{ 0.0, 5.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ std.math.inf(f64), 0.0 },
+        .row_lower = &.{ 2.0, -std.math.inf(f64) },
+        .row_upper = &.{ std.math.inf(f64), 1.0 },
+        .matrix = matrix.CscView.initAssumeValid(
+            2,
+            2,
+            &[_]usize{ 0, 2, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(!view.primal_valid);
+    try std.testing.expect(!view.dual_valid);
+    try std.testing.expectEqual(@as(usize, 0), view.unbounded_ray.len);
+    try std.testing.expectEqual(@as(usize, 2), view.infeasibility_ray.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), view.infeasibility_ray[0] + view.infeasibility_ray[1], 1e-9);
 }
 
 test "session invalidates reuse when the fixed-column mapping changes" {
