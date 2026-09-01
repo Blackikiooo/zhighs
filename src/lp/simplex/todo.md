@@ -491,3 +491,8 @@ git diff --check
     40 模型正确性及枢轴数不变，但四个热点模型 101-run A/B 为
     `41.714 -> 42.288 ms`（`+1.38%`），`seba +5.05%`。复杂条件链拖慢原本简单的
     reindex/statistics 循环，少一次读向量不足以抵消指令吞吐损失，已撤回。
+  - 负实验：为 packed FT 补齐 HiGHS `ur_value` 行数值流，并把 BTRAN/`captureEp` 从 U-column
+    gather 改为 UR-row scatter。40 模型状态与枢轴数保持不变，但四热点模型 101-run A/B 为
+    `37.752 -> 40.329 ms`（`+6.83%`），四个模型全部回退，最坏 `seba +8.53%`。
+    当前 dense 路径的随机目标写成本高于连续列 gather；只有连同 HiGHS hyper-sparse BTRAN/HVector
+    分派整体迁移时才值得重试，孤立 UR scatter 已撤回。
