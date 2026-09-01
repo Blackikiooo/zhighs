@@ -693,6 +693,32 @@ test "Model.optimize postsolves fixed columns into public attributes" {
     try std.testing.expectEqual(@as(usize, 1), model.basis_head.len);
 }
 
+test "Model basis export and import warm-starts a presolved LP" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var source = try Model.init(std.testing.allocator, &env, "fixed_basis_source");
+    defer source.deinit();
+    try source.addConstr(0, &.{}, &.{}, .greater_equal, 5.0, null);
+    try source.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try source.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 2.0, 3.0, 3.0, .continuous, null);
+    try source.optimize();
+    var snapshot = try source.exportBasisSnapshot(std.testing.allocator);
+    defer snapshot.deinit();
+
+    var target = try Model.init(std.testing.allocator, &env, "fixed_basis_target");
+    defer target.deinit();
+    try target.addConstr(0, &.{}, &.{}, .greater_equal, 5.0, null);
+    try target.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try target.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 2.0, 3.0, 3.0, .continuous, null);
+    try target.updateModel();
+    try target.importBasisView(snapshot.view());
+    try target.optimize();
+
+    try std.testing.expectEqual(Status.optimal, target.status);
+    try std.testing.expectEqualSlices(f64, source.solution, target.solution);
+    try std.testing.expectEqual(@as(i64, 0), target.iter_count);
+}
+
 test "matrix-value revisions invalidate a persistent LP session" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();

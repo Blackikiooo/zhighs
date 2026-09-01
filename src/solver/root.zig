@@ -97,10 +97,12 @@ pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: Lp
 
     var pp = presolve.presolve(allocator, problem) catch
         return .{ .engine = engine, .status = .numerical_failure };
+    var reduced_basis: ?ReducedBasisProjection = null;
+    defer if (reduced_basis) |*value| value.deinit();
     var reduced_control = control;
-    // An original-coordinate basis cannot be consumed by the reduced model.
-    // A mapped warm-start is added at the solver boundary in P6.3.
-    reduced_control.initial_basis = null;
+    if (control.initial_basis) |initial_basis|
+        reduced_basis = ReducedBasisProjection.init(allocator, &pp, initial_basis) catch null;
+    reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
     const reduced_problem = pp.reducedView();
     const status = engine.solveProblem(reduced_problem, reduced_control);
     const projection = PostsolveProjection.init(allocator, problem, &pp, &engine, status) catch null;
@@ -157,7 +159,11 @@ pub const LpSolveSession = struct {
         self.presolved_problem = next_pp;
 
         var reduced_control = control;
-        reduced_control.initial_basis = null;
+        var reduced_basis: ?ReducedBasisProjection = null;
+        defer if (reduced_basis) |*value| value.deinit();
+        if (control.initial_basis) |initial_basis|
+            reduced_basis = ReducedBasisProjection.init(self.allocator, &self.presolved_problem.?, initial_basis) catch null;
+        reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
         const reduced_problem = self.presolved_problem.?.reducedView();
         const status = self.solveReduced(reduced_problem, reduced_control, revision, mapping_changed);
         self.projection = PostsolveProjection.init(
@@ -239,6 +245,65 @@ fn basisIsValid(problem: LpProblemView, basis: *const lp.simplex.basis.BasisStat
     view.validate(problem.num_cols, problem.num_rows) catch return false;
     return true;
 }
+
+/// Temporary original-to-reduced basis mapping. It is borrowed by simplex
+/// only for the duration of one solve call.
+const ReducedBasisProjection = struct {
+    allocator: std.mem.Allocator,
+    status_storage: []LpBasisStatus,
+    structural_status: []LpBasisStatus,
+    logical_status: []LpBasisStatus,
+    basic_index: []u32,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        pp: *const presolve.PresolvedProblem,
+        original: LpBasisView,
+    ) !ReducedBasisProjection {
+        try original.validate(pp.original_num_cols, pp.original_num_rows);
+        var result = ReducedBasisProjection{
+            .allocator = allocator,
+            .status_storage = &.{},
+            .structural_status = &.{},
+            .logical_status = &.{},
+            .basic_index = &.{},
+        };
+        errdefer result.deinit();
+        result.status_storage = try allocator.alloc(LpBasisStatus, pp.num_cols + pp.num_rows);
+        result.structural_status = result.status_storage[0..pp.num_cols];
+        result.logical_status = result.status_storage[pp.num_cols..];
+        result.basic_index = try allocator.alloc(u32, pp.num_rows);
+
+        for (pp.reduced_to_original_col, 0..) |original_col, reduced_col|
+            result.structural_status[reduced_col] = original.structural_status[original_col];
+        @memcpy(result.logical_status, original.logical_status);
+        for (original.basic_index, 0..) |original_col, row| {
+            if (original_col < pp.original_num_cols) {
+                const reduced_col = pp.original_to_reduced_col[original_col];
+                if (reduced_col == std.math.maxInt(u32)) return error.FixedBasicColumn;
+                result.basic_index[row] = reduced_col;
+            } else {
+                result.basic_index[row] = pp.num_cols + (original_col - pp.original_num_cols);
+            }
+        }
+        try result.view().validate(pp.num_cols, pp.num_rows);
+        return result;
+    }
+
+    fn deinit(self: *ReducedBasisProjection) void {
+        self.allocator.free(self.status_storage);
+        self.allocator.free(self.basic_index);
+        self.* = undefined;
+    }
+
+    fn view(self: *const ReducedBasisProjection) LpBasisView {
+        return .{
+            .structural_status = self.structural_status,
+            .logical_status = self.logical_status,
+            .basic_index = self.basic_index,
+        };
+    }
+};
 
 /// Owning original-coordinate result produced after solving a reduced LP.
 const PostsolveProjection = struct {
@@ -367,6 +432,41 @@ test "solveLp returns fixed-column solutions and basis in original coordinates" 
     try std.testing.expectEqual(@as(usize, 2), view.structural_status.len);
     try std.testing.expectEqual(@as(usize, 1), view.logical_status.len);
     try std.testing.expect(view.basic_index[0] < problem.num_cols + problem.num_rows);
+}
+
+test "solveLp maps an exported original basis back through presolve" {
+    const problem = fixedColumnProblem(false);
+    var first = solveLp(std.testing.allocator, problem, .{});
+    defer first.deinit();
+    const first_view = first.resultView(problem).?;
+    var snapshot = try LpBasisSnapshot.initFromView(std.testing.allocator, .{
+        .structural_status = first_view.structural_status,
+        .logical_status = first_view.logical_status,
+        .basic_index = first_view.basic_index,
+    });
+    defer snapshot.deinit();
+
+    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    defer second.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
+    const second_view = second.resultView(problem).?;
+    try std.testing.expect(second_view.basis_valid);
+    try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
+    try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
+}
+
+test "reduced basis mapping rejects a basic fixed column" {
+    var pp = try presolve.presolve(std.testing.allocator, fixedColumnProblem(false));
+    defer pp.deinit();
+    const original = LpBasisView{
+        .structural_status = &.{ .at_lower, .basic },
+        .logical_status = &.{.at_lower},
+        .basic_index = &.{1},
+    };
+    try std.testing.expectError(
+        error.FixedBasicColumn,
+        ReducedBasisProjection.init(std.testing.allocator, &pp, original),
+    );
 }
 
 test "postsolve preserves unbounded certificates and validity semantics" {
