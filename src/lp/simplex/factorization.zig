@@ -102,6 +102,10 @@ pub const PivotUpdateView = struct {
     /// HVector indexed form. Entries outside this support are logical zeros
     /// and need not participate in update-growth diagnostics.
     direction_indices: ?[]const u32 = null,
+    /// The NLA solve boundary has already rejected non-finite entries. This
+    /// allows production updates to omit the otherwise diagnostic-only full
+    /// direction scan when statistics are disabled.
+    direction_is_finite: bool = false,
     /// Converts a signed movement direction back to the actual entering
     /// basis column. Primal simplex uses -1 when entering from an upper bound.
     column_scale: f64 = 1.0,
@@ -591,16 +595,20 @@ pub const Factorization = struct {
         const pivot_row: usize = @intCast(update_view.leaving_row);
         if (!std.math.isFinite(update_view.column_scale)) return error.Singular;
         const pivot_magnitude = @abs(update_view.direction[pivot_row] * update_view.column_scale);
-        const maximum_magnitude = try maximumDirectionMagnitude(
-            update_view.direction,
-            update_view.direction_indices,
-            update_view.column_scale,
-        );
-        if (!std.math.isFinite(maximum_magnitude)) return error.NumericalFailure;
         if (pivot_magnitude <= self.dense_lu.pivot_tolerance)
             return error.Singular;
-        const update_growth = maximum_magnitude / pivot_magnitude;
-        if (!std.math.isFinite(update_growth)) return error.NumericalFailure;
+        const collect_update_growth = self.statistics_io != null or !update_view.direction_is_finite;
+        const update_growth = if (collect_update_growth) blk: {
+            const maximum_magnitude = try maximumDirectionMagnitude(
+                update_view.direction,
+                update_view.direction_indices,
+                update_view.column_scale,
+            );
+            if (!std.math.isFinite(maximum_magnitude)) return error.NumericalFailure;
+            const growth = maximum_magnitude / pivot_magnitude;
+            if (!std.math.isFinite(growth)) return error.NumericalFailure;
+            break :blk growth;
+        } else 1.0;
         switch (self.backend_kind) {
             .dense_lu => {
                 // Append a new Eta vector to the slab.
@@ -626,15 +634,17 @@ pub const Factorization = struct {
         }
         self.update_count += 1;
         self.stats.maximum_update_count = @max(self.stats.maximum_update_count, self.update_count);
-        self.maximum_update_growth = @max(self.maximum_update_growth, update_growth);
-        self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
+        if (collect_update_growth) {
+            self.maximum_update_growth = @max(self.maximum_update_growth, update_growth);
+            self.stats.maximum_update_growth = @max(self.stats.maximum_update_growth, update_growth);
+        }
     }
 
     /// Return the storage-safe form of HiGHS' explicit update limit.
     ///
-    /// `maximum_update_growth` remains a useful diagnostic, but HiGHS does
-    /// not turn that ratio into a four-tier reinversion policy. Early
-    /// reinversion belongs to solve/pivot checks and the synthetic clock.
+    /// `maximum_update_growth` remains an optional statistics diagnostic, but
+    /// HiGHS does not turn that ratio into a four-tier reinversion policy.
+    /// Early reinversion belongs to solve/pivot checks and the synthetic clock.
     pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
         return if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
     }
@@ -884,6 +894,19 @@ test "relative update growth is diagnostic rather than a reinversion tier" {
     try std.testing.expect(factorization.needsRefactor(100));
     try std.testing.expectEqual(ReinversionReason.update_limit, factorization.reinversionReason(100).?);
     try factorization.refactorizeInPlace();
+    try std.testing.expectEqual(@as(f64, 1.0), factorization.maximum_update_growth);
+}
+
+test "trusted finite update skips growth scan when statistics are disabled" {
+    var factorization = Factorization.init(std.testing.allocator);
+    defer factorization.deinit();
+    try factorization.factorizeIdentity(2);
+    try factorization.update(.{
+        .leaving_row = 0,
+        .entering_col = 0,
+        .direction = &[_]f64{ 1e-5, 1 },
+        .direction_is_finite = true,
+    });
     try std.testing.expectEqual(@as(f64, 1.0), factorization.maximum_update_growth);
 }
 

@@ -509,3 +509,8 @@ git diff --check
   - 负实验：dense Aq 的 DSE recurrence 顺便统计 tau 非零数，以删除前置 `col_dse` 扫描；
     固定 CPU 2 的四热点 101-run A/B 为 `36.642 -> 36.966 ms`（`+0.88%`），四项全慢。
     tau 比较拉长权重更新依赖链，独立统计循环吞吐更好，已撤回。
+  - 保留优化：NLA 已在 FTRAN 边界验证 direction 有限性；`collect_statistics=false` 时不再为仅作
+    诊断、且不参与 reinversion 决策的 `maximum_update_growth` 重扫完整 direction。开启统计及直接
+    Factorization API 仍计算/验证该指标。40 模型正确性 PASS、枢轴逐模型不变；固定 CPU 2 的
+    四热点 101-run 为 `36.923 -> 36.702 ms`（`-0.60%`，4/4 胜），完整 40 模型 31-run 为
+    `143.455 -> 142.538 ms`（`-0.64%`，36/40 胜），最坏回退仅 `seba +0.31%`。

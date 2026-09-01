@@ -108,6 +108,7 @@ pub const SimplexNla = struct {
             .entering_col = entering_col,
             .direction = col_aq.values,
             .direction_indices = direction_indices,
+            .direction_is_finite = true,
             .column_scale = column_scale,
         });
     }
