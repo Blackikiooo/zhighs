@@ -442,13 +442,15 @@ FTRAN producer 直接发布 `captured_aq` support；不能仅凭 Callgrind 指�
 
 ### P6 — simplex 产品闭环
 
-- [ ] **P6.1 接通 solver → presolve → simplex → postsolve。** 当前 `solver.solveLp` 直接调用 simplex；
-  `presolve.zig` 已有 fixed-column reduction，但尚未进入统一 solve pipeline。
-- [ ] **P6.2 公开稳定结果语义。** 对 optimal/infeasible/unbounded/limit/numerical failure，统一 basis、
+- [x] **P6.1 接通 solver → presolve → simplex → postsolve。** `solver.solveLp` 与持久 session 仅在存在
+  fixed-column reduction 时进入 owning presolve/postsolve 路径；其余模型继续使用零拷贝 simplex。原坐标
+  primal/dual/reduced cost/ray/basis head 均已恢复，40-model forced-dual pipeline gate 通过。
+- [x] **P6.2 公开稳定结果语义。** 对 optimal/infeasible/unbounded/limit/numerical failure，统一 basis、
   primal/dual、reduced cost、ray、iteration 与 callback 生命周期。
 - [ ] **P6.3 补齐 basis/solution I/O 和 warm reoptimization corpus。** 除一次 cold solve 外，验证导出 basis、
-  导入 basis、修改 bounds/cost 后 reoptimize 与 HiGHS 状态/目标一致。
-- [ ] **P6.4 明确非目标。** serial simplex 发布不等待 multi/task dual、IPM、PDLP、QP、MIP；这些进入
+  导入 basis、修改 bounds/cost 后 reoptimize 与 HiGHS 状态/目标一致。固定列缩减下的跨 Model basis
+  export/import 与 0-pivot warm solve 已有测试；仍需扩展到标准模型 warm corpus。
+- [x] **P6.4 明确非目标。** serial simplex 发布不等待 multi/task dual、IPM、PDLP、QP、MIP；这些进入
   项目级 roadmap，不能继续塞进 simplex engine。
 
 ## 4. 每次提交的 Definition of Done
