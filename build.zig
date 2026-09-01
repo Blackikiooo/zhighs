@@ -203,6 +203,23 @@ pub fn build(b: *std.Build) void {
     const simplex_end_to_end_step = b.step("accept-simplex", "Run one end-to-end simplex acceptance model");
     simplex_end_to_end_step.dependOn(&run_simplex_end_to_end.step);
 
+    const solver_pipeline = b.addExecutable(.{
+        .name = "solver-pipeline",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/solver_pipeline_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const install_solver_pipeline = b.addInstallArtifact(solver_pipeline, .{});
+    const build_solver_pipeline_step = b.step("build-solver-pipeline", "Build the full LP solver-pipeline acceptance runner");
+    build_solver_pipeline_step.dependOn(&install_solver_pipeline.step);
+    const run_solver_pipeline = b.addRunArtifact(solver_pipeline);
+    if (b.args) |args| run_solver_pipeline.addArgs(args);
+    const solver_pipeline_step = b.step("accept-solver-pipeline", "Run one LP through presolve, simplex, and postsolve");
+    solver_pipeline_step.dependOn(&run_solver_pipeline.step);
+
     const sparse_basis_bench = b.addExecutable(.{
         .name = "sparse-basis-bench",
         .root_module = b.createModule(.{
