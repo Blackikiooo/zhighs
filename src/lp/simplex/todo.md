@@ -496,3 +496,6 @@ git diff --check
     `37.752 -> 40.329 ms`（`+6.83%`），四个模型全部回退，最坏 `seba +8.53%`。
     当前 dense 路径的随机目标写成本高于连续列 gather；只有连同 HiGHS hyper-sparse BTRAN/HVector
     分派整体迁移时才值得重试，孤立 UR scatter 已撤回。
+  - 负实验：将 packed FT 有序删除的逐元素左移替换为 `std.mem.copyForwards`，保持结构、浮点
+    顺序及枢轴数不变；四热点模型 101-run A/B 为 `37.715 -> 37.743 ms`（`+0.07%`），
+    `seba +1.27%`。短段上两条 SoA 批量复制的固定成本没有优势，已撤回。
