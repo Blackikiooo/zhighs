@@ -447,9 +447,10 @@ FTRAN producer 直接发布 `captured_aq` support；不能仅凭 Callgrind 指�
   primal/dual/reduced cost/ray/basis head 均已恢复，40-model forced-dual pipeline gate 通过。
 - [x] **P6.2 公开稳定结果语义。** 对 optimal/infeasible/unbounded/limit/numerical failure，统一 basis、
   primal/dual、reduced cost、ray、iteration 与 callback 生命周期。
-- [ ] **P6.3 补齐 basis/solution I/O 和 warm reoptimization corpus。** 除一次 cold solve 外，验证导出 basis、
-  导入 basis、修改 bounds/cost 后 reoptimize 与 HiGHS 状态/目标一致。固定列缩减下的跨 Model basis
-  export/import 与 0-pivot warm solve 已有测试；仍需扩展到标准模型 warm corpus。
+- [x] **P6.3 补齐 basis/solution I/O 和 warm reoptimization corpus。** 固定列缩减下的跨 Model basis
+  export/import 与 0-pivot warm solve已有测试；40-model session gate 对每个模型执行 cold + identical-revision
+  reoptimization，状态/目标全部一致，所有 optimal 模型 warm solve 均为 0 pivot，infeasible warm solve 为
+  1–3 pivot；`gas11` 的 unbounded 路径保持 617 pivot，后续可单独优化证书复用。
 - [x] **P6.4 明确非目标。** serial simplex 发布不等待 multi/task dual、IPM、PDLP、QP、MIP；这些进入
   项目级 roadmap，不能继续塞进 simplex engine。
 

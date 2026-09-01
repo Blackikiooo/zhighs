@@ -220,6 +220,19 @@ pub fn build(b: *std.Build) void {
     const solver_pipeline_step = b.step("accept-solver-pipeline", "Run one LP through presolve, simplex, and postsolve");
     solver_pipeline_step.dependOn(&run_solver_pipeline.step);
 
+    const solver_session = b.addExecutable(.{
+        .name = "solver-session",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/simplex/solver_session_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const install_solver_session = b.addInstallArtifact(solver_session, .{});
+    const build_solver_session_step = b.step("build-solver-session", "Build the cold/warm LP solver-session runner");
+    build_solver_session_step.dependOn(&install_solver_session.step);
+
     const sparse_basis_bench = b.addExecutable(.{
         .name = "sparse-basis-bench",
         .root_module = b.createModule(.{
