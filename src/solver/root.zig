@@ -522,6 +522,51 @@ test "postsolve preserves infeasibility certificates independently of basis vali
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), view.infeasibility_ray[0] + view.infeasibility_ray[1], 1e-9);
 }
 
+test "presolve handles an all-fixed feasible model" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{4.0},
+        .col_lower = &.{2.0},
+        .col_upper = &.{2.0},
+        .row_lower = &.{2.0},
+        .row_upper = &.{2.0},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{foundation.RowId.fromUsizeAssumeValid(0)}, &.{1.0}),
+        .objective_sense = .maximize,
+        .objective_offset = 3.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expectEqualSlices(f64, &.{2.0}, view.primal);
+    try std.testing.expectApproxEqAbs(@as(f64, 11.0), view.objective_value, 1e-12);
+    try std.testing.expect(view.basis_valid);
+}
+
+test "presolve handles an all-fixed infeasible model" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{0.0},
+        .col_lower = &.{2.0},
+        .col_upper = &.{2.0},
+        .row_lower = &.{3.0},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{foundation.RowId.fromUsizeAssumeValid(0)}, &.{1.0}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(!view.primal_valid);
+    // The current simplex empty-column terminal path proves infeasibility but
+    // does not yet publish a Farkas vector; availability remains explicit.
+    try std.testing.expectEqual(@as(usize, 0), view.infeasibility_ray.len);
+}
+
 test "session invalidates reuse when the fixed-column mapping changes" {
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
