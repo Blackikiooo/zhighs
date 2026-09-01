@@ -21,6 +21,7 @@ const SolutionView = lp.SolutionView;
 pub const FixedColumnRecord = struct {
     original_column: u32,
     fixed_value: f64,
+    col_cost: f64,
     row_start: u32,
     row_end: u32,
 };
@@ -32,6 +33,10 @@ pub const PresolvedProblem = struct {
     /// Reduced dimensions.
     num_rows: u32,
     num_cols: u32,
+
+    /// Original dimensions required to restore rectangular models.
+    original_num_rows: u32,
+    original_num_cols: u32,
 
     /// Reduced problem data (owning slices).
     col_cost: []f64,
@@ -93,15 +98,26 @@ pub const PresolvedProblem = struct {
 
 /// Result of presolve → solve → postsolve round-trip.
 pub const PresolveResult = struct {
+    allocator: std.mem.Allocator,
     status: SolveStatus,
     objective_value: f64,
     primal: []f64,
     dual: []f64,
     reduced_cost: []f64,
     unbounded_ray: []f64,
+    infeasibility_ray: []f64,
+
+    pub fn deinit(self: *PresolveResult) void {
+        self.allocator.free(self.primal);
+        self.allocator.free(self.dual);
+        self.allocator.free(self.reduced_cost);
+        self.allocator.free(self.unbounded_ray);
+        self.allocator.free(self.infeasibility_ray);
+        self.* = undefined;
+    }
 };
 
-pub const PresolveError = error{ OutOfMemory };
+pub const PresolveError = error{OutOfMemory};
 
 const SENTINEL = std.math.maxInt(u32);
 
@@ -126,21 +142,34 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
         .allocator = allocator,
         .num_rows = @intCast(problem.num_rows),
         .num_cols = @intCast(reduced_cols),
-        .col_cost = try allocator.alloc(f64, reduced_cols),
-        .col_lower = try allocator.alloc(f64, reduced_cols),
-        .col_upper = try allocator.alloc(f64, reduced_cols),
-        .row_lower = try allocator.alloc(f64, problem.num_rows),
-        .row_upper = try allocator.alloc(f64, problem.num_rows),
+        .original_num_rows = @intCast(problem.num_rows),
+        .original_num_cols = @intCast(problem.num_cols),
+        .col_cost = &.{},
+        .col_lower = &.{},
+        .col_upper = &.{},
+        .row_lower = &.{},
+        .row_upper = &.{},
         .objective_offset = problem.objective_offset,
         .objective_sense = problem.objective_sense,
-        .reduced_to_original_col = try allocator.alloc(u32, reduced_cols),
-        .original_to_reduced_col = try allocator.alloc(u32, problem.num_cols),
-        .fixed_row_indices = try allocator.alloc(u32, fixed_nnz),
-        .fixed_row_values = try allocator.alloc(f64, fixed_nnz),
-        .fixed_columns = try allocator.alloc(FixedColumnRecord, fixed),
+        .reduced_to_original_col = &.{},
+        .original_to_reduced_col = &.{},
+        .fixed_row_indices = &.{},
+        .fixed_row_values = &.{},
+        .fixed_columns = &.{},
         .fixed_column_count = fixed,
     };
     errdefer pp.deinit();
+
+    pp.col_cost = try allocator.alloc(f64, reduced_cols);
+    pp.col_lower = try allocator.alloc(f64, reduced_cols);
+    pp.col_upper = try allocator.alloc(f64, reduced_cols);
+    pp.row_lower = try allocator.alloc(f64, problem.num_rows);
+    pp.row_upper = try allocator.alloc(f64, problem.num_rows);
+    pp.reduced_to_original_col = try allocator.alloc(u32, reduced_cols);
+    pp.original_to_reduced_col = try allocator.alloc(u32, problem.num_cols);
+    pp.fixed_row_indices = try allocator.alloc(u32, fixed_nnz);
+    pp.fixed_row_values = try allocator.alloc(f64, fixed_nnz);
+    pp.fixed_columns = try allocator.alloc(FixedColumnRecord, fixed);
 
     @memset(pp.original_to_reduced_col, SENTINEL);
     @memcpy(pp.row_lower, problem.row_lower);
@@ -160,6 +189,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
             pp.fixed_columns[fi] = .{
                 .original_column = @as(u32, @intCast(j)),
                 .fixed_value = value,
+                .col_cost = problem.col_cost[j],
                 .row_start = fnz,
                 .row_end = fnz + @as(u32, @intCast(end - begin)),
             };
@@ -188,7 +218,8 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     std.debug.assert(rc == reduced_cols);
 
     // ── Build compact CSC ──
-    var csc = matrix.CscMatrix.initPackedUninitialized(allocator, problem.num_rows, reduced_cols, fixed_nnz) catch return error.OutOfMemory;
+    const retained_nnz = problem.matrix.values.len - fixed_nnz;
+    var csc = matrix.CscMatrix.initPackedUninitialized(allocator, problem.num_rows, reduced_cols, retained_nnz) catch return error.OutOfMemory;
     errdefer csc.deinit(allocator);
     pp._matrix_valid = true;
 
@@ -221,21 +252,30 @@ fn triviallyPresolved(allocator: std.mem.Allocator, problem: ProblemView) (Preso
         .allocator = allocator,
         .num_rows = @intCast(nr),
         .num_cols = @intCast(nc),
-        .col_cost = try allocator.dupe(f64, problem.col_cost),
-        .col_lower = try allocator.dupe(f64, problem.col_lower),
-        .col_upper = try allocator.dupe(f64, problem.col_upper),
-        .row_lower = try allocator.dupe(f64, problem.row_lower),
-        .row_upper = try allocator.dupe(f64, problem.row_upper),
+        .original_num_rows = @intCast(nr),
+        .original_num_cols = @intCast(nc),
+        .col_cost = &.{},
+        .col_lower = &.{},
+        .col_upper = &.{},
+        .row_lower = &.{},
+        .row_upper = &.{},
         .objective_offset = problem.objective_offset,
         .objective_sense = problem.objective_sense,
-        .reduced_to_original_col = try allocator.alloc(u32, nc),
-        .original_to_reduced_col = try allocator.alloc(u32, nc),
+        .reduced_to_original_col = &.{},
+        .original_to_reduced_col = &.{},
         .fixed_row_indices = &.{},
         .fixed_row_values = &.{},
         .fixed_columns = &.{},
         .fixed_column_count = 0,
     };
     errdefer pp.deinit();
+    pp.col_cost = try allocator.dupe(f64, problem.col_cost);
+    pp.col_lower = try allocator.dupe(f64, problem.col_lower);
+    pp.col_upper = try allocator.dupe(f64, problem.col_upper);
+    pp.row_lower = try allocator.dupe(f64, problem.row_lower);
+    pp.row_upper = try allocator.dupe(f64, problem.row_upper);
+    pp.reduced_to_original_col = try allocator.alloc(u32, nc);
+    pp.original_to_reduced_col = try allocator.alloc(u32, nc);
     for (0..nc) |j| {
         pp.reduced_to_original_col[j] = @intCast(j);
         pp.original_to_reduced_col[j] = @intCast(j);
@@ -259,23 +299,25 @@ pub fn postsolve(
     solution: SolutionView,
     allocator: std.mem.Allocator,
 ) !PresolveResult {
-    const orig_rows = pp.original_to_reduced_col.len; // also num rows (identity mapping in Phase 1)
-    const orig_cols = pp.original_to_reduced_col.len;
+    const orig_rows = pp.original_num_rows;
+    const orig_cols = pp.original_num_cols;
 
     var result = PresolveResult{
+        .allocator = allocator,
         .status = solution.status,
         .objective_value = solution.objective_value,
-        .primal = try allocator.alloc(f64, orig_cols),
-        .dual = try allocator.alloc(f64, orig_rows),
-        .reduced_cost = try allocator.alloc(f64, orig_cols),
-        .unbounded_ray = try allocator.alloc(f64, orig_cols),
+        .primal = &.{},
+        .dual = &.{},
+        .reduced_cost = &.{},
+        .unbounded_ray = &.{},
+        .infeasibility_ray = &.{},
     };
-    errdefer {
-        allocator.free(result.primal);
-        allocator.free(result.dual);
-        allocator.free(result.reduced_cost);
-        allocator.free(result.unbounded_ray);
-    }
+    errdefer result.deinit();
+    result.primal = try allocator.alloc(f64, orig_cols);
+    result.dual = try allocator.alloc(f64, orig_rows);
+    result.reduced_cost = try allocator.alloc(f64, orig_cols);
+    result.unbounded_ray = try allocator.alloc(f64, orig_cols);
+    result.infeasibility_ray = try allocator.alloc(f64, orig_rows);
 
     // ── Primal: copy preserved, set fixed ──
     @memset(result.primal, 0.0);
@@ -298,7 +340,7 @@ pub fn postsolve(
         result.reduced_cost[pp.reduced_to_original_col[rc]] = solution.reduced_cost[rc];
     }
     for (pp.fixed_columns[0..pp.fixed_column_count]) |rec| {
-        var rc: f64 = 0.0;
+        var rc = rec.col_cost;
         const begin = rec.row_start;
         const end = rec.row_end;
         for (begin..end) |k| {
@@ -315,6 +357,14 @@ pub fn postsolve(
         }
     }
 
+    // Fixed-column elimination does not alter row coordinates, so a Farkas
+    // certificate is copied verbatim.
+    @memset(result.infeasibility_ray, 0.0);
+    if (solution.status == .infeasible) {
+        const count = @min(result.infeasibility_ray.len, solution.infeasibility_ray.len);
+        @memcpy(result.infeasibility_ray[0..count], solution.infeasibility_ray[0..count]);
+    }
+
     return result;
 }
 
@@ -325,11 +375,16 @@ pub fn postsolve(
 test "no fixed columns → trivial" {
     const a = std.testing.allocator;
     const problem = ProblemView{
-        .num_rows = 1, .num_cols = 1,
-        .col_cost = &.{1.0}, .col_lower = &.{0.0}, .col_upper = &.{10.0},
-        .row_lower = &.{-std.math.inf(f64)}, .row_upper = &.{5.0},
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{1.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{10.0},
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{5.0},
         .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{foundation.RowId.fromUsizeAssumeValid(0)}, &.{1.0}),
-        .objective_sense = .minimize, .objective_offset = 0.0,
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
     };
     var pp = try presolve(a, problem);
     defer pp.deinit();
@@ -341,16 +396,16 @@ test "single fixed column elimination" {
     const a = std.testing.allocator;
     // min x1 + 2*x2  s.t.  x1 + x2 <= 5,  0 <= x1, x2 = 3
     const problem = ProblemView{
-        .num_rows = 1, .num_cols = 2,
+        .num_rows = 1,
+        .num_cols = 2,
         .col_cost = &.{ 1.0, 2.0 },
         .col_lower = &.{ 0.0, 3.0 },
         .col_upper = &.{ std.math.inf(f64), 3.0 },
         .row_lower = &.{-std.math.inf(f64)},
         .row_upper = &.{5.0},
-        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 },
-            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
-            &.{ 1.0, 1.0 }),
-        .objective_sense = .minimize, .objective_offset = 0.0,
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &[_]usize{ 0, 1, 2 }, &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) }, &.{ 1.0, 1.0 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
     };
     var pp = try presolve(a, problem);
     defer pp.deinit();
@@ -364,32 +419,126 @@ test "single fixed column elimination" {
 
     // Postsolve
     const sol = SolutionView{
-        .status = .optimal, .objective_value = 6.0, .iterations = 1,
-        .primal = &.{0.0}, .dual = &.{0.0}, .reduced_cost = &.{1.0}, .unbounded_ray = &.{},
+        .status = .optimal,
+        .objective_value = 6.0,
+        .iterations = 1,
+        .primal = &.{0.0},
+        .dual = &.{0.0},
+        .reduced_cost = &.{1.0},
+        .unbounded_ray = &.{},
         .infeasibility_ray = &.{},
     };
-    const res = try postsolve(&pp, sol, a);
-    defer {
-        a.free(res.primal); a.free(res.dual); a.free(res.reduced_cost); a.free(res.unbounded_ray);
-    }
+    var res = try postsolve(&pp, sol, a);
+    defer res.deinit();
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), res.primal[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), res.primal[1], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 6.0), res.objective_value, 1e-12);
 }
 
+test "rectangular fixed-column postsolve restores every coordinate" {
+    const a = std.testing.allocator;
+    // Three rows deliberately differ from the two columns. The retained
+    // column has one nonzero while the fixed column has two, exercising both
+    // original dimension tracking and retained-nnz allocation.
+    const problem = ProblemView{
+        .num_rows = 3,
+        .num_cols = 2,
+        .col_cost = &.{ 2.0, 7.0 },
+        .col_lower = &.{ 0.0, 4.0 },
+        .col_upper = &.{ 10.0, 4.0 },
+        .row_lower = &.{ -std.math.inf(f64), 1.0, -3.0 },
+        .row_upper = &.{ 8.0, 9.0, 5.0 },
+        .matrix = matrix.CscView.initAssumeValid(
+            3,
+            2,
+            &[_]usize{ 0, 1, 3 },
+            &.{
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(2),
+            },
+            &.{ 3.0, 2.0, -1.0 },
+        ),
+        .objective_sense = .maximize,
+        .objective_offset = 11.0,
+    };
+    var pp = try presolve(a, problem);
+    defer pp.deinit();
+
+    try std.testing.expectEqual(@as(u32, 3), pp.original_num_rows);
+    try std.testing.expectEqual(@as(u32, 2), pp.original_num_cols);
+    try std.testing.expectEqual(@as(usize, 1), pp.matrix_storage.nnz());
+    try std.testing.expectApproxEqAbs(@as(f64, 39.0), pp.objective_offset, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), pp.row_upper[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 9.0), pp.row_upper[2], 1e-12);
+
+    const sol = SolutionView{
+        .status = .infeasible,
+        .objective_value = 39.0,
+        .iterations = 2,
+        .primal = &.{1.5},
+        .dual = &.{ 0.5, -2.0, 3.0 },
+        .reduced_cost = &.{8.0},
+        .unbounded_ray = &.{},
+        .infeasibility_ray = &.{ -1.0, 0.25, 2.0 },
+    };
+    var res = try postsolve(&pp, sol, a);
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), res.primal.len);
+    try std.testing.expectEqual(@as(usize, 3), res.dual.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), res.primal[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), res.primal[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 8.0), res.reduced_cost[0], 1e-12);
+    // c_j - A_j^T y = 7 - (2*0.5 + -1*3) = 9.
+    try std.testing.expectApproxEqAbs(@as(f64, 9.0), res.reduced_cost[1], 1e-12);
+    try std.testing.expectEqualSlices(f64, sol.infeasibility_ray, res.infeasibility_ray);
+}
+
+test "postsolve expands an unbounded ray with zero fixed direction" {
+    const a = std.testing.allocator;
+    const problem = ProblemView{
+        .num_rows = 0,
+        .num_cols = 2,
+        .col_cost = &.{ -1.0, 3.0 },
+        .col_lower = &.{ 0.0, 2.0 },
+        .col_upper = &.{ std.math.inf(f64), 2.0 },
+        .row_lower = &.{},
+        .row_upper = &.{},
+        .matrix = matrix.CscView.initAssumeValid(0, 2, &[_]usize{ 0, 0, 0 }, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolve(a, problem);
+    defer pp.deinit();
+    const sol = SolutionView{
+        .status = .unbounded,
+        .objective_value = 6.0,
+        .iterations = 0,
+        .primal = &.{0.0},
+        .dual = &.{},
+        .reduced_cost = &.{-1.0},
+        .unbounded_ray = &.{1.0},
+        .infeasibility_ray = &.{},
+    };
+    var res = try postsolve(&pp, sol, a);
+    defer res.deinit();
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, res.unbounded_ray);
+}
+
 test "two fixed columns" {
     const a = std.testing.allocator;
     const problem = ProblemView{
-        .num_rows = 1, .num_cols = 3,
+        .num_rows = 1,
+        .num_cols = 3,
         .col_cost = &.{ 1.0, 2.0, 3.0 },
         .col_lower = &.{ 1.0, 2.0, 0.0 },
         .col_upper = &.{ 1.0, 2.0, 10.0 },
         .row_lower = &.{-std.math.inf(f64)},
         .row_upper = &.{20.0},
-        .matrix = matrix.CscView.initAssumeValid(1, 3, &[_]usize{ 0, 1, 2, 3 },
-            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
-            &.{ 2.0, 3.0, 1.0 }),
-        .objective_sense = .minimize, .objective_offset = 0.0,
+        .matrix = matrix.CscView.initAssumeValid(1, 3, &[_]usize{ 0, 1, 2, 3 }, &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) }, &.{ 2.0, 3.0, 1.0 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
     };
     var pp = try presolve(a, problem);
     defer pp.deinit();
@@ -402,11 +551,16 @@ test "two fixed columns" {
 test "finite-inf bounds not fixed" {
     const a = std.testing.allocator;
     const problem = ProblemView{
-        .num_rows = 0, .num_cols = 1,
-        .col_cost = &.{1.0}, .col_lower = &.{-std.math.inf(f64)}, .col_upper = &.{std.math.inf(f64)},
-        .row_lower = &.{}, .row_upper = &.{},
+        .num_rows = 0,
+        .num_cols = 1,
+        .col_cost = &.{1.0},
+        .col_lower = &.{-std.math.inf(f64)},
+        .col_upper = &.{std.math.inf(f64)},
+        .row_lower = &.{},
+        .row_upper = &.{},
         .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
-        .objective_sense = .minimize, .objective_offset = 0.0,
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
     };
     var pp = try presolve(a, problem);
     defer pp.deinit();
