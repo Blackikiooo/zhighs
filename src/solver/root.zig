@@ -52,7 +52,7 @@ pub const LpSolveResultView = struct {
 pub const LpSolveResult = struct {
     engine: lp.simplex.engine.SimplexEngine,
     status: LpSolveStatus,
-    presolved_problem: ?presolve.PresolvedProblem = null,
+    presolved_problem: ?presolve.PresolvePipeline = null,
     projection: ?PostsolveProjection = null,
 
     pub fn deinit(self: *LpSolveResult) void {
@@ -90,18 +90,23 @@ pub const LpSolveResult = struct {
 /// Execute the LP backend while borrowing all immutable problem arrays.
 pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: LpSolveControl) LpSolveResult {
     var engine = lp.simplex.engine.SimplexEngine.init(allocator);
-    if (!hasFixedColumns(problem)) {
+    if (!hasPresolveReductions(allocator, problem)) {
         const status = engine.solveProblem(problem, control);
         return .{ .engine = engine, .status = status };
     }
 
-    var pp = presolve.presolve(allocator, problem) catch
+    var pp = presolve.presolvePipeline(allocator, problem) catch
         return .{ .engine = engine, .status = .numerical_failure };
-    var reduced_basis: ?ReducedBasisProjection = null;
+    if (!pp.wasApplied()) {
+        pp.deinit();
+        const status = engine.solveProblem(problem, control);
+        return .{ .engine = engine, .status = status };
+    }
+    var reduced_basis: ?ReducedBasisChain = null;
     defer if (reduced_basis) |*value| value.deinit();
     var reduced_control = control;
     if (control.initial_basis) |initial_basis|
-        reduced_basis = ReducedBasisProjection.init(allocator, &pp, initial_basis) catch null;
+        reduced_basis = ReducedBasisChain.init(allocator, &pp, initial_basis) catch null;
     reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
     const reduced_problem = pp.reducedView();
     const status = engine.solveProblem(reduced_problem, reduced_control);
@@ -119,7 +124,7 @@ pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: Lp
 pub const LpSolveSession = struct {
     allocator: std.mem.Allocator,
     engine: lp.simplex.engine.SimplexEngine,
-    presolved_problem: ?presolve.PresolvedProblem = null,
+    presolved_problem: ?presolve.PresolvePipeline = null,
     projection: ?PostsolveProjection = null,
     last_revision: ?LpRevisionStamp = null,
     last_rows: usize = 0,
@@ -141,28 +146,34 @@ pub const LpSolveSession = struct {
         if (self.projection) |*value| value.deinit();
         self.projection = null;
 
-        if (!hasFixedColumns(problem)) {
+        if (!hasPresolveReductions(self.allocator, problem)) {
             if (self.presolved_problem) |*value| value.deinit();
             self.presolved_problem = null;
             return self.solveReduced(problem, control, revision, false);
         }
 
-        const next_pp = presolve.presolve(self.allocator, problem) catch {
+        var next_pp = presolve.presolvePipeline(self.allocator, problem) catch {
             self.last_revision = revision;
             return .numerical_failure;
         };
+        if (!next_pp.wasApplied()) {
+            next_pp.deinit();
+            if (self.presolved_problem) |*value| value.deinit();
+            self.presolved_problem = null;
+            return self.solveReduced(problem, control, revision, false);
+        }
         const mapping_changed = if (self.presolved_problem) |*previous|
-            !std.mem.eql(u32, previous.reduced_to_original_col, next_pp.reduced_to_original_col)
+            !previous.sameMapping(&next_pp)
         else
             true;
         if (self.presolved_problem) |*value| value.deinit();
         self.presolved_problem = next_pp;
 
         var reduced_control = control;
-        var reduced_basis: ?ReducedBasisProjection = null;
+        var reduced_basis: ?ReducedBasisChain = null;
         defer if (reduced_basis) |*value| value.deinit();
         if (control.initial_basis) |initial_basis|
-            reduced_basis = ReducedBasisProjection.init(self.allocator, &self.presolved_problem.?, initial_basis) catch null;
+            reduced_basis = ReducedBasisChain.init(self.allocator, &self.presolved_problem.?, initial_basis) catch null;
         reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
         const reduced_problem = self.presolved_problem.?.reducedView();
         const status = self.solveReduced(reduced_problem, reduced_control, revision, mapping_changed);
@@ -229,9 +240,32 @@ pub const LpSolveSession = struct {
     }
 };
 
-fn hasFixedColumns(problem: LpProblemView) bool {
-    for (problem.col_lower, problem.col_upper) |lower, upper| {
-        if (lower == upper and std.math.isFinite(lower)) return true;
+fn hasPresolveReductions(allocator: std.mem.Allocator, problem: LpProblemView) bool {
+    const objective_sign: f64 = @floatFromInt(@intFromEnum(problem.objective_sense));
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        switch (presolve.rules.column_substitution.classify(
+            end - begin,
+            problem.col_cost[column],
+            problem.col_lower[column],
+            problem.col_upper[column],
+            objective_sign,
+        )) {
+            .keep => {},
+            .substitute => return true,
+        }
+    }
+
+    // CSC has no row counts. Count them once to select empty- and singleton-row
+    // presolve. Allocation failure safely leaves either row type to simplex.
+    const row_counts = allocator.alloc(u32, problem.num_rows) catch return false;
+    defer allocator.free(row_counts);
+    @memset(row_counts, 0);
+    for (problem.matrix.row_indices) |row| row_counts[row.toUsize()] += 1;
+    for (row_counts, problem.row_lower, problem.row_upper) |count, lower, upper| {
+        if (count == 1) return true;
+        if (presolve.rules.empty_row.classify(count, lower, upper) == .remove) return true;
     }
     return false;
 }
@@ -276,14 +310,25 @@ const ReducedBasisProjection = struct {
 
         for (pp.reduced_to_original_col, 0..) |original_col, reduced_col|
             result.structural_status[reduced_col] = original.structural_status[original_col];
-        @memcpy(result.logical_status, original.logical_status);
-        for (original.basic_index, 0..) |original_col, row| {
+        for (pp.reduced_to_original_row, 0..) |original_row, reduced_row|
+            result.logical_status[reduced_row] = original.logical_status[original_row];
+        for (pp.original_to_reduced_row, 0..) |reduced_row, original_row| {
+            if (reduced_row != std.math.maxInt(u32)) continue;
+            if (original.logical_status[original_row] != .basic or
+                original.basic_index[original_row] != pp.original_num_cols + original_row)
+                return error.RemovedRowNotLogicalBasic;
+        }
+        for (pp.reduced_to_original_row, 0..) |original_row, row| {
+            const original_col = original.basic_index[original_row];
             if (original_col < pp.original_num_cols) {
                 const reduced_col = pp.original_to_reduced_col[original_col];
-                if (reduced_col == std.math.maxInt(u32)) return error.FixedBasicColumn;
+                if (reduced_col == std.math.maxInt(u32)) return error.SubstitutedBasicColumn;
                 result.basic_index[row] = reduced_col;
             } else {
-                result.basic_index[row] = pp.num_cols + (original_col - pp.original_num_cols);
+                const original_logical_row = original_col - pp.original_num_cols;
+                const reduced_logical_row = pp.original_to_reduced_row[original_logical_row];
+                if (reduced_logical_row == std.math.maxInt(u32)) return error.RemovedLogicalBasicColumn;
+                result.basic_index[row] = pp.num_cols + reduced_logical_row;
             }
         }
         try result.view().validate(pp.num_cols, pp.num_rows);
@@ -305,6 +350,135 @@ const ReducedBasisProjection = struct {
     }
 };
 
+/// Owns every forward basis projection so each borrowed intermediate view
+/// remains alive until simplex has consumed the final reduced basis.
+const ReducedBasisChain = struct {
+    allocator: std.mem.Allocator,
+    projections: []ReducedBasisProjection,
+    initialized: usize = 0,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        pipeline: *const presolve.PresolvePipeline,
+        original: LpBasisView,
+    ) !ReducedBasisChain {
+        var result = ReducedBasisChain{
+            .allocator = allocator,
+            .projections = try allocator.alloc(ReducedBasisProjection, pipeline.passes.items.len),
+        };
+        errdefer result.deinit();
+        var current = original;
+        for (pipeline.passes.items) |*pass| {
+            result.projections[result.initialized] = try ReducedBasisProjection.init(allocator, pass, current);
+            result.initialized += 1;
+            current = result.projections[result.initialized - 1].view();
+        }
+        return result;
+    }
+
+    fn deinit(self: *ReducedBasisChain) void {
+        for (self.projections[0..self.initialized]) |*projection| projection.deinit();
+        self.allocator.free(self.projections);
+        self.* = undefined;
+    }
+
+    fn view(self: *const ReducedBasisChain) LpBasisView {
+        std.debug.assert(self.initialized != 0);
+        return self.projections[self.initialized - 1].view();
+    }
+};
+
+/// One owning reverse basis projection across a relative presolve pass.
+const ExpandedBasis = struct {
+    allocator: std.mem.Allocator,
+    structural_status: []LpBasisStatus = &.{},
+    logical_status: []LpBasisStatus = &.{},
+    basic_index: []u32 = &.{},
+    row_scale: []f64 = &.{},
+    basis_valid: bool = true,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        pp: *const presolve.PresolvedProblem,
+        reduced_structural_status: []const LpBasisStatus,
+        reduced_logical_status: []const LpBasisStatus,
+        reduced_basic_index: []const u32,
+        reduced_row_scale: []const f64,
+        input_valid: bool,
+    ) !ExpandedBasis {
+        var result = ExpandedBasis{ .allocator = allocator, .basis_valid = input_valid };
+        errdefer result.deinit();
+        result.structural_status = try allocator.alloc(LpBasisStatus, pp.original_num_cols);
+        result.logical_status = try allocator.alloc(LpBasisStatus, pp.original_num_rows);
+        result.basic_index = try allocator.alloc(u32, pp.original_num_rows);
+        result.row_scale = try allocator.alloc(f64, pp.original_num_rows);
+
+        @memset(result.structural_status, .at_lower);
+        for (pp.column_substitutions[0..pp.column_substitution_count]) |record|
+            result.structural_status[record.original_column] = record.basis_status;
+        for (pp.reduced_to_original_col, 0..) |original_col, reduced_col|
+            result.structural_status[original_col] = reduced_structural_status[reduced_col];
+
+        @memset(result.logical_status, .basic);
+        @memset(result.row_scale, 1.0);
+        for (pp.reduced_to_original_row, 0..) |original_row, reduced_row| {
+            result.logical_status[original_row] = reduced_logical_status[reduced_row];
+            result.row_scale[original_row] = reduced_row_scale[reduced_row];
+        }
+        for (0..pp.original_num_rows) |row| {
+            if (pp.original_to_reduced_row[row] == std.math.maxInt(u32))
+                result.basic_index[row] = pp.original_num_cols + @as(u32, @intCast(row));
+        }
+        for (reduced_basic_index, 0..) |reduced_col, reduced_row| {
+            const original_row = pp.reduced_to_original_row[reduced_row];
+            result.basic_index[original_row] = if (reduced_col < pp.num_cols)
+                pp.reduced_to_original_col[reduced_col]
+            else if (reduced_col < pp.num_cols + pp.num_rows)
+                pp.original_num_cols + pp.reduced_to_original_row[reduced_col - pp.num_cols]
+            else blk: {
+                result.basis_valid = false;
+                break :blk std.math.maxInt(u32);
+            };
+        }
+        var singleton_index: usize = pp.singleton_row_count;
+        while (singleton_index > 0) {
+            singleton_index -= 1;
+            const record = pp.singleton_rows[singleton_index];
+            const structural_status = result.structural_status[record.original_column];
+            if (structural_status == .basic) continue;
+            const source = switch (structural_status) {
+                .at_lower => record.lower_source,
+                .at_upper => record.upper_source,
+                .fixed => record.lower_source orelse record.upper_source,
+                .basic, .free, .superbasic => null,
+            } orelse continue;
+            result.structural_status[record.original_column] = .basic;
+            result.logical_status[record.original_row] = switch (source) {
+                .lower => .at_upper,
+                .upper => .at_lower,
+            };
+            result.basic_index[record.original_row] = record.original_column;
+        }
+        const mapped_basis = LpBasisView{
+            .structural_status = result.structural_status,
+            .logical_status = result.logical_status,
+            .basic_index = result.basic_index,
+        };
+        mapped_basis.validate(pp.original_num_cols, pp.original_num_rows) catch {
+            result.basis_valid = false;
+        };
+        return result;
+    }
+
+    fn deinit(self: *ExpandedBasis) void {
+        self.allocator.free(self.structural_status);
+        self.allocator.free(self.logical_status);
+        self.allocator.free(self.basic_index);
+        self.allocator.free(self.row_scale);
+        self.* = undefined;
+    }
+};
+
 /// Owning original-coordinate result produced after solving a reduced LP.
 const PostsolveProjection = struct {
     allocator: std.mem.Allocator,
@@ -318,51 +492,62 @@ const PostsolveProjection = struct {
     fn init(
         allocator: std.mem.Allocator,
         original_problem: LpProblemView,
-        pp: *const presolve.PresolvedProblem,
+        pipeline: *const presolve.PresolvePipeline,
         engine: *const lp.simplex.engine.SimplexEngine,
         status: LpSolveStatus,
     ) !PostsolveProjection {
-        const reduced_problem = pp.reducedView();
+        const reduced_problem = pipeline.reducedView();
         const reduced_solution = engine.solutionView(reduced_problem, status) orelse return error.SolutionUnavailable;
         var result = PostsolveProjection{
             .allocator = allocator,
-            .solution = try presolve.postsolve(pp, reduced_solution, allocator),
+            .solution = try pipeline.postsolveAll(reduced_solution, allocator),
             .structural_status = &.{},
             .logical_status = &.{},
             .basic_index = &.{},
             .row_scale = &.{},
         };
         errdefer result.deinit();
-        result.structural_status = try allocator.alloc(LpBasisStatus, original_problem.num_cols);
-        result.logical_status = try allocator.alloc(LpBasisStatus, original_problem.num_rows);
-        result.basic_index = try allocator.alloc(u32, original_problem.num_rows);
-        result.row_scale = try allocator.alloc(f64, original_problem.num_rows);
-
         const basis = if (engine.basis) |*value| value else return error.BasisUnavailable;
-        @memset(result.structural_status, .fixed);
-        for (pp.reduced_to_original_col, 0..) |original_col, reduced_col| {
-            result.structural_status[original_col] = basis.col_status[reduced_col];
+        var current: ?ExpandedBasis = null;
+        errdefer if (current) |*value| value.deinit();
+        var structural_status: []const LpBasisStatus = basis.col_status[0..reduced_problem.num_cols];
+        var logical_status: []const LpBasisStatus = basis.col_status[reduced_problem.num_cols..][0..reduced_problem.num_rows];
+        var basic_index: []const u32 = basis.basic_index[0..reduced_problem.num_rows];
+        var row_scale: []const f64 = basis.row_scale[0..reduced_problem.num_rows];
+        var basis_valid = basisIsValid(reduced_problem, basis);
+        var pass_index = pipeline.passes.items.len;
+        while (pass_index > 0) {
+            pass_index -= 1;
+            const next = try ExpandedBasis.init(
+                allocator,
+                &pipeline.passes.items[pass_index],
+                structural_status,
+                logical_status,
+                basic_index,
+                row_scale,
+                basis_valid,
+            );
+            if (current) |*value| value.deinit();
+            current = next;
+            structural_status = current.?.structural_status;
+            logical_status = current.?.logical_status;
+            basic_index = current.?.basic_index;
+            row_scale = current.?.row_scale;
+            basis_valid = current.?.basis_valid;
         }
-        @memcpy(result.logical_status, basis.col_status[pp.num_cols..][0..pp.num_rows]);
-        @memcpy(result.row_scale, basis.row_scale[0..pp.num_rows]);
-        for (basis.basic_index[0..pp.num_rows], 0..) |reduced_col, row| {
-            result.basic_index[row] = if (reduced_col < pp.num_cols)
-                pp.reduced_to_original_col[reduced_col]
-            else if (reduced_col < pp.num_cols + pp.num_rows)
-                @intCast(original_problem.num_cols + (reduced_col - pp.num_cols))
-            else blk: {
-                result.basis_valid = false;
-                break :blk std.math.maxInt(u32);
-            };
-        }
-        const mapped_basis = LpBasisView{
-            .structural_status = result.structural_status,
-            .logical_status = result.logical_status,
-            .basic_index = result.basic_index,
-        };
-        mapped_basis.validate(original_problem.num_cols, original_problem.num_rows) catch {
-            result.basis_valid = false;
-        };
+        var expanded = current.?;
+        current = null;
+        result.structural_status = expanded.structural_status;
+        result.logical_status = expanded.logical_status;
+        result.basic_index = expanded.basic_index;
+        result.row_scale = expanded.row_scale;
+        result.basis_valid = expanded.basis_valid;
+        expanded.structural_status = &.{};
+        expanded.logical_status = &.{};
+        expanded.basic_index = &.{};
+        expanded.row_scale = &.{};
+        std.debug.assert(result.structural_status.len == original_problem.num_cols);
+        std.debug.assert(result.logical_status.len == original_problem.num_rows);
         return result;
     }
 
@@ -417,6 +602,36 @@ fn fixedColumnProblem(fixed_first: bool) LpProblemView {
     };
 }
 
+fn expectValidFarkas(problem: LpProblemView, ray: []const f64) !void {
+    try std.testing.expectEqual(problem.num_rows, ray.len);
+    var proof_lower: f64 = 0.0;
+    for (ray, problem.row_lower, problem.row_upper) |multiplier, lower, upper| {
+        if (multiplier > 0.0) {
+            try std.testing.expect(std.math.isFinite(lower));
+            proof_lower += multiplier * lower;
+        } else if (multiplier < 0.0) {
+            try std.testing.expect(std.math.isFinite(upper));
+            proof_lower += multiplier * upper;
+        }
+    }
+    var implied_upper: f64 = 0.0;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        var coefficient: f64 = 0.0;
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value|
+            coefficient += ray[row.toUsize()] * value;
+        if (coefficient > 0.0) {
+            try std.testing.expect(std.math.isFinite(problem.col_upper[column]));
+            implied_upper += coefficient * problem.col_upper[column];
+        } else if (coefficient < 0.0) {
+            try std.testing.expect(std.math.isFinite(problem.col_lower[column]));
+            implied_upper += coefficient * problem.col_lower[column];
+        }
+    }
+    try std.testing.expect(proof_lower - implied_upper > 1e-9);
+}
+
 test "solveLp returns fixed-column solutions and basis in original coordinates" {
     const problem = fixedColumnProblem(false);
     var result = solveLp(std.testing.allocator, problem, .{});
@@ -455,18 +670,392 @@ test "solveLp maps an exported original basis back through presolve" {
     try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
 }
 
-test "reduced basis mapping rejects a basic fixed column" {
-    var pp = try presolve.presolve(std.testing.allocator, fixedColumnProblem(false));
+test "presolve restores and warm-starts a redundant row exposed by a fixed column" {
+    const problem = LpProblemView{
+        .num_rows = 2,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 2.0 },
+        .col_lower = &.{ 0.0, 2.0 },
+        .col_upper = &.{ std.math.inf(f64), 2.0 },
+        .row_lower = &.{ 2.0, 1.0 },
+        .row_upper = &.{ 2.0, std.math.inf(f64) },
+        .matrix = matrix.CscView.initAssumeValid(
+            2,
+            2,
+            &[_]usize{ 0, 1, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(0) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var first = solveLp(std.testing.allocator, problem, .{});
+    defer first.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
+    const first_view = first.resultView(problem).?;
+    try std.testing.expect(first_view.basis_valid);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0 }, first_view.primal);
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 1.0 }, first_view.dual);
+    try std.testing.expectEqual(LpBasisStatus.basic, first_view.logical_status[0]);
+    try std.testing.expectEqual(@as(u32, 2), first_view.basic_index[0]);
+
+    var snapshot = try LpBasisSnapshot.initFromView(std.testing.allocator, .{
+        .structural_status = first_view.structural_status,
+        .logical_status = first_view.logical_status,
+        .basic_index = first_view.basic_index,
+    });
+    defer snapshot.deinit();
+    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    defer second.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
+    const second_view = second.resultView(problem).?;
+    try std.testing.expect(second_view.basis_valid);
+    try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
+    try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
+}
+
+test "solver routes an original redundant empty row through reversible presolve" {
+    const problem = LpProblemView{
+        .num_rows = 2,
+        .num_cols = 1,
+        .col_cost = &.{1.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{std.math.inf(f64)},
+        .row_lower = &.{ -1.0, 2.0 },
+        .row_upper = &.{ 1.0, std.math.inf(f64) },
+        .matrix = matrix.CscView.initAssumeValid(
+            2,
+            1,
+            &[_]usize{ 0, 1 },
+            &.{foundation.RowId.fromUsizeAssumeValid(1)},
+            &.{1.0},
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
+    try std.testing.expect(result.presolved_problem.?.removed_row_count == 2);
+    try std.testing.expect(result.presolved_problem.?.singleton_row_count == 1);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(view.basis_valid);
+    try std.testing.expectEqualSlices(f64, &.{2.0}, view.primal);
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 1.0 }, view.dual);
+    try std.testing.expectEqual(LpBasisStatus.basic, view.logical_status[0]);
+    try std.testing.expectEqual(@as(u32, 1), view.basic_index[0]);
+    try std.testing.expectEqual(LpBasisStatus.basic, view.structural_status[0]);
+    try std.testing.expectEqual(LpBasisStatus.at_upper, view.logical_status[1]);
+    try std.testing.expectEqual(@as(u32, 0), view.basic_index[1]);
+}
+
+test "presolve substitutes empty columns at finite objective-optimal bounds" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 3,
+        .col_cost = &.{ 1.0, 2.0, -4.0 },
+        .col_lower = &.{ 0.0, -3.0, 0.0 },
+        .col_upper = &.{ std.math.inf(f64), 7.0, 5.0 },
+        .row_lower = &.{1.0},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(
+            1,
+            3,
+            &[_]usize{ 0, 1, 1, 1 },
+            &.{foundation.RowId.fromUsizeAssumeValid(0)},
+            &.{1.0},
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var first = solveLp(std.testing.allocator, problem, .{});
+    defer first.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
+    try std.testing.expectEqual(@as(usize, 2), first.presolved_problem.?.passes.items.len);
+    try std.testing.expectEqual(@as(u32, 3), first.presolved_problem.?.column_substitution_count);
+    try std.testing.expectEqual(@as(u32, 1), first.presolved_problem.?.singleton_row_count);
+    try std.testing.expectEqual(@as(usize, 0), first.presolved_problem.?.reducedView().num_cols);
+    try std.testing.expectEqual(@as(usize, 0), first.presolved_problem.?.reducedView().num_rows);
+    const first_view = first.resultView(problem).?;
+    try std.testing.expect(first_view.basis_valid);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, -3.0, 5.0 }, first_view.primal);
+    try std.testing.expectEqualSlices(f64, &.{1.0}, first_view.dual);
+    try std.testing.expectApproxEqAbs(@as(f64, -25.0), first_view.objective_value, 1e-12);
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 2.0, -4.0 }, first_view.reduced_cost);
+    try std.testing.expectEqual(LpBasisStatus.basic, first_view.structural_status[0]);
+    try std.testing.expectEqual(LpBasisStatus.at_lower, first_view.structural_status[1]);
+    try std.testing.expectEqual(LpBasisStatus.at_upper, first_view.structural_status[2]);
+    try std.testing.expectEqual(LpBasisStatus.at_upper, first_view.logical_status[0]);
+    try std.testing.expectEqual(@as(u32, 0), first_view.basic_index[0]);
+
+    var snapshot = try LpBasisSnapshot.initFromView(std.testing.allocator, .{
+        .structural_status = first_view.structural_status,
+        .logical_status = first_view.logical_status,
+        .basic_index = first_view.basic_index,
+    });
+    defer snapshot.deinit();
+    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    defer second.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
+    const second_view = second.resultView(problem).?;
+    try std.testing.expect(second_view.basis_valid);
+    try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
+    try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
+}
+
+test "maximize empty-column substitution publishes normalized reduced cost" {
+    const problem = LpProblemView{
+        .num_rows = 0,
+        .num_cols = 1,
+        .col_cost = &.{3.0},
+        .col_lower = &.{-2.0},
+        .col_upper = &.{5.0},
+        .row_lower = &.{},
+        .row_upper = &.{},
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
+        .objective_sense = .maximize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(view.primal_valid);
+    try std.testing.expect(view.dual_valid);
+    try std.testing.expect(view.basis_valid);
+    try std.testing.expectEqualSlices(f64, &.{5.0}, view.primal);
+    try std.testing.expectEqualSlices(f64, &.{-3.0}, view.reduced_cost);
+    try std.testing.expectEqual(LpBasisStatus.at_upper, view.structural_status[0]);
+    try std.testing.expectApproxEqAbs(@as(f64, 15.0), view.objective_value, 1e-12);
+}
+
+test "singleton upper bound postsolves dual reduced cost and basis" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{-1.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{10.0},
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{4.0},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{foundation.RowId.fromUsizeAssumeValid(0)}, &.{1.0}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
+    const view = result.resultView(problem).?;
+    try std.testing.expect(view.primal_valid);
+    try std.testing.expect(view.dual_valid);
+    try std.testing.expect(view.basis_valid);
+    try std.testing.expectEqualSlices(f64, &.{4.0}, view.primal);
+    try std.testing.expectEqualSlices(f64, &.{-1.0}, view.dual);
+    try std.testing.expectEqualSlices(f64, &.{0.0}, view.reduced_cost);
+    try std.testing.expectEqual(LpBasisStatus.basic, view.structural_status[0]);
+    try std.testing.expectEqual(LpBasisStatus.at_lower, view.logical_status[0]);
+    try std.testing.expectEqual(@as(u32, 0), view.basic_index[0]);
+}
+
+test "singleton postsolve restores Farkas rays for every coefficient and bound orientation" {
+    const cases = [_]struct {
+        coefficients: [2]f64,
+        row_lower: [2]f64,
+        row_upper: [2]f64,
+        restored_sign: f64,
+    }{
+        .{
+            .coefficients = .{ 1.0, 1.0 },
+            .row_lower = .{ 2.0, -std.math.inf(f64) },
+            .row_upper = .{ std.math.inf(f64), 1.0 },
+            .restored_sign = 1.0,
+        },
+        .{
+            .coefficients = .{ 1.0, 1.0 },
+            .row_lower = .{ -std.math.inf(f64), 2.0 },
+            .row_upper = .{ 1.0, std.math.inf(f64) },
+            .restored_sign = -1.0,
+        },
+        .{
+            .coefficients = .{ -1.0, 1.0 },
+            .row_lower = .{ -std.math.inf(f64), -std.math.inf(f64) },
+            .row_upper = .{ -2.0, 1.0 },
+            .restored_sign = -1.0,
+        },
+        .{
+            .coefficients = .{ -1.0, 1.0 },
+            .row_lower = .{ -1.0, 2.0 },
+            .row_upper = .{ std.math.inf(f64), std.math.inf(f64) },
+            .restored_sign = 1.0,
+        },
+    };
+    for (cases) |case| {
+        const problem = LpProblemView{
+            .num_rows = 2,
+            .num_cols = 1,
+            .col_cost = &.{0.0},
+            .col_lower = &.{0.0},
+            .col_upper = &.{std.math.inf(f64)},
+            .row_lower = &case.row_lower,
+            .row_upper = &case.row_upper,
+            .matrix = matrix.CscView.initAssumeValid(
+                2,
+                1,
+                &[_]usize{ 0, 2 },
+                &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1) },
+                &case.coefficients,
+            ),
+            .objective_sense = .minimize,
+            .objective_offset = 0.0,
+        };
+        var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+        defer result.deinit();
+        try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
+        const view = result.resultView(problem).?;
+        try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.singleton_row_count);
+        try expectValidFarkas(problem, view.infeasibility_ray);
+        try std.testing.expect(view.infeasibility_ray[0] * case.restored_sign > 0.0);
+        try std.testing.expectApproxEqAbs(
+            @as(f64, 0.0),
+            view.infeasibility_ray[0] * case.coefficients[0] + view.infeasibility_ray[1] * case.coefficients[1],
+            1e-9,
+        );
+    }
+}
+
+test "singleton Farkas postsolve selects the last active bound source" {
+    const problem = LpProblemView{
+        .num_rows = 3,
+        .num_cols = 1,
+        .col_cost = &.{0.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{std.math.inf(f64)},
+        .row_lower = &.{ 1.0, 2.0, -std.math.inf(f64) },
+        .row_upper = &.{ std.math.inf(f64), std.math.inf(f64), 0.0 },
+        .matrix = matrix.CscView.initAssumeValid(
+            3,
+            1,
+            &[_]usize{ 0, 3 },
+            &.{
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(2),
+            },
+            &.{ 1.0, 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
+    try std.testing.expectEqual(@as(u32, 2), result.presolved_problem.?.singleton_row_count);
+    const view = result.resultView(problem).?;
+    try expectValidFarkas(problem, view.infeasibility_ray);
+    try std.testing.expectEqual(@as(f64, 0.0), view.infeasibility_ray[0]);
+    try std.testing.expect(view.infeasibility_ray[1] > 0.0);
+    try std.testing.expect(view.infeasibility_ray[2] < 0.0);
+}
+
+test "multi-pass postsolve preserves a singleton Farkas certificate" {
+    const problem = LpProblemView{
+        .num_rows = 3,
+        .num_cols = 2,
+        .col_cost = &.{ 0.0, 1.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ std.math.inf(f64), 4.0 },
+        .row_lower = &.{ 2.0, -std.math.inf(f64), -std.math.inf(f64) },
+        .row_upper = &.{ std.math.inf(f64), 1.0, 3.0 },
+        .matrix = matrix.CscView.initAssumeValid(
+            3,
+            2,
+            &[_]usize{ 0, 2, 3 },
+            &.{
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(2),
+            },
+            &.{ 1.0, 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    defer result.deinit();
+    try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
+    try std.testing.expectEqual(@as(usize, 2), result.presolved_problem.?.passes.items.len);
+    try std.testing.expectEqual(@as(u32, 2), result.presolved_problem.?.singleton_row_count);
+    const view = result.resultView(problem).?;
+    try expectValidFarkas(problem, view.infeasibility_ray);
+    try std.testing.expect(view.infeasibility_ray[0] > 0.0);
+    try std.testing.expect(view.infeasibility_ray[1] < 0.0);
+    try std.testing.expectEqual(@as(f64, 0.0), view.infeasibility_ray[2]);
+}
+
+test "reduced basis mapping rejects a basic substituted column" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 3,
+        .col_cost = &.{ 1.0, 1.0, 0.0 },
+        .col_lower = &.{ 0.0, 0.0, 2.0 },
+        .col_upper = &.{ std.math.inf(f64), std.math.inf(f64), 2.0 },
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{10.0},
+        .matrix = matrix.CscView.initAssumeValid(
+            1,
+            3,
+            &[_]usize{ 0, 1, 2, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolve.presolve(std.testing.allocator, problem);
     defer pp.deinit();
     const original = LpBasisView{
-        .structural_status = &.{ .at_lower, .basic },
+        .structural_status = &.{ .at_lower, .at_lower, .basic },
         .logical_status = &.{.at_lower},
-        .basic_index = &.{1},
+        .basic_index = &.{2},
     };
     try std.testing.expectError(
-        error.FixedBasicColumn,
+        error.SubstitutedBasicColumn,
         ReducedBasisProjection.init(std.testing.allocator, &pp, original),
     );
+}
+
+test "multi-pass basis chain projects a logical warm basis to the fixed point" {
+    const problem = LpProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 0.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ 1.0, 0.0 },
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{2.0},
+        .matrix = matrix.CscView.initAssumeValid(
+            1,
+            2,
+            &[_]usize{ 0, 1, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pipeline = try presolve.presolvePipeline(std.testing.allocator, problem);
+    defer pipeline.deinit();
+    try std.testing.expectEqual(@as(usize, 2), pipeline.passes.items.len);
+    const original = LpBasisView{
+        .structural_status = &.{ .at_lower, .fixed },
+        .logical_status = &.{.basic},
+        .basic_index = &.{2},
+    };
+    var chain = try ReducedBasisChain.init(std.testing.allocator, &pipeline, original);
+    defer chain.deinit();
+    try std.testing.expectEqual(@as(usize, 0), chain.view().structural_status.len);
+    try std.testing.expectEqual(@as(usize, 0), chain.view().logical_status.len);
+    try std.testing.expectEqual(@as(usize, 0), chain.view().basic_index.len);
 }
 
 test "postsolve preserves unbounded certificates and validity semantics" {
@@ -495,18 +1084,18 @@ test "postsolve preserves unbounded certificates and validity semantics" {
 test "postsolve preserves infeasibility certificates independently of basis validity" {
     const problem = LpProblemView{
         .num_rows = 2,
-        .num_cols = 2,
-        .col_cost = &.{ 0.0, 5.0 },
-        .col_lower = &.{ 0.0, 0.0 },
-        .col_upper = &.{ std.math.inf(f64), 0.0 },
+        .num_cols = 3,
+        .col_cost = &.{ 0.0, 0.0, 5.0 },
+        .col_lower = &.{ 0.0, 0.0, 0.0 },
+        .col_upper = &.{ std.math.inf(f64), std.math.inf(f64), 0.0 },
         .row_lower = &.{ 2.0, -std.math.inf(f64) },
         .row_upper = &.{ std.math.inf(f64), 1.0 },
         .matrix = matrix.CscView.initAssumeValid(
             2,
-            2,
-            &[_]usize{ 0, 2, 2 },
-            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1) },
-            &.{ 1.0, 1.0 },
+            3,
+            &[_]usize{ 0, 2, 4, 4 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1), foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1) },
+            &.{ 1.0, 1.0, 1.0, 1.0 },
         ),
         .objective_sense = .minimize,
         .objective_offset = 0.0,
@@ -582,6 +1171,41 @@ test "session invalidates reuse when the fixed-column mapping changes" {
     try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(second, .{}, changed_revision));
     try std.testing.expectEqual(@as(usize, 2), session.cold_solves);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, session.resultView(second, .optimal).?.primal);
+}
+
+test "session reoptimizes when an empty column switches optimal bound" {
+    var costs = [_]f64{2.0};
+    const problem = LpProblemView{
+        .num_rows = 0,
+        .num_cols = 1,
+        .col_cost = &costs,
+        .col_lower = &.{-3.0},
+        .col_upper = &.{7.0},
+        .row_lower = &.{},
+        .row_upper = &.{},
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var session = LpSolveSession.init(std.testing.allocator);
+    defer session.deinit();
+    const first_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, first_revision));
+    const first = session.resultView(problem, .optimal).?;
+    try std.testing.expectEqualSlices(f64, &.{-3.0}, first.primal);
+    try std.testing.expectApproxEqAbs(@as(f64, -6.0), first.objective_value, 1e-12);
+    try std.testing.expectEqual(LpBasisStatus.at_lower, first.structural_status[0]);
+    try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
+
+    costs[0] = -2.0;
+    const second_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 2 };
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, second_revision));
+    const second = session.resultView(problem, .optimal).?;
+    try std.testing.expectEqualSlices(f64, &.{7.0}, second.primal);
+    try std.testing.expectApproxEqAbs(@as(f64, -14.0), second.objective_value, 1e-12);
+    try std.testing.expectEqual(LpBasisStatus.at_upper, second.structural_status[0]);
+    try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
+    try std.testing.expectEqual(@as(usize, 1), session.reoptimizations);
 }
 
 test {

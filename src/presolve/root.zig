@@ -9,8 +9,10 @@ const std = @import("std");
 pub const rules = @import("rules/root.zig");
 pub const presolve_mod = @import("presolve.zig");
 pub const PresolvedProblem = presolve_mod.PresolvedProblem;
+pub const PresolvePipeline = presolve_mod.PresolvePipeline;
 pub const PresolveResult = presolve_mod.PresolveResult;
 pub const presolve = presolve_mod.presolve;
+pub const presolvePipeline = PresolvePipeline.init;
 pub const postsolve = presolve_mod.postsolve;
 
 test {

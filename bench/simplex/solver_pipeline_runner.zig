@@ -4,13 +4,8 @@
 const std = @import("std");
 const zhighs = @import("zhighs");
 
-fn nowNs() i128 {
-    var timestamp: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &timestamp))) {
-        .SUCCESS => {},
-        else => unreachable,
-    }
-    return @as(i128, timestamp.sec) * std.time.ns_per_s + timestamp.nsec;
+fn nowNs(io_context: std.Io) i96 {
+    return std.Io.Clock.awake.now(io_context).nanoseconds;
 }
 
 fn violation(value: f64, lower: f64, upper: f64) f64 {
@@ -20,7 +15,8 @@ fn violation(value: f64, lower: f64, upper: f64) f64 {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io_context = init.io;
-    var args = std.process.Args.iterate(init.minimal.args);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
     _ = args.next();
     const path = args.next() orelse return error.MissingModelPath;
     const max_iterations = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 1_000_000;
@@ -45,13 +41,13 @@ pub fn main(init: std.process.Init) !void {
         .objective_offset = model.objective_offset,
     };
 
-    const started = nowNs();
+    const started = nowNs(io_context);
     var result = zhighs.solver.solveLp(allocator, problem, .{
         .max_iterations = max_iterations,
         .phase_one_strategy = phase_one_strategy,
     });
     defer result.deinit();
-    const solve_ns: u64 = @intCast(nowNs() - started);
+    const solve_ns: u64 = @intCast(@max(nowNs(io_context) - started, 0));
     const view = result.resultView(problem) orelse {
         const line = try std.fmt.allocPrint(allocator, "zhighs-solver\t{s}\t{s}\tunavailable\t{d}\n", .{ path, @tagName(result.status), solve_ns });
         defer allocator.free(line);

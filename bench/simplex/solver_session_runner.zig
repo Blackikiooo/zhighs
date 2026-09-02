@@ -6,7 +6,8 @@ const zhighs = @import("zhighs");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io_context = init.io;
-    var args = std.process.Args.iterate(init.minimal.args);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
     _ = args.next();
     const path = args.next() orelse return error.MissingModelPath;
     if (args.next() != null) return error.InvalidArguments;
