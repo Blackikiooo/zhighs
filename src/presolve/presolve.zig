@@ -9,15 +9,27 @@
 //! bound are substituted. Their contribution is moved into the row bounds and
 //! objective offset before the column is deleted.
 //!
-//! Phase 2: Redundant empty-row elimination.
+//! Phase 2: Free zero-cost singleton-column elimination.
+//! One such column can satisfy its only row at any activity, so the row and
+//! column are removed together and reconstructed as a basic pair.
+//!
+//! Phase 3: Redundant empty-row elimination.
 //! Rows with no retained coefficients and bounds containing zero are removed.
 //! Original row coordinates are retained so duals, certificates, and bases can
 //! be reconstructed exactly during postsolve.
 //!
-//! Phase 3: Singleton-row bound transfer.
+//! Phase 4: Singleton-row bound transfer.
 //! A row containing one retained coefficient is converted into bounds on that
 //! column and removed. Postsolve records the originating row side so dual and
 //! basis coordinates can be restored.
+//!
+//! Phase 5: Activity-implied redundant-row elimination.
+//! Outward-rounded row activity intervals prove that every point in the
+//! retained column box satisfies a row before it is removed.
+//!
+//! Phase 6: Exact duplicate-row elimination.
+//! Rows with identical adjusted bounds and coefficient sequences share one
+//! retained representative; removed copies recover zero multipliers.
 
 const std = @import("std");
 const foundation = @import("foundation");
@@ -48,6 +60,26 @@ pub const SingletonRowRecord = struct {
     tightened_upper: f64,
     lower_source: ?rules.singleton_row.RowSide,
     upper_source: ?rules.singleton_row.RowSide,
+};
+
+pub const FreeSingletonColumnSide = enum {
+    fixed,
+    lower,
+    upper,
+    free,
+};
+
+/// One free zero-cost singleton column paired with its deleted row. Row-entry
+/// storage excludes the singleton itself and is used to reconstruct primal and
+/// unbounded-ray coordinates.
+pub const FreeSingletonColumnRecord = struct {
+    original_column: u32,
+    original_row: u32,
+    coefficient: f64,
+    side: FreeSingletonColumnSide,
+    target_activity: f64,
+    row_start: u32,
+    row_end: u32,
 };
 
 /// Owns reduced problem data and transformation records for postsolve.
@@ -86,12 +118,18 @@ pub const PresolvedProblem = struct {
     substitution_row_values: []f64,
     column_substitutions: []ColumnSubstitutionRecord,
     column_substitution_count: u32,
+    free_singleton_row_columns: []u32,
+    free_singleton_row_values: []f64,
+    free_singleton_columns: []FreeSingletonColumnRecord,
+    free_singleton_column_count: u32,
     singleton_rows: []SingletonRowRecord,
     singleton_row_count: u32,
+    redundant_row_count: u32,
+    duplicate_row_count: u32,
     removed_row_count: u32,
 
     pub fn wasApplied(self: *const PresolvedProblem) bool {
-        return self.column_substitution_count > 0 or self.removed_row_count > 0;
+        return self.column_substitution_count > 0 or self.free_singleton_column_count > 0 or self.removed_row_count > 0;
     }
 
     pub fn reducedView(self: *const PresolvedProblem) ProblemView {
@@ -124,6 +162,9 @@ pub const PresolvedProblem = struct {
         self.allocator.free(self.substitution_row_indices);
         self.allocator.free(self.substitution_row_values);
         self.allocator.free(self.column_substitutions);
+        self.allocator.free(self.free_singleton_row_columns);
+        self.allocator.free(self.free_singleton_row_values);
+        self.allocator.free(self.free_singleton_columns);
         self.allocator.free(self.singleton_rows);
     }
 };
@@ -169,7 +210,10 @@ pub const PresolvePipeline = struct {
     allocator: std.mem.Allocator,
     passes: std.ArrayListUnmanaged(PresolvedProblem) = .empty,
     column_substitution_count: u32 = 0,
+    free_singleton_column_count: u32 = 0,
     singleton_row_count: u32 = 0,
+    redundant_row_count: u32 = 0,
+    duplicate_row_count: u32 = 0,
     removed_row_count: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, problem: ProblemView) !PresolvePipeline {
@@ -187,7 +231,10 @@ pub const PresolvePipeline = struct {
             }
             std.debug.assert(pass.num_rows < current.num_rows or pass.num_cols < current.num_cols);
             result.column_substitution_count += pass.column_substitution_count;
+            result.free_singleton_column_count += pass.free_singleton_column_count;
             result.singleton_row_count += pass.singleton_row_count;
+            result.redundant_row_count += pass.redundant_row_count;
+            result.duplicate_row_count += pass.duplicate_row_count;
             result.removed_row_count += pass.removed_row_count;
             result.passes.appendAssumeCapacity(pass);
             current = result.passes.items[result.passes.items.len - 1].reducedView();
@@ -246,6 +293,37 @@ const SENTINEL = std.math.maxInt(u32);
 
 /// Apply exact column substitutions and redundant empty-row elimination.
 pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+    // Select at most one free zero-cost singleton column for each row. If a
+    // row has several, later passes see the remaining columns as empty.
+    const raw_row_nnz = try allocator.alloc(u32, problem.num_rows);
+    defer allocator.free(raw_row_nnz);
+    @memset(raw_row_nnz, 0);
+    for (problem.matrix.row_indices) |row| raw_row_nnz[row.toUsize()] += 1;
+    const free_singleton_by_row = try allocator.alloc(u32, problem.num_rows);
+    defer allocator.free(free_singleton_by_row);
+    @memset(free_singleton_by_row, SENTINEL);
+    const free_singleton_row_by_col = try allocator.alloc(u32, problem.num_cols);
+    defer allocator.free(free_singleton_row_by_col);
+    @memset(free_singleton_row_by_col, SENTINEL);
+    var free_singleton_count: u32 = 0;
+    var free_singleton_row_nnz: usize = 0;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        if (!rules.column_substitution.isFreeSingleton(
+            end - begin,
+            problem.col_cost[column],
+            problem.col_lower[column],
+            problem.col_upper[column],
+        )) continue;
+        const row = problem.matrix.row_indices[begin].toUsize();
+        if (free_singleton_by_row[row] != SENTINEL) continue;
+        free_singleton_by_row[row] = @intCast(column);
+        free_singleton_row_by_col[column] = @intCast(row);
+        free_singleton_count += 1;
+        free_singleton_row_nnz += raw_row_nnz[row] - 1;
+    }
+
     // ── Count substitutable columns and their nonzeros ──
     var substitution_count: u32 = 0;
     var substitution_nnz: usize = 0;
@@ -253,6 +331,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     for (0..problem.num_cols) |j| {
         const begin = problem.matrix.col_starts[j];
         const end = problem.matrix.col_starts[j + 1];
+        if (free_singleton_row_by_col[j] != SENTINEL) continue;
         switch (rules.column_substitution.classify(
             end - begin,
             problem.col_cost[j],
@@ -267,7 +346,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
             },
         }
     }
-    const reduced_cols = problem.num_cols - substitution_count;
+    const reduced_cols = problem.num_cols - substitution_count - free_singleton_count;
 
     var adjusted_row_lower = try allocator.dupe(f64, problem.row_lower);
     defer allocator.free(adjusted_row_lower);
@@ -305,8 +384,14 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
         .substitution_row_values = &.{},
         .column_substitutions = &.{},
         .column_substitution_count = substitution_count,
+        .free_singleton_row_columns = &.{},
+        .free_singleton_row_values = &.{},
+        .free_singleton_columns = &.{},
+        .free_singleton_column_count = free_singleton_count,
         .singleton_rows = &.{},
         .singleton_row_count = 0,
+        .redundant_row_count = 0,
+        .duplicate_row_count = 0,
         .removed_row_count = 0,
     };
     errdefer pp.deinit();
@@ -319,9 +404,72 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     pp.substitution_row_indices = try allocator.alloc(u32, substitution_nnz);
     pp.substitution_row_values = try allocator.alloc(f64, substitution_nnz);
     pp.column_substitutions = try allocator.alloc(ColumnSubstitutionRecord, substitution_count);
+    pp.free_singleton_row_columns = try allocator.alloc(u32, free_singleton_row_nnz);
+    pp.free_singleton_row_values = try allocator.alloc(f64, free_singleton_row_nnz);
+    pp.free_singleton_columns = try allocator.alloc(FreeSingletonColumnRecord, free_singleton_count);
     pp.singleton_rows = try allocator.alloc(SingletonRowRecord, problem.num_rows);
 
     @memset(pp.original_to_reduced_col, SENTINEL);
+
+    const free_singleton_record_by_row = try allocator.alloc(u32, problem.num_rows);
+    defer allocator.free(free_singleton_record_by_row);
+    @memset(free_singleton_record_by_row, SENTINEL);
+    var free_record_index: u32 = 0;
+    var free_entry_offset: u32 = 0;
+    for (free_singleton_by_row, 0..) |column, row| {
+        if (column == SENTINEL) continue;
+        const begin = problem.matrix.col_starts[column];
+        const side: FreeSingletonColumnSide = if (std.math.isFinite(problem.row_lower[row]) and
+            problem.row_lower[row] == problem.row_upper[row])
+            .fixed
+        else if (std.math.isFinite(problem.row_lower[row]))
+            .lower
+        else if (std.math.isFinite(problem.row_upper[row]))
+            .upper
+        else
+            .free;
+        const entry_count = raw_row_nnz[row] - 1;
+        pp.free_singleton_columns[free_record_index] = .{
+            .original_column = column,
+            .original_row = @intCast(row),
+            .coefficient = problem.matrix.values[begin],
+            .side = side,
+            .target_activity = switch (side) {
+                .fixed => problem.row_lower[row],
+                .lower => problem.row_lower[row],
+                .upper => problem.row_upper[row],
+                .free => 0.0,
+            },
+            .row_start = free_entry_offset,
+            .row_end = free_entry_offset + entry_count,
+        };
+        free_singleton_record_by_row[row] = free_record_index;
+        free_entry_offset += entry_count;
+        free_record_index += 1;
+    }
+    std.debug.assert(free_record_index == free_singleton_count);
+    std.debug.assert(free_entry_offset == free_singleton_row_nnz);
+
+    const free_entry_cursor = try allocator.alloc(u32, free_singleton_count);
+    defer allocator.free(free_entry_cursor);
+    for (pp.free_singleton_columns, 0..) |record, index|
+        free_entry_cursor[index] = record.row_start;
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row_id, value| {
+            const record_index = free_singleton_record_by_row[row_id.toUsize()];
+            if (record_index == SENTINEL) continue;
+            const record = pp.free_singleton_columns[record_index];
+            if (record.original_column == column) continue;
+            const cursor = free_entry_cursor[record_index];
+            pp.free_singleton_row_columns[cursor] = @intCast(column);
+            pp.free_singleton_row_values[cursor] = value;
+            free_entry_cursor[record_index] += 1;
+        }
+    }
+    for (pp.free_singleton_columns, free_entry_cursor) |record, cursor|
+        std.debug.assert(cursor == record.row_end);
 
     // ── Substitute columns ──
     var rc: u32 = 0;
@@ -331,6 +479,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     for (0..problem.num_cols) |j| {
         const begin = problem.matrix.col_starts[j];
         const end = problem.matrix.col_starts[j + 1];
+        if (free_singleton_row_by_col[j] != SENTINEL) continue;
         switch (rules.column_substitution.classify(
             end - begin,
             problem.col_cost[j],
@@ -347,6 +496,7 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
                         .fixed => .fixed,
                         .lower => .at_lower,
                         .upper => .at_upper,
+                        .free => .free,
                     },
                     .row_start = fnz,
                     .row_end = fnz + @as(u32, @intCast(end - begin)),
@@ -390,8 +540,10 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
     const row_removed = try allocator.alloc(bool, problem.num_rows);
     defer allocator.free(row_removed);
     @memset(row_removed, false);
+    for (pp.free_singleton_columns) |record| row_removed[record.original_row] = true;
     var singleton_count: u32 = 0;
     for (0..problem.num_rows) |row| {
+        if (row_removed[row]) continue;
         if (retained_row_nnz[row] == 0) {
             row_removed[row] = rules.empty_row.classify(0, adjusted_row_lower[row], adjusted_row_upper[row]) == .remove;
             continue;
@@ -430,6 +582,106 @@ pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveErr
         }
     }
     pp.singleton_row_count = singleton_count;
+
+    // Prove general retained rows redundant from an outward-rounded interval
+    // of every possible row activity under the current column bounds. Bounds
+    // transferred by singleton rows above participate immediately.
+    const row_activity = try allocator.alloc(rules.redundant_row.ActivityBounds, problem.num_rows);
+    defer allocator.free(row_activity);
+    for (row_activity) |*activity| activity.* = .{};
+    for (0..problem.num_cols) |original_column| {
+        const reduced_column = pp.original_to_reduced_col[original_column];
+        if (reduced_column == SENTINEL) continue;
+        const begin = problem.matrix.col_starts[original_column];
+        const end = problem.matrix.col_starts[original_column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row_id, coefficient| {
+            const row = row_id.toUsize();
+            if (row_removed[row]) continue;
+            row_activity[row].add(coefficient, pp.col_lower[reduced_column], pp.col_upper[reduced_column]);
+        }
+    }
+    var redundant_count: u32 = 0;
+    for (0..problem.num_rows) |row| {
+        if (row_removed[row]) continue;
+        if (rules.redundant_row.classify(
+            row_activity[row],
+            adjusted_row_lower[row],
+            adjusted_row_upper[row],
+        ) == .remove) {
+            row_removed[row] = true;
+            redundant_count += 1;
+        }
+    }
+    pp.redundant_row_count = redundant_count;
+
+    // Materialize retained rows once in column order. Hashes only select
+    // candidates; exact comparison makes collisions unable to remove a row.
+    const retained_row_starts = try allocator.alloc(usize, problem.num_rows + 1);
+    defer allocator.free(retained_row_starts);
+    retained_row_starts[0] = 0;
+    for (retained_row_nnz, 0..) |count, row|
+        retained_row_starts[row + 1] = retained_row_starts[row] + count;
+    const retained_entry_count = retained_row_starts[problem.num_rows];
+    const retained_row_columns = try allocator.alloc(u32, retained_entry_count);
+    defer allocator.free(retained_row_columns);
+    const retained_row_values = try allocator.alloc(f64, retained_entry_count);
+    defer allocator.free(retained_row_values);
+    const retained_row_cursor = try allocator.dupe(usize, retained_row_starts[0..problem.num_rows]);
+    defer allocator.free(retained_row_cursor);
+    for (0..problem.num_cols) |original_column| {
+        if (pp.original_to_reduced_col[original_column] == SENTINEL) continue;
+        const begin = problem.matrix.col_starts[original_column];
+        const end = problem.matrix.col_starts[original_column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row_id, value| {
+            const row = row_id.toUsize();
+            const cursor = retained_row_cursor[row];
+            retained_row_columns[cursor] = @intCast(original_column);
+            retained_row_values[cursor] = value;
+            retained_row_cursor[row] += 1;
+        }
+    }
+
+    var duplicate_heads: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    defer duplicate_heads.deinit(allocator);
+    const duplicate_next = try allocator.alloc(u32, problem.num_rows);
+    defer allocator.free(duplicate_next);
+    @memset(duplicate_next, SENTINEL);
+    var duplicate_count: u32 = 0;
+    for (0..problem.num_rows) |row| {
+        if (row_removed[row]) continue;
+        const begin = retained_row_starts[row];
+        const end = retained_row_starts[row + 1];
+        const columns = retained_row_columns[begin..end];
+        const values = retained_row_values[begin..end];
+        const signature = rules.duplicate_row.hash(
+            adjusted_row_lower[row],
+            adjusted_row_upper[row],
+            columns,
+            values,
+        );
+        var candidate = duplicate_heads.get(signature) orelse SENTINEL;
+        while (candidate != SENTINEL) : (candidate = duplicate_next[candidate]) {
+            const candidate_begin = retained_row_starts[candidate];
+            const candidate_end = retained_row_starts[candidate + 1];
+            if (!rules.duplicate_row.exactlyEqual(
+                adjusted_row_lower[row],
+                adjusted_row_upper[row],
+                columns,
+                values,
+                adjusted_row_lower[candidate],
+                adjusted_row_upper[candidate],
+                retained_row_columns[candidate_begin..candidate_end],
+                retained_row_values[candidate_begin..candidate_end],
+            )) continue;
+            row_removed[row] = true;
+            duplicate_count += 1;
+            break;
+        }
+        if (row_removed[row]) continue;
+        duplicate_next[row] = duplicate_heads.get(signature) orelse SENTINEL;
+        try duplicate_heads.put(allocator, signature, @intCast(row));
+    }
+    pp.duplicate_row_count = duplicate_count;
 
     var reduced_rows: u32 = 0;
     for (row_removed) |removed| reduced_rows += @intFromBool(!removed);
@@ -524,6 +776,14 @@ pub fn postsolve(
     for (pp.column_substitutions[0..pp.column_substitution_count]) |rec| {
         result.primal[rec.original_column] = rec.value;
     }
+    for (pp.free_singleton_columns[0..pp.free_singleton_column_count]) |rec| {
+        var other_activity: f64 = 0.0;
+        for (rec.row_start..rec.row_end) |entry| {
+            other_activity += pp.free_singleton_row_values[entry] *
+                result.primal[pp.free_singleton_row_columns[entry]];
+        }
+        result.primal[rec.original_column] = (rec.target_activity - other_activity) / rec.coefficient;
+    }
 
     // ── Dual: restore retained rows; redundant empty rows have multiplier 0 ──
     @memset(result.dual, 0.0);
@@ -576,6 +836,14 @@ pub fn postsolve(
         @memset(result.unbounded_ray, 0.0);
         for (0..pp.num_cols) |rc| {
             result.unbounded_ray[pp.reduced_to_original_col[rc]] = solution.unbounded_ray[rc];
+        }
+        for (pp.free_singleton_columns[0..pp.free_singleton_column_count]) |rec| {
+            var other_direction: f64 = 0.0;
+            for (rec.row_start..rec.row_end) |entry| {
+                other_direction += pp.free_singleton_row_values[entry] *
+                    result.unbounded_ray[pp.free_singleton_row_columns[entry]];
+            }
+            result.unbounded_ray[rec.original_column] = -other_direction / rec.coefficient;
         }
     }
 
@@ -694,6 +962,37 @@ test "single fixed column elimination" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), res.primal[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), res.primal[1], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 6.0), res.objective_value, 1e-12);
+}
+
+test "singleton bounds immediately expose a general redundant row" {
+    const problem = ProblemView{
+        .num_rows = 2,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 2.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ 10.0, 1.0 },
+        .row_lower = &.{ -std.math.inf(f64), 0.0 },
+        .row_upper = &.{ 1.0, 2.0 },
+        .matrix = matrix.CscView.initAssumeValid(
+            2,
+            2,
+            &[_]usize{ 0, 2, 3 },
+            &.{
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(1),
+            },
+            &.{ 1.0, 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolve(std.testing.allocator, problem);
+    defer pp.deinit();
+    try std.testing.expectEqual(@as(u32, 1), pp.singleton_row_count);
+    try std.testing.expectEqual(@as(u32, 1), pp.redundant_row_count);
+    try std.testing.expectEqual(@as(u32, 0), pp.num_rows);
+    try std.testing.expectEqual(@as(f64, 1.0), pp.col_upper[0]);
 }
 
 test "rectangular fixed-column postsolve restores every coordinate" {

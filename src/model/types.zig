@@ -100,6 +100,7 @@ pub const Status = enum(u8) {
     in_progress = 12,
     user_obj_limit = 13,
     work_limit = 14,
+    invalid_model = 15,
 
     pub const DEFAULT: Status = .loaded;
 
@@ -121,6 +122,7 @@ pub const Status = enum(u8) {
             .in_progress => "IN_PROGRESS",
             .user_obj_limit => "USER_OBJ_LIMIT",
             .work_limit => "WORK_LIMIT",
+            .invalid_model => "INVALID_MODEL",
         };
     }
 };

@@ -44,7 +44,7 @@ pub fn getIntAttr(self: Model, attr: Attr) ModelError!i64 {
         .num_q_constrs => @intCast(self.qconstr_count),
         .num_bin_vars => @intCast(countVarType(self, .binary)),
         .num_int_vars => @intCast(countVarType(self, .integer)),
-        .sol_count => if (self.status == .optimal) 1 else 0,
+        .sol_count => self.sol_count,
         else => error.InvalidAttribute,
     };
 }
@@ -159,6 +159,10 @@ pub fn getDblAttrElement(self: Model, attr: Attr, element: usize) ModelError!f64
             if (element >= self.reduced_cost.len) return error.IndexOutOfRange;
             return self.reduced_cost[element];
         },
+        .unbd_ray => {
+            if (element >= self.unbounded_ray.len) return error.IndexOutOfRange;
+            return self.unbounded_ray[element];
+        },
         .rhs => {
             if (element >= self.constr_rhs.len) return error.IndexOutOfRange;
             return self.constr_rhs[element];
@@ -170,6 +174,10 @@ pub fn getDblAttrElement(self: Model, attr: Attr, element: usize) ModelError!f64
         .slack => {
             if (element >= self.slack.len) return error.IndexOutOfRange;
             return self.slack[element];
+        },
+        .farkas_dual => {
+            if (element >= self.farkas_dual.len) return error.IndexOutOfRange;
+            return self.farkas_dual[element];
         },
         .start => {
             if (element >= self.mip_start.len) return error.IndexOutOfRange;

@@ -63,12 +63,18 @@ pub fn applyPending(self: *Model) ModelError!void {
         var obj = try alloc.alloc(f64, total_vars);
         var vtype = try alloc.alloc(VarType, total_vars);
         var vnames = try alloc.alloc(?[]const u8, total_vars);
+        var mip_start = try alloc.alloc(f64, total_vars);
+        var p_start = try alloc.alloc(f64, total_vars);
+        var d_start = try alloc.alloc(f64, total_vars);
 
         @memcpy(lb[0..self.num_vars], self.var_lb);
         @memcpy(ub[0..self.num_vars], self.var_ub);
         @memcpy(obj[0..self.num_vars], self.var_obj);
         @memcpy(vtype[0..self.num_vars], self.var_type);
         @memcpy(vnames[0..self.num_vars], self.var_names);
+        if (self.mip_start.len == self.num_vars) @memcpy(mip_start[0..self.num_vars], self.mip_start) else @memset(mip_start[0..self.num_vars], std.math.nan(f64));
+        if (self.p_start.len == self.num_vars) @memcpy(p_start[0..self.num_vars], self.p_start) else @memset(p_start[0..self.num_vars], std.math.nan(f64));
+        if (self.d_start.len == self.num_vars) @memcpy(d_start[0..self.num_vars], self.d_start) else @memset(d_start[0..self.num_vars], std.math.nan(f64));
 
         const added = edit_plan.added_columns.slice();
         for (0..new_vars) |offset| {
@@ -78,6 +84,9 @@ pub fn applyPending(self: *Model) ModelError!void {
             obj[idx] = added.items(.objective)[offset];
             vtype[idx] = added.items(.var_type)[offset];
             vnames[idx] = added.items(.name)[offset];
+            mip_start[idx] = std.math.nan(f64);
+            p_start[idx] = std.math.nan(f64);
+            d_start[idx] = std.math.nan(f64);
         }
 
         alloc.free(self.var_lb);
@@ -85,11 +94,17 @@ pub fn applyPending(self: *Model) ModelError!void {
         alloc.free(self.var_obj);
         alloc.free(self.var_type);
         alloc.free(self.var_names);
+        alloc.free(self.mip_start);
+        alloc.free(self.p_start);
+        alloc.free(self.d_start);
         self.var_lb = lb;
         self.var_ub = ub;
         self.var_obj = obj;
         self.var_type = vtype;
         self.var_names = vnames;
+        self.mip_start = mip_start;
+        self.p_start = p_start;
+        self.d_start = d_start;
     }
 
     // Commit constraint additions.
@@ -566,6 +581,9 @@ pub fn applyPending(self: *Model) ModelError!void {
         var new_obj = try alloc.alloc(f64, kept_vars);
         var new_type = try alloc.alloc(VarType, kept_vars);
         var new_names = try alloc.alloc(?[]const u8, kept_vars);
+        var new_mip_start = try alloc.alloc(f64, kept_vars);
+        var new_p_start = try alloc.alloc(f64, kept_vars);
+        var new_d_start = try alloc.alloc(f64, kept_vars);
         var vp: usize = 0;
         for (0..total_vars) |old| if (!deleted_vars[old]) {
             new_lb[vp] = self.var_lb[old];
@@ -573,6 +591,9 @@ pub fn applyPending(self: *Model) ModelError!void {
             new_obj[vp] = self.var_obj[old];
             new_type[vp] = self.var_type[old];
             new_names[vp] = self.var_names[old];
+            new_mip_start[vp] = self.mip_start[old];
+            new_p_start[vp] = self.p_start[old];
+            new_d_start[vp] = self.d_start[old];
             vp += 1;
         } else if (self.var_names[old]) |name| alloc.free(name);
         alloc.free(self.var_lb);
@@ -580,11 +601,17 @@ pub fn applyPending(self: *Model) ModelError!void {
         alloc.free(self.var_obj);
         alloc.free(self.var_type);
         alloc.free(self.var_names);
+        alloc.free(self.mip_start);
+        alloc.free(self.p_start);
+        alloc.free(self.d_start);
         self.var_lb = new_lb;
         self.var_ub = new_ub;
         self.var_obj = new_obj;
         self.var_type = new_type;
         self.var_names = new_names;
+        self.mip_start = new_mip_start;
+        self.p_start = new_p_start;
+        self.d_start = new_d_start;
 
         var new_sense = try alloc.alloc(Sense, kept_constrs);
         var new_rhs = try alloc.alloc(f64, kept_constrs);

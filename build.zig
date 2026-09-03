@@ -46,6 +46,16 @@ pub fn build(b: *std.Build) void {
             .{ .name = "presolve", .module = presolve_module },
         },
     });
+    const mip_module = b.createModule(.{
+        .root_source_file = b.path("src/mip/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "solver", .module = solver_module },
+        },
+    });
     const io_module = b.createModule(.{
         .root_source_file = b.path("src/io/root.zig"),
         .target = target,
@@ -63,6 +73,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
             .{ .name = "solver", .module = solver_module },
+            .{ .name = "mip", .module = mip_module },
             .{ .name = "io", .module = io_module },
         },
     });
@@ -78,6 +89,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("lp", lp_module);
     mod.addImport("presolve", presolve_module);
     mod.addImport("solver", solver_module);
+    mod.addImport("mip", mip_module);
     mod.addImport("io", io_module);
 
     const exe = b.addExecutable(.{
@@ -116,6 +128,9 @@ pub fn build(b: *std.Build) void {
     const solver_tests = b.addTest(.{ .root_module = solver_module });
     const run_solver_tests = b.addRunArtifact(solver_tests);
 
+    const mip_tests = b.addTest(.{ .root_module = mip_module });
+    const run_mip_tests = b.addRunArtifact(mip_tests);
+
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -131,6 +146,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_presolve_tests.step);
     test_step.dependOn(&run_solver_tests.step);
+    test_step.dependOn(&run_mip_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     const hcd_bench = b.addExecutable(.{

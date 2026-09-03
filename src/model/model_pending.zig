@@ -54,6 +54,9 @@ pub const PendingChange = union(enum) {
 pub fn enqueue(self: *Model, change: PendingChange) ModelError!void {
     self.pending.append(self.allocator, change) catch return error.OutOfMemory;
     self.has_pending = true;
+    // Pending edits already change the logical model seen by the caller, even
+    // before their packed representation is committed by `updateModel`.
+    self.invalidatePublishedResult();
 
     // Auto-flush if the queue grows too large.
     if (self.pending.items.len >= PENDING_FLUSH_THRESHOLD) {

@@ -156,6 +156,7 @@ pub fn validateOptimalSolution(self: *SimplexEngine, problem: problem_module.Pro
 
 /// Borrow the current engine-owned solution arrays without copying.
 pub fn solutionView(self: *const SimplexEngine, problem: problem_module.ProblemView, status: SolveStatus) ?solution_module.SolutionView {
+    if (status == .invalid_model) return null;
     const basis = if (self.basis) |*value| value else return null;
     for (basis.published_primal, basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |*published, internal, scale|
         published.* = internal * scale;

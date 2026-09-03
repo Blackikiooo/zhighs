@@ -14,6 +14,7 @@ const compile_model_module = @import("compile_model.zig");
 const compiled_model_view_module = @import("compiled_model_view.zig");
 const matrix = @import("matrix");
 const solver = @import("solver");
+const mip = @import("mip");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
@@ -46,7 +47,11 @@ pub fn optimize(self: *Model) ModelError!void {
     // Flush any queued modifications.
     try self.updateModel();
 
-    if (self.num_vars == 0) return error.EmptyModel;
+    // A genuinely empty 0-by-0 model keeps the historical API error, but a
+    // constraint-only model is a valid constant-feasibility LP. The simplex
+    // boundary supports zero structural columns and can publish either the
+    // constant objective or an empty-row Farkas certificate.
+    if (self.num_vars == 0 and self.num_constrs == 0) return error.EmptyModel;
 
     // Continuous LPs use the zero-copy fast path: committed column SoA and
     // CSC buffers are borrowed directly, while derived row bounds are cached
@@ -99,7 +104,10 @@ pub fn optimize(self: *Model) ModelError!void {
                 .matrix = matrix.CscView.initAssumeValid(csc.num_rows, csc.num_cols, csc.col_starts, csc.row_indices, csc.values),
             });
         },
-        .milp,
+        .milp => {
+            const linear = compiled.linearData();
+            return solveMixedIntegerLinear(self, linear);
+        },
         .qp,
         .miqp,
         .qcp,
@@ -108,6 +116,121 @@ pub fn optimize(self: *Model) ModelError!void {
         .minlp,
         => return error.FeatureNotAvailable,
     }
+}
+
+fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zig").LinearModel) ModelError!void {
+    const integrality = self.allocator.alloc(mip.Integrality, linear.num_cols) catch return error.OutOfMemory;
+    defer self.allocator.free(integrality);
+    for (self.var_type, integrality) |source, *target| target.* = switch (source) {
+        .continuous => .continuous,
+        .binary => .binary,
+        .integer => .integer,
+        .semicont => .semi_continuous,
+        .semiint => .semi_integer,
+    };
+
+    const csc = linear.matrix.csc();
+    const relaxation = solver.LpProblemView{
+        .num_rows = linear.num_rows,
+        .num_cols = linear.num_cols,
+        .col_cost = linear.col_cost,
+        .col_lower = linear.col_lower,
+        .col_upper = linear.col_upper,
+        .row_lower = linear.row_lower,
+        .row_upper = linear.row_upper,
+        .matrix = matrix.CscView.initAssumeValid(csc.num_rows, csc.num_cols, csc.col_starts, csc.row_indices, csc.values),
+        .objective_sense = switch (linear.objective_sense) {
+            .minimize => .minimize,
+            .maximize => .maximize,
+        },
+        .objective_offset = linear.objective_offset,
+    };
+    const node_limit_value = self.env.getIntParam("NodeLimit") catch std.math.maxInt(i64);
+    const solution_limit_value = self.env.getIntParam("SolutionLimit") catch std.math.maxInt(i64);
+    const iteration_limit_value = self.env.getIntParam("IterationLimit") catch std.math.maxInt(i64);
+    const time_limit_seconds = self.env.getDblParam("TimeLimit") catch std.math.inf(f64);
+    const work_limit_value = self.env.getDblParam("WorkLimit") catch std.math.inf(f64);
+    var callback_bridge = SimplexCallbackBridge{ .model = self };
+    var result = mip.solve(self.allocator, .{ .relaxation = relaxation, .integrality = integrality }, .{
+        .node_limit = nonnegativeLimit(node_limit_value),
+        .solution_limit = nonnegativeLimit(solution_limit_value),
+        .integer_tolerance = self.env.getDblParam("FeasibilityTol") catch 1e-6,
+        .absolute_gap = self.env.getDblParam("MIPGapAbs") catch 1e-10,
+        .relative_gap = self.env.getDblParam("MIPGap") catch 1e-4,
+        .initial_solution = if (self.mip_start.len == linear.num_cols) self.mip_start else null,
+        .lp = .{
+            .max_iterations = nonnegativeLimit(iteration_limit_value),
+            .time_limit_ns = secondsToNanoseconds(time_limit_seconds),
+            .work_limit = workLimit(work_limit_value),
+            .interrupt_flag = &self.interrupted,
+            .iteration_callback = if (self.env.callback != null) SimplexCallbackBridge.iteration else null,
+            .callback_user_data = if (self.env.callback != null) &callback_bridge else null,
+        },
+    }) catch return error.OutOfMemory;
+    defer result.deinit();
+
+    self.clearPublishedResult();
+    self.status = mapMipStatus(result.status);
+    self.node_count = std.math.cast(i64, result.nodes) orelse std.math.maxInt(i64);
+    self.iter_count = std.math.cast(i64, result.lp_iterations) orelse std.math.maxInt(i64);
+    if (result.primal.len == linear.num_cols and result.solution_count != 0) {
+        const slack = self.allocator.alloc(f64, linear.num_rows) catch return error.OutOfMemory;
+        errdefer self.allocator.free(slack);
+        @memset(slack, 0.0);
+        for (0..linear.num_cols) |column| {
+            const begin = csc.col_starts[column];
+            const end = csc.col_starts[column + 1];
+            for (csc.row_indices[begin..end], csc.values[begin..end]) |row, coefficient|
+                slack[row.toUsize()] += coefficient * result.primal[column];
+        }
+        for (slack, self.constr_sense, self.constr_rhs) |*value, sense, rhs| value.* = switch (sense) {
+            .less_equal, .equal => rhs - value.*,
+            .greater_equal => value.* - rhs,
+        };
+        self.solution = result.primal;
+        result.primal = &.{};
+        self.slack = slack;
+        self.obj_val = result.objective_value;
+        self.obj_bound = result.objective_bound;
+        self.sol_count = std.math.cast(i64, result.solution_count) orelse std.math.maxInt(i64);
+    }
+}
+
+fn nonnegativeLimit(value: i64) usize {
+    if (value <= 0) return 0;
+    return std.math.cast(usize, value) orelse std.math.maxInt(usize);
+}
+
+fn secondsToNanoseconds(seconds: f64) ?u64 {
+    if (!std.math.isFinite(seconds)) return null;
+    if (seconds <= 0) return 0;
+    const value = seconds * std.time.ns_per_s;
+    const maximum: f64 = @floatFromInt(std.math.maxInt(u64));
+    return if (value >= maximum) std.math.maxInt(u64) else @intFromFloat(value);
+}
+
+fn workLimit(value: f64) ?u64 {
+    if (!std.math.isFinite(value)) return null;
+    if (value <= 0) return 0;
+    const maximum: f64 = @floatFromInt(std.math.maxInt(u64));
+    return if (value >= maximum) std.math.maxInt(u64) else @intFromFloat(value);
+}
+
+fn mapMipStatus(status: mip.SolveStatus) types.Status {
+    return switch (status) {
+        .optimal => .optimal,
+        .infeasible => .infeasible,
+        .unbounded => .unbounded,
+        .node_limit => .node_limit,
+        .solution_limit => .solution_limit,
+        .iteration_limit => .iteration_limit,
+        .work_limit => .work_limit,
+        .time_limit => .time_limit,
+        .interrupted => .interrupted,
+        .unbounded_or_infeasible => .inf_or_unbd,
+        .invalid_model => .invalid_model,
+        .numerical_failure => .numeric,
+    };
 }
 
 fn isContinuousLp(self: *const Model) bool {
@@ -203,23 +326,45 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
 
     self.status = mapLpStatus(solve_status);
     self.iter_count = std.math.cast(i64, self.lp_session.engine.iterations) orelse std.math.maxInt(i64);
-    if (solve_status == .optimal) {
-        const result_view = self.lp_session.resultView(problem, solve_status) orelse {
-            self.status = .numeric;
-            clearPublishedSolution(self);
-            return;
-        };
-        if (!result_view.primal_valid or !result_view.dual_valid or !result_view.basis_valid) {
-            self.status = .numeric;
-            clearPublishedSolution(self);
-            return;
-        }
-        publishLpSolution(self, problem, result_view) catch |err| {
-            self.status = .numeric;
-            return err;
-        };
-    } else {
-        clearPublishedSolution(self);
+    switch (solve_status) {
+        .optimal => {
+            const result_view = self.lp_session.resultView(problem, solve_status) orelse {
+                self.status = .numeric;
+                self.clearPublishedResult();
+                return;
+            };
+            if (!result_view.primal_valid or !result_view.dual_valid or !result_view.basis_valid) {
+                self.status = .numeric;
+                self.clearPublishedResult();
+                return;
+            }
+            publishLpSolution(self, problem, result_view) catch |err| {
+                self.status = .numeric;
+                return err;
+            };
+        },
+        .infeasible, .unbounded => {
+            const result_view = self.lp_session.resultView(problem, solve_status) orelse {
+                self.status = .numeric;
+                self.clearPublishedResult();
+                return;
+            };
+            const certificate = if (solve_status == .unbounded)
+                result_view.unbounded_ray
+            else
+                result_view.infeasibility_ray;
+            const expected_len = if (solve_status == .unbounded) problem.num_cols else problem.num_rows;
+            if (certificate.len != expected_len) {
+                self.status = .numeric;
+                self.clearPublishedResult();
+                return;
+            }
+            publishLpCertificate(self, solve_status, certificate) catch |err| {
+                self.status = .numeric;
+                return err;
+            };
+        },
+        else => self.clearPublishedResult(),
     }
 }
 
@@ -232,8 +377,14 @@ fn mapLpStatus(status: solver.LpSolveStatus) types.Status {
         .work_limit => .work_limit,
         .time_limit => .time_limit,
         .interrupted => .interrupted,
+        .invalid_model => .invalid_model,
         .numerical_failure, .not_implemented => .numeric,
     };
+}
+
+test "LP invalid model status remains distinct from numerical failure" {
+    try std.testing.expectEqual(types.Status.invalid_model, mapLpStatus(.invalid_model));
+    try std.testing.expectEqualStrings("INVALID_MODEL", types.Status.invalid_model.label());
 }
 
 fn mapBasisStatus(status: solver.LpBasisStatus) types.BasisStatus {
@@ -245,23 +396,26 @@ fn mapBasisStatus(status: solver.LpBasisStatus) types.BasisStatus {
     };
 }
 
-fn clearPublishedSolution(self: *Model) void {
-    self.allocator.free(self.solution);
-    self.allocator.free(self.reduced_cost);
-    self.allocator.free(self.slack);
-    self.allocator.free(self.pi);
-    self.allocator.free(self.vbasis);
-    self.allocator.free(self.cbasis);
-    self.allocator.free(self.basis_head);
-    self.solution = &.{};
-    self.reduced_cost = &.{};
-    self.slack = &.{};
-    self.pi = &.{};
-    self.vbasis = &.{};
-    self.cbasis = &.{};
-    self.basis_head = &.{};
-    self.basis_available = false;
-    self.obj_val = 0.0;
+/// Copy one terminal LP certificate into stable public model storage. The
+/// simplex Farkas convention is positive for row lower bounds and negative for
+/// row upper bounds; `FarkasDual` uses the public/Gurobi convention, so its
+/// sign is reversed. An unbounded primal direction needs no transformation.
+fn publishLpCertificate(
+    self: *Model,
+    status: solver.LpSolveStatus,
+    certificate: []const f64,
+) ModelError!void {
+    const owned = self.allocator.dupe(f64, certificate) catch return error.OutOfMemory;
+    errdefer self.allocator.free(owned);
+    if (status == .infeasible) {
+        for (owned) |*value| value.* = -value.*;
+    }
+    self.clearPublishedResult();
+    switch (status) {
+        .unbounded => self.unbounded_ray = owned,
+        .infeasible => self.farkas_dual = owned,
+        else => unreachable,
+    }
 }
 
 /// Copy the transient engine result exactly once into stable public model
@@ -309,7 +463,7 @@ fn publishLpSolution(self: *Model, problem: solver.LpProblemView, result: solver
         };
     }
 
-    clearPublishedSolution(self);
+    self.clearPublishedResult();
     self.solution = primal;
     self.reduced_cost = reduced_cost;
     self.slack = slack;
@@ -319,6 +473,10 @@ fn publishLpSolution(self: *Model, problem: solver.LpProblemView, result: solver
     self.basis_head = basis_head;
     self.basis_available = true;
     self.obj_val = result.objective_value;
+    // For a proven-optimal continuous LP the incumbent objective and global
+    // bound coincide exactly at the public solver boundary.
+    self.obj_bound = result.objective_value;
+    self.sol_count = 1;
 }
 
 fn basisStatusView(status: []const types.BasisStatus) []const solver.LpBasisStatus {
@@ -336,8 +494,8 @@ fn basisStatusView(status: []const types.BasisStatus) []const solver.LpBasisStat
 /// Discard the solution and reset the status to LOADED
 pub fn reset(self: *Model, clear_all: bool) void {
     _ = clear_all;
+    self.clearPublishedResult();
     self.status = .loaded;
-    self.obj_val = 0.0;
     self.obj_bound = 0.0;
     self.iter_count = 0;
     self.node_count = 0;
@@ -359,6 +517,9 @@ pub fn copy(self: *Model, new_name: []const u8) ModelError!Model {
         new.var_ub = try self.allocator.dupe(f64, self.var_ub);
         new.var_obj = try self.allocator.dupe(f64, self.var_obj);
         new.var_type = try self.allocator.dupe(VarType, self.var_type);
+        new.mip_start = try self.allocator.dupe(f64, self.mip_start);
+        new.p_start = try self.allocator.dupe(f64, self.p_start);
+        new.d_start = try self.allocator.dupe(f64, self.d_start);
         new.var_names = try self.allocator.alloc(?[]const u8, self.num_vars);
         for (self.var_names, 0..) |n, i| {
             new.var_names[i] = if (n) |s| try self.allocator.dupe(u8, s) else null;
@@ -385,7 +546,9 @@ pub fn copy(self: *Model, new_name: []const u8) ModelError!Model {
     new.matrix = MatrixStore.initAssumeValid(csc_copy);
 
     new.sense = self.sense;
-    new.status = self.status;
+    // Transient solve state belongs to the source model's persistent session;
+    // a structural copy starts unsolved and owns no stale solution/certificate.
+    new.status = .loaded;
     new.revision = self.revision;
     return new;
 }

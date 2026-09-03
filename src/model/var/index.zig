@@ -113,6 +113,12 @@ pub const Var = struct {
         return self.model.getDblAttrElement(.rc, (try self.denseIndex()));
     }
 
+    /// Improving primal direction (attribute `UnbdRay`), available after an
+    /// unbounded continuous LP solve with a validated certificate.
+    pub fn getUnbdRay(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.unbd_ray, (try self.denseIndex()));
+    }
+
     pub fn getVarName(self: Self) ModelError![]const u8 {
         return self.model.getStrAttrElement(.var_name, (try self.denseIndex()));
     }

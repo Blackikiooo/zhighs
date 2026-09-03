@@ -121,6 +121,8 @@ pub const Model = struct {
     reduced_cost: []f64 = &.{}, // RC
     slack: []f64 = &.{}, // Slack
     pi: []f64 = &.{}, // Pi (dual)
+    unbounded_ray: []f64 = &.{}, // UnbdRay
+    farkas_dual: []f64 = &.{}, // FarkasDual
 
     obj_val: f64 = 0.0,
     obj_bound: f64 = 0.0,
@@ -128,6 +130,7 @@ pub const Model = struct {
     iter_count: i64 = 0,
     node_count: i64 = 0,
     bar_iter_count: i64 = 0,
+    sol_count: i64 = 0,
 
     // ── Basis ──────────────────────────────────────────────────────────
     vbasis: []BasisStatus = &.{},
@@ -190,8 +193,46 @@ pub const Model = struct {
 
     const Self = @This();
 
+    /// Release every solve result owned by the public model. The retained LP
+    /// session deliberately survives so a subsequent optimize can still use
+    /// its internal basis for revision-aware reoptimization.
+    pub fn clearPublishedResult(self: *Self) void {
+        self.allocator.free(self.solution);
+        self.allocator.free(self.reduced_cost);
+        self.allocator.free(self.slack);
+        self.allocator.free(self.pi);
+        self.allocator.free(self.unbounded_ray);
+        self.allocator.free(self.farkas_dual);
+        self.allocator.free(self.vbasis);
+        self.allocator.free(self.cbasis);
+        self.allocator.free(self.basis_head);
+        self.solution = &.{};
+        self.reduced_cost = &.{};
+        self.slack = &.{};
+        self.pi = &.{};
+        self.unbounded_ray = &.{};
+        self.farkas_dual = &.{};
+        self.vbasis = &.{};
+        self.cbasis = &.{};
+        self.basis_head = &.{};
+        self.basis_available = false;
+        self.obj_val = 0.0;
+        self.obj_bound = 0.0;
+        self.sol_count = 0;
+    }
+
+    /// Mark all public solve attributes stale after a model-data change.
+    pub fn invalidatePublishedResult(self: *Self) void {
+        self.clearPublishedResult();
+        self.status = .loaded;
+        self.iter_count = 0;
+        self.node_count = 0;
+        self.bar_iter_count = 0;
+    }
+
     pub fn markRevision(self: *Self, kind: revision_module.RevisionKind) ModelError!void {
         self.revisions.bump(kind) catch return error.RevisionOverflow;
+        self.invalidatePublishedResult();
     }
 
     // ── Construction / destruction ─────────────────────────────────────
@@ -240,6 +281,8 @@ pub const Model = struct {
         alloc.free(self.reduced_cost);
         alloc.free(self.slack);
         alloc.free(self.pi);
+        alloc.free(self.unbounded_ray);
+        alloc.free(self.farkas_dual);
         alloc.free(self.vbasis);
         alloc.free(self.cbasis);
         alloc.free(self.basis_head);
@@ -637,6 +680,51 @@ test "Model.optimize on empty model returns error" {
     try std.testing.expectError(error.EmptyModel, model.optimize());
 }
 
+test "Model.optimize solves a feasible constraint-only LP" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+
+    var model = try Model.init(std.testing.allocator, &env, "constant-feasible");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 2.0, "always");
+    try model.setDblAttr(.obj_con, 7.0);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 7.0), model.obj_val, 1e-12);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+    try std.testing.expectEqual(@as(usize, 1), model.slack.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), model.slack[0], 1e-12);
+    try std.testing.expectEqual(BasisStatus.basic, model.cbasis[0]);
+}
+
+test "Model.optimize publishes a constraint-only FarkasDual and reoptimizes" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+
+    var model = try Model.init(std.testing.allocator, &env, "constant-infeasible");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 2.0, "impossible");
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.infeasible, model.status);
+    try std.testing.expectEqual(@as(usize, 1), model.farkas_dual.len);
+    try std.testing.expect(model.farkas_dual[0] < 0.0);
+    try std.testing.expectApproxEqAbs(model.farkas_dual[0], try model.getConstr(0).getFarkasDual(), 0.0);
+
+    try model.getConstr(0).setRHS(-1.0);
+    try std.testing.expectEqual(Status.loaded, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.farkas_dual.len);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.farkas_dual.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), model.slack[0], 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), model.lp_session.reoptimizations);
+}
+
 test "Model.optimize publishes an LP solution and basis attributes" {
     var env = try Env.initSimple(std.testing.allocator);
     defer env.deinit();
@@ -650,6 +738,7 @@ test "Model.optimize publishes an LP solution and basis attributes" {
 
     try std.testing.expectEqual(Status.optimal, model.status);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), model.obj_val, 1e-12);
+    try std.testing.expectApproxEqAbs(model.obj_val, try model.getDblAttr(.obj_bound), 0.0);
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), model.solution[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), model.slack[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), model.pi[0], 1e-12);
@@ -671,6 +760,172 @@ test "Model.optimize publishes an LP solution and basis attributes" {
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), model.compiled_view_cache.row_upper[0], 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), model.solution[0], 1e-12);
     try std.testing.expectEqual(@as(usize, 2), model.lp_session.reoptimizations);
+}
+
+test "Model.optimize solves a binary MILP through branch-and-bound" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "binary-mip");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 3.0, "capacity");
+    try model.addVar(1, &.{0}, &.{2.0}, 3.0, 0.0, 1.0, .binary, "x");
+    try model.addVar(1, &.{0}, &.{2.0}, 2.0, 0.0, 1.0, .binary, "y");
+    try model.setIntAttr(.model_sense, -1);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), model.obj_val, 1e-9);
+    try std.testing.expectApproxEqAbs(model.obj_val, model.obj_bound, 0.0);
+    try std.testing.expectEqualSlices(f64, &.{1.0}, model.slack);
+    try std.testing.expect(model.node_count >= 2);
+    try std.testing.expectEqual(@as(i64, 1), try model.getIntAttr(.sol_count));
+    try std.testing.expectEqual(@as(usize, 0), model.vbasis.len);
+}
+
+test "Model.optimize publishes a MILP incumbent at the solution limit" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setIntParam("SolutionLimit", 1);
+    var model = try Model.init(std.testing.allocator, &env, "solution-limit");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 3.0, null);
+    try model.addVar(1, &.{0}, &.{2.0}, 3.0, 0.0, 1.0, .binary, null);
+    try model.addVar(1, &.{0}, &.{2.0}, 2.0, 0.0, 1.0, .binary, null);
+    try model.setIntAttr(.model_sense, -1);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.solution_limit, model.status);
+    try std.testing.expectEqual(@as(usize, 2), model.solution.len);
+    try std.testing.expectEqual(@as(usize, 1), model.slack.len);
+    try std.testing.expectEqual(@as(i64, 1), try model.getIntAttr(.sol_count));
+    try std.testing.expect(model.obj_bound >= model.obj_val);
+}
+
+test "Model.optimize accepts a feasible MIP Start before exploring nodes" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setIntParam("SolutionLimit", 1);
+    var model = try Model.init(std.testing.allocator, &env, "mip-start");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 3.0, null);
+    try model.addVar(1, &.{0}, &.{2.0}, 3.0, 0.0, 1.0, .binary, null);
+    try model.addVar(1, &.{0}, &.{2.0}, 2.0, 0.0, 1.0, .binary, null);
+    try model.setIntAttr(.model_sense, -1);
+    try model.updateModel();
+    try model.setDblAttrElement(.start, 0, 0.0);
+    try model.setDblAttrElement(.start, 1, 1.0);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.solution_limit, model.status);
+    try std.testing.expectEqual(@as(i64, 0), model.node_count);
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 1.0 }, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), model.obj_val, 0.0);
+    try std.testing.expectEqual(@as(i64, 1), model.sol_count);
+    try std.testing.expect(std.math.isPositiveInf(model.obj_bound));
+}
+
+test "Start vectors preserve dense identity through deletion and copy" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "start-lifecycle");
+    defer model.deinit();
+
+    for (0..3) |_| try model.addVar(0, &.{}, &.{}, 0.0, 0.0, 1.0, .binary, null);
+    try model.updateModel();
+    try model.setDblAttrArray(.start, 0, &.{ 1.0, 2.0, 3.0 });
+    try model.setDblAttrArray(.p_start, 0, &.{ 4.0, 5.0, 6.0 });
+    try model.setDblAttrArray(.d_start, 0, &.{ 7.0, 8.0, 9.0 });
+    try model.delVars(&.{1});
+    try model.updateModel();
+
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 3.0 }, model.mip_start);
+    try std.testing.expectEqualSlices(f64, &.{ 4.0, 6.0 }, model.p_start);
+    try std.testing.expectEqualSlices(f64, &.{ 7.0, 9.0 }, model.d_start);
+    var copied = try model.copy("start-copy");
+    defer copied.deinit();
+    try std.testing.expectEqualSlices(f64, model.mip_start, copied.mip_start);
+    try std.testing.expectEqualSlices(f64, model.p_start, copied.p_start);
+    try std.testing.expectEqualSlices(f64, model.d_start, copied.d_start);
+}
+
+test "Model.optimize proves an integer MILP infeasible" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "integer-infeasible");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .equal, 0.5, null);
+    try model.addVar(1, &.{0}, &.{1.0}, 0.0, 0.0, 1.0, .integer, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.infeasible, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+    try std.testing.expect(model.node_count >= 1);
+}
+
+test "Model.optimize enforces the MILP node limit" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setIntParam("NodeLimit", 0);
+    var model = try Model.init(std.testing.allocator, &env, "node-limit");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 1.0, 0.0, 1.0, .binary, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.node_limit, model.status);
+    try std.testing.expectEqual(@as(i64, 0), model.node_count);
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+}
+
+test "Model.optimize enforces the binary domain independently of loose bounds" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "binary-domain");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, 1.0, -5.0, 10.0, .binary, null);
+    try model.setIntAttr(.model_sense, -1);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{1.0}, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), model.obj_val, 0.0);
+}
+
+test "Model.optimize branches on a semi-continuous activation gap" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "semi-continuous");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 1.0, null);
+    try model.addVar(1, &.{0}, &.{1.0}, 1.0, 2.0, 5.0, .semicont, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{2.0}, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), model.obj_val, 1e-9);
+    try std.testing.expect(model.node_count >= 2);
+}
+
+test "Model.optimize enforces the active semi-integer lattice" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "semi-integer");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .greater_equal, 2.5, null);
+    try model.addVar(1, &.{0}, &.{1.0}, 1.0, 2.0, 5.0, .semiint, null);
+    try model.optimize();
+
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{3.0}, model.solution);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), model.obj_val, 1e-9);
 }
 
 test "Model.optimize postsolves fixed columns into public attributes" {
@@ -748,6 +1003,67 @@ test "Model.optimize publishes infeasible status without stale solution arrays" 
     try std.testing.expectEqual(Status.infeasible, model.status);
     try std.testing.expectEqual(@as(usize, 0), model.solution.len);
     try std.testing.expectEqual(@as(usize, 0), model.pi.len);
+}
+
+test "Model publishes presolved FarkasDual and clears it on the next result" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "farkas_certificate");
+    defer model.deinit();
+
+    try model.addConstr(0, &.{}, &.{}, .less_equal, 1.0, null);
+    try model.addVar(1, &[_]usize{0}, &[_]f64{1.0}, 0.0, 2.0, 2.0, .continuous, null);
+    try model.optimize();
+    try std.testing.expectEqual(Status.infeasible, model.status);
+    try std.testing.expectEqual(@as(usize, 1), model.farkas_dual.len);
+    try std.testing.expect(model.farkas_dual[0] > 0.0);
+    try std.testing.expectEqual(model.farkas_dual[0], try model.getDblAttrElement(.farkas_dual, 0));
+    var constraint = try @import("constraint/index.zig").Constr.at(&model, 0);
+    try std.testing.expectEqual(model.farkas_dual[0], try constraint.getFarkasDual());
+
+    var copied = try model.copy("farkas_copy");
+    defer copied.deinit();
+    try std.testing.expectEqual(Status.loaded, copied.status);
+    try std.testing.expectEqual(@as(usize, 0), copied.farkas_dual.len);
+
+    try constraint.setRHS(3.0);
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{2.0}, model.solution);
+    try std.testing.expectEqual(@as(usize, 0), model.farkas_dual.len);
+    try std.testing.expectError(error.IndexOutOfRange, constraint.getFarkasDual());
+}
+
+test "Model publishes UnbdRay and resets its complete lifecycle" {
+    var env = try Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var model = try Model.init(std.testing.allocator, &env, "unbounded_certificate");
+    defer model.deinit();
+
+    try model.addVar(0, &.{}, &.{}, -1.0, 0.0, std.math.inf(f64), .continuous, null);
+    try model.optimize();
+    try std.testing.expectEqual(Status.unbounded, model.status);
+    try std.testing.expectEqualSlices(f64, &.{1.0}, model.unbounded_ray);
+    var variable = try @import("var/index.zig").Var.at(&model, 0);
+    try std.testing.expectEqual(@as(f64, 1.0), try variable.getUnbdRay());
+    try std.testing.expectEqual(@as(f64, 1.0), try model.getDblAttrElement(.unbd_ray, 0));
+    try std.testing.expectEqual(@as(usize, 0), model.solution.len);
+
+    model.reset(false);
+    try std.testing.expectEqual(Status.loaded, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.unbounded_ray.len);
+    try std.testing.expectError(error.IndexOutOfRange, variable.getUnbdRay());
+
+    try model.optimize();
+    try std.testing.expectEqual(Status.unbounded, model.status);
+    try variable.setUB(1.0);
+    try std.testing.expectEqual(Status.loaded, model.status);
+    try std.testing.expectEqual(@as(usize, 0), model.unbounded_ray.len);
+    try std.testing.expectError(error.IndexOutOfRange, variable.getUnbdRay());
+    try model.optimize();
+    try std.testing.expectEqual(Status.optimal, model.status);
+    try std.testing.expectEqualSlices(f64, &.{1.0}, model.solution);
+    try std.testing.expectEqual(@as(usize, 0), model.unbounded_ray.len);
 }
 
 test "Model.optimize maps an immediate TimeLimit" {

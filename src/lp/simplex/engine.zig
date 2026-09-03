@@ -912,11 +912,9 @@ pub const SimplexEngine = struct {
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
+        self.iterations = 0;
+        problem.validate() catch return .invalid_model;
         if (self.controlledStop(control)) |status| return status;
-        problem.validate() catch |err| return switch (err) {
-            error.InvalidBounds => .infeasible,
-            error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
-        };
         self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         var has_dropped_model_coefficient = false;
         for (problem.matrix.values) |coefficient| {
@@ -936,6 +934,7 @@ pub const SimplexEngine = struct {
         self.basis = basis_module.BasisState.init(self.allocator, problem.num_rows, problem.num_cols) catch return .numerical_failure;
         self.degeneracy.ensureCapacity(problem.num_rows, self.basis.?.col_status.len) catch return .numerical_failure;
         if (self.initializeProblemStorage(problem) != .optimal) return .infeasible;
+        if (self.publishEmptyRowInfeasibilityRay(problem)) return .infeasible;
         self.nla.factorization.factorizeIdentity(problem.num_rows) catch return .numerical_failure;
         self.dual_edge_weights_valid = true;
         self.observeFactorizationStability();
@@ -1041,7 +1040,7 @@ pub const SimplexEngine = struct {
                 switch (shifted_dual_status) {
                     .optimal, .work_limit, .time_limit, .iteration_limit, .interrupted => return shifted_dual_status,
                     .infeasible => if (self.infeasibility_ray_valid) return .infeasible,
-                    .unbounded, .not_implemented, .numerical_failure => {},
+                    .unbounded, .invalid_model, .not_implemented, .numerical_failure => {},
                 }
             }
             const dual_phase_one_status = self.solveDualPhaseOne(problem, control);
@@ -1112,6 +1111,7 @@ pub const SimplexEngine = struct {
     pub const installSparseCrashBasis = @import("engine_setup.zig").installSparseCrashBasis;
     pub const refreshProblemStorage = @import("engine_setup.zig").refreshProblemStorage;
     pub const initializeProblemStorage = @import("engine_setup.zig").initializeProblemStorage;
+    pub const publishEmptyRowInfeasibilityRay = @import("engine_setup.zig").publishEmptyRowInfeasibilityRay;
 
     pub const importBasis = @import("engine_basis.zig").importBasis;
     pub const exportBasisView = @import("engine_basis.zig").exportBasisView;
@@ -1202,11 +1202,9 @@ pub const SimplexEngine = struct {
         self.reduced_cost_refresh_period = 8;
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
+        self.iterations = 0;
+        problem.validate() catch return .invalid_model;
         if (self.controlledStop(control)) |status| return status;
-        problem.validate() catch |err| return switch (err) {
-            error.InvalidBounds => .infeasible,
-            error.DimensionMismatch, error.InvalidMatrix => .numerical_failure,
-        };
         self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         if (self.active_pricing_kernel != .column)
             self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
@@ -1216,6 +1214,7 @@ pub const SimplexEngine = struct {
             return self.solveProblem(problem, cold_control);
         }
         self.iterations = 0;
+        if (self.publishEmptyRowInfeasibilityRay(problem)) return .infeasible;
         if (self.recomputeBasicValuesUnchecked(problem) != .optimal or self.recomputeReducedCosts(problem) != .optimal)
             return .numerical_failure;
         const feasibility = self.classifyFeasibility(problem);
@@ -1412,7 +1411,9 @@ test "engine rejects malformed borrowed problem dimensions" {
     };
     var engine = SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
-    try std.testing.expectEqual(SolveStatus.numerical_failure, engine.solveProblem(problem, .{}));
+    const status = engine.solveProblem(problem, .{});
+    try std.testing.expectEqual(SolveStatus.invalid_model, status);
+    try std.testing.expect(engine.solutionView(problem, status) == null);
 }
 
 test "engine retains serial dual workspace for an unchanged model shape" {

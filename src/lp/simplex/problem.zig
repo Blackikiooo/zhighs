@@ -4,6 +4,8 @@
 //! independent of the public model layer so the numerical kernel can sit below
 //! solver dispatch and model adapters in the dependency graph.
 
+const std = @import("std");
+const foundation = @import("foundation");
 const matrix = @import("matrix");
 
 /// Optimization direction. Encoded as +1/-1 so flipping the sense is just a
@@ -35,23 +37,31 @@ pub const ProblemView = struct {
     objective_offset: f64,
 
     /// Structural validation failures detected before simplex initialization.
-    pub const ViewError = error{ DimensionMismatch, InvalidBounds, InvalidMatrix };
+    pub const ViewError = error{ DimensionMismatch, InvalidBounds, InvalidObjective, InvalidMatrix };
 
-    /// Validate borrowed dimensions and finite bound ordering without taking
-    /// ownership or allocating. Intended for the compile/dispatch boundary,
-    /// not for repeated simplex iterations.
+    /// Validate borrowed dimensions, numerical values, and canonical CSC
+    /// storage without taking ownership or allocating. Intended for the
+    /// compile/dispatch boundary, not for repeated simplex iterations.
     pub fn validate(self: ProblemView) ViewError!void {
         if (self.col_cost.len != self.num_cols or self.col_lower.len != self.num_cols or self.col_upper.len != self.num_cols or
             self.row_lower.len != self.num_rows or self.row_upper.len != self.num_rows)
             return error.DimensionMismatch;
-        if (self.matrix.num_rows != self.num_rows or self.matrix.num_cols != self.num_cols or
-            self.matrix.col_starts.len != self.num_cols + 1 or self.matrix.row_indices.len != self.matrix.values.len)
+        if (self.matrix.num_rows != self.num_rows or self.matrix.num_cols != self.num_cols)
             return error.InvalidMatrix;
+        self.matrix.validate() catch return error.InvalidMatrix;
+        if (!std.math.isFinite(self.objective_offset)) return error.InvalidObjective;
+        for (self.col_cost) |cost| {
+            if (!std.math.isFinite(cost)) return error.InvalidObjective;
+        }
         for (self.col_lower, self.col_upper) |lower, upper| {
-            if (lower > upper) return error.InvalidBounds;
+            if (std.math.isNan(lower) or std.math.isNan(upper) or
+                lower == std.math.inf(f64) or upper == -std.math.inf(f64) or lower > upper)
+                return error.InvalidBounds;
         }
         for (self.row_lower, self.row_upper) |lower, upper| {
-            if (lower > upper) return error.InvalidBounds;
+            if (std.math.isNan(lower) or std.math.isNan(upper) or
+                lower == std.math.inf(f64) or upper == -std.math.inf(f64) or lower > upper)
+                return error.InvalidBounds;
         }
     }
 
@@ -84,4 +94,58 @@ test "ProblemView validates borrowed dimensions" {
         .objective_offset = 0.0,
     };
     try view.validate();
+}
+
+test "ProblemView rejects nonfinite objectives and invalid infinite bounds" {
+    var view = ProblemView{
+        .num_rows = 0,
+        .num_cols = 1,
+        .col_cost = &.{0.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{1.0},
+        .row_lower = &.{},
+        .row_upper = &.{},
+        .matrix = matrix.CscView.initAssumeValid(0, 1, &[_]usize{ 0, 0 }, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+
+    view.col_cost = &.{std.math.nan(f64)};
+    try std.testing.expectError(error.InvalidObjective, view.validate());
+    view.col_cost = &.{0.0};
+    view.objective_offset = std.math.inf(f64);
+    try std.testing.expectError(error.InvalidObjective, view.validate());
+    view.objective_offset = 0.0;
+    view.col_lower = &.{std.math.nan(f64)};
+    try std.testing.expectError(error.InvalidBounds, view.validate());
+    view.col_lower = &.{std.math.inf(f64)};
+    try std.testing.expectError(error.InvalidBounds, view.validate());
+    view.col_lower = &.{-std.math.inf(f64)};
+    view.col_upper = &.{-std.math.inf(f64)};
+    try std.testing.expectError(error.InvalidBounds, view.validate());
+}
+
+test "ProblemView validates the full canonical CSC contract" {
+    var view = ProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{0.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{1.0},
+        .row_lower = &.{-std.math.inf(f64)},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 1, 1 }, &.{}, &.{}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    try std.testing.expectError(error.InvalidMatrix, view.validate());
+
+    view.matrix = matrix.CscView.initAssumeValid(
+        1,
+        1,
+        &[_]usize{ 0, 1 },
+        &.{foundation.RowId.fromUsizeAssumeValid(0)},
+        &.{0.0},
+    );
+    try std.testing.expectError(error.InvalidMatrix, view.validate());
 }

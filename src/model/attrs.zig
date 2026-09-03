@@ -89,6 +89,8 @@ pub const Attr = enum {
     x,
     /// Reduced cost vector `c − Aᵀπ`.
     rc,
+    /// Improving primal direction for an unbounded continuous LP.
+    unbd_ray,
     /// Variable name string.
     var_name,
     /// MIP start vector (Start attribute).
@@ -112,6 +114,8 @@ pub const Attr = enum {
     pi,
     /// Constraint slack vector `Ax − b`.
     slack,
+    /// Farkas multiplier for an infeasible continuous LP.
+    farkas_dual,
     /// Constraint basis status (`BasisStatus` enum).
     c_basis,
 
@@ -297,6 +301,7 @@ pub const Attr = enum {
             .v_type => comptime makeInfo(.char, .variable, true),
             .x => comptime makeInfo(.double, .variable, false),
             .rc => comptime makeInfo(.double, .variable, false),
+            .unbd_ray => comptime makeInfo(.double, .variable, false),
             .var_name => comptime makeInfo(.string, .variable, true),
             .v_basis => comptime makeInfo(.int, .variable, true),
             .start => comptime makeInfo(.double, .variable, true),
@@ -308,6 +313,7 @@ pub const Attr = enum {
             .constr_name => comptime makeInfo(.string, .constraint, true),
             .pi => comptime makeInfo(.double, .constraint, false),
             .slack => comptime makeInfo(.double, .constraint, false),
+            .farkas_dual => comptime makeInfo(.double, .constraint, false),
             .c_basis => comptime makeInfo(.int, .constraint, true),
             // IIS
             .iis_minimal => comptime makeInfo(.int, .model, false),
@@ -427,6 +433,8 @@ test "Attr.fromName round-trips known names" {
     try std.testing.expectEqual(Attr.obj_val, Attr.fromName("ObjVal").?);
     try std.testing.expectEqual(Attr.constr_name, Attr.fromName("ConstrName").?);
     try std.testing.expectEqual(Attr.iis_minimal, Attr.fromName("IISMinimal").?);
+    try std.testing.expectEqual(Attr.unbd_ray, Attr.fromName("UnbdRay").?);
+    try std.testing.expectEqual(Attr.farkas_dual, Attr.fromName("FarkasDual").?);
 }
 
 test "Attr.fromName returns null for unknown names" {

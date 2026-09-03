@@ -253,6 +253,45 @@ pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.Pr
         initializeProblemStorageBaseline(self, problem);
 }
 
+/// Publish the canonical one-row Farkas proof for a structurally empty row
+/// whose bounds exclude zero. Raw nonzero coefficients are honored here even
+/// when the numerical matrix policy would drop them: the returned certificate
+/// is valid against the original model, not only the scaled working matrix.
+pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+    const basis = if (self.basis) |*value| value else return false;
+    if (basis.infeasibility_ray.len != problem.num_rows or basis.residual_work.len != problem.num_rows) return false;
+    @memset(basis.residual_work, 0.0);
+    for (problem.matrix.row_indices, problem.matrix.values) |row, coefficient| {
+        if (coefficient != 0.0) basis.residual_work[row.toUsize()] = 1.0;
+    }
+
+    var selected_row: ?usize = null;
+    var selected_multiplier: f64 = 0.0;
+    var selected_gap: f64 = self.numerical.primal_tolerance;
+    for (basis.residual_work, problem.row_lower, problem.row_upper, 0..) |has_coefficient, lower, upper, row| {
+        if (has_coefficient != 0.0) continue;
+        const multiplier: f64, const gap: f64 = if (std.math.isFinite(lower) and lower > self.numerical.primal_tolerance)
+            .{ 1.0, lower }
+        else if (std.math.isFinite(upper) and upper < -self.numerical.primal_tolerance)
+            .{ -1.0, -upper }
+        else
+            continue;
+        if (gap <= selected_gap) continue;
+        selected_row = row;
+        selected_multiplier = multiplier;
+        selected_gap = gap;
+    }
+    const row = selected_row orelse return false;
+    @memset(basis.infeasibility_ray, 0.0);
+    basis.infeasibility_ray[row] = selected_multiplier;
+    self.infeasibility_ray_valid = true;
+    self.infeasibility_certificate_gap = selected_gap;
+    self.infeasibility_certificate_failure = .none;
+    self.infeasibility_certificate_infinite_row_mass = 0.0;
+    self.infeasibility_certificate_infinite_column_mass = 0.0;
+    return true;
+}
+
 /// Baseline initialization with row normalization and conditional column scaling.
 fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -539,4 +578,25 @@ pub fn fillInternalColumnSparse(
         count = 1;
     } else return null;
     return count;
+}
+
+test "empty-row Farkas terminal honors raw coefficients below the working floor" {
+    const row = foundation.RowId.fromUsizeAssumeValid(0);
+    const problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{0.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{std.math.inf(f64)},
+        .row_lower = &.{1.0},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{row}, &.{1e-12}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    engine.basis = try basis_module.BasisState.init(std.testing.allocator, 1, 1);
+    try std.testing.expect(!engine.publishEmptyRowInfeasibilityRay(problem));
+    try std.testing.expect(!engine.infeasibility_ray_valid);
 }

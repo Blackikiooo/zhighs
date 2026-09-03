@@ -13,6 +13,7 @@ pub const SolveStatus = enum {
     work_limit, // Stopped after exhausting the configured floating-point work budget
     time_limit, // Stopped after exhausting the configured wall-clock budget
     interrupted, // Stopped in response to an external cancellation request
+    invalid_model, // Input dimensions, bounds, objective, or matrix storage are invalid
     numerical_failure, // Refactorization could not recover accuracy; aborting
     not_implemented, // Requested path is not yet supported by the engine
 };

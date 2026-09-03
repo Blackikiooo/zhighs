@@ -86,6 +86,12 @@ pub const Constr = struct {
         return self.model.getDblAttrElement(.slack, (try self.denseIndex()));
     }
 
+    /// Infeasibility multiplier (attribute `FarkasDual`), available after an
+    /// infeasible continuous LP solve with a validated certificate.
+    pub fn getFarkasDual(self: Self) ModelError!f64 {
+        return self.model.getDblAttrElement(.farkas_dual, (try self.denseIndex()));
+    }
+
     pub fn getConstrName(self: Self) ModelError![]const u8 {
         return self.model.getStrAttrElement(.constr_name, (try self.denseIndex()));
     }

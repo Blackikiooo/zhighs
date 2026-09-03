@@ -1,6 +1,7 @@
 //! Conservative row-activity bounds for redundant-row presolve.
 
 const std = @import("std");
+const foundation = @import("foundation");
 
 pub const Action = enum {
     keep,
@@ -42,13 +43,17 @@ pub fn classify(activity: ActivityBounds, row_lower: f64, row_upper: f64) Action
 fn outwardProduct(left: f64, right: f64, direction: f64) f64 {
     const product = left * right;
     if (!std.math.isFinite(product)) return product;
-    return std.math.nextAfter(f64, product, direction);
+    const residual = foundation.HCD.twoProduct(left, right).low;
+    const rounded_inward = if (direction < 0.0) residual < 0.0 else residual > 0.0;
+    return if (rounded_inward) std.math.nextAfter(f64, product, direction) else product;
 }
 
 fn outwardAdd(left: f64, right: f64, direction: f64) f64 {
     const sum = left + right;
     if (!std.math.isFinite(sum)) return sum;
-    return std.math.nextAfter(f64, sum, direction);
+    const residual = foundation.HCD.twoSum(left, right).low;
+    const rounded_inward = if (direction < 0.0) residual < 0.0 else residual > 0.0;
+    return if (rounded_inward) std.math.nextAfter(f64, sum, direction) else sum;
 }
 
 test "activity bounds classify redundant infeasible and active rows" {
@@ -63,11 +68,13 @@ test "activity bounds classify redundant infeasible and active rows" {
 test "activity bounds remain conservative with negative and unbounded columns" {
     var negative = ActivityBounds{};
     negative.add(-2.0, 1.0, 4.0);
-    try std.testing.expect(negative.lower < -8.0);
-    try std.testing.expect(negative.upper > -2.0);
+    try std.testing.expectEqual(@as(f64, -8.0), negative.lower);
+    try std.testing.expectEqual(@as(f64, -2.0), negative.upper);
     try std.testing.expect(classify(negative, -9.0, -1.0) == .remove);
 
     var unbounded = ActivityBounds{};
     unbounded.add(1.0, 0.0, std.math.inf(f64));
+    try std.testing.expectEqual(@as(f64, 0.0), unbounded.lower);
+    try std.testing.expect(classify(unbounded, 0.0, std.math.inf(f64)) == .remove);
     try std.testing.expect(classify(unbounded, -std.math.inf(f64), 10.0) == .keep);
 }
