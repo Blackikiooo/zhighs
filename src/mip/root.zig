@@ -1,9 +1,26 @@
-//! Correctness-first serial branch-and-bound over the LP solver boundary.
+//! Plugin-driven serial branch-and-bound over the LP solver boundary.
+//!
+//! The engine owns node management, LP reoptimization, incumbent bookkeeping,
+//! and limit enforcement. Every algorithmic decision is delegated to
+//! components registered through a `framework.PluginRegistry`:
+//!
+//! * branching rules pick the disjunction that splits a fractional node,
+//! * primal heuristics propose incumbent candidates (validated here),
+//! * a node selector picks the next open node to process.
+//!
+//! The default component set reproduces the historical behaviour exactly:
+//! most-fractional branching, LP rounding, and depth-first search.
 
 const std = @import("std");
 const solver = @import("solver");
+const plugin = @import("plugin");
+const framework = @import("framework");
+const builtin_plugins = @import("plugins_builtin");
+const matrix = @import("matrix");
+const foundation = @import("foundation");
 
-pub const Integrality = enum { continuous, integer, binary, semi_continuous, semi_integer };
+pub const Integrality = plugin.Integrality;
+pub const ProblemView = plugin.ProblemView;
 pub const SolveStatus = enum {
     optimal,
     infeasible,
@@ -19,14 +36,14 @@ pub const SolveStatus = enum {
     numerical_failure,
 };
 
-pub const ProblemView = struct {
-    relaxation: solver.LpProblemView,
-    integrality: []const Integrality,
-
-    pub fn validate(self: ProblemView) !void {
-        try self.relaxation.validate();
-        if (self.integrality.len != self.relaxation.num_cols) return error.DimensionMismatch;
-    }
+/// Component overrides for a single solve. Supplied plugin instances must
+/// outlive the call to `solve`. Unset entries fall back to the built-in
+/// defaults; a non-empty `heuristics` list replaces the default rounding
+/// heuristic.
+pub const SolveComponents = struct {
+    branching_rule: ?plugin.BranchingRule = null,
+    node_selector: ?plugin.NodeSelector = null,
+    heuristics: []const plugin.PrimalHeuristic = &.{},
 };
 
 pub const SolveControl = struct {
@@ -38,8 +55,11 @@ pub const SolveControl = struct {
     /// Optional complete primal start in original column coordinates. NaN or
     /// non-finite entries make the candidate unavailable rather than invalid.
     initial_solution: ?[]const f64 = null,
+    /// Legacy switch for the built-in rounding heuristic. Ignored when
+    /// `components.heuristics` is non-empty.
     rounding_heuristic: bool = true,
     lp: solver.LpSolveControl = .{},
+    components: SolveComponents = .{},
 };
 
 pub const SolveResult = struct {
@@ -65,6 +85,7 @@ const Node = struct {
     lower: []f64,
     upper: []f64,
     bound: ?f64 = null,
+    depth: u32 = 0,
 
     fn deinit(self: *Node, allocator: std.mem.Allocator) void {
         allocator.free(self.lower);
@@ -77,10 +98,45 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
     problem.validate() catch return .{ .allocator = allocator, .status = .invalid_model };
     if (!validControl(control)) return .{ .allocator = allocator, .status = .invalid_model };
 
-    var stack: std.ArrayListUnmanaged(Node) = .empty;
+    var registry = framework.PluginRegistry.init(allocator);
+    defer registry.deinit();
+
+    var default_branching = builtin_plugins.branching.MostFractional{};
+    var default_selector = builtin_plugins.node_selectors.Dfs{};
+    var default_heuristic = builtin_plugins.heuristics.Rounding{};
+    if (control.components.branching_rule) |rule| {
+        try registry.addBranchingRule(rule, 0);
+    } else {
+        try registry.addBranchingRule(plugin.bindBranching(builtin_plugins.branching.MostFractional, &default_branching), 0);
+    }
+    if (control.components.node_selector) |selector| {
+        try registry.addNodeSelector(selector, 0);
+    } else {
+        try registry.addNodeSelector(plugin.bindNodeSelector(builtin_plugins.node_selectors.Dfs, &default_selector), 0);
+    }
+    if (control.components.heuristics.len != 0) {
+        for (control.components.heuristics) |heuristic| try registry.addHeuristic(heuristic, 0);
+    } else if (control.rounding_heuristic) {
+        try registry.addHeuristic(plugin.bindHeuristic(builtin_plugins.heuristics.Rounding, &default_heuristic), 0);
+    }
+    const node_selector = registry.primaryNodeSelector().?;
+
+    // Root-level nonzero-branch bounds of semi-continuous / semi-integer
+    // columns; constant across the whole search.
+    const num_cols = problem.relaxation.num_cols;
+    const active_lower = try allocator.alloc(f64, num_cols);
+    defer allocator.free(active_lower);
+    const active_upper = try allocator.alloc(f64, num_cols);
+    defer allocator.free(active_upper);
+    for (problem.integrality, problem.relaxation.col_lower, problem.relaxation.col_upper, active_lower, active_upper) |kind, lower, upper, *active_lo, *active_up| {
+        active_lo.* = if (kind == .semi_integer and std.math.isFinite(lower)) @ceil(lower - control.integer_tolerance) else lower;
+        active_up.* = if (kind == .semi_integer and std.math.isFinite(upper)) @floor(upper + control.integer_tolerance) else upper;
+    }
+
+    var open_nodes: std.ArrayListUnmanaged(Node) = .empty;
     defer {
-        for (stack.items) |*node| node.deinit(allocator);
-        stack.deinit(allocator);
+        for (open_nodes.items) |*node| node.deinit(allocator);
+        open_nodes.deinit(allocator);
     }
     const root_lower = try allocator.dupe(f64, problem.relaxation.col_lower);
     errdefer allocator.free(root_lower);
@@ -88,7 +144,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
     errdefer allocator.free(root_upper);
     if (!normalizeRootBounds(problem.integrality, root_lower, root_upper, control.integer_tolerance))
         return .{ .allocator = allocator, .status = .infeasible };
-    try stack.append(allocator, .{ .lower = root_lower, .upper = root_upper });
+    try open_nodes.append(allocator, .{ .lower = root_lower, .upper = root_upper });
 
     var incumbent: []f64 = &.{};
     errdefer allocator.free(incumbent);
@@ -117,15 +173,25 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
         }
     }
 
-    while (stack.items.len != 0) {
-        if (nodes >= control.node_limit)
-            return finish(allocator, .node_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, stack.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
-        if (iterations >= control.lp.max_iterations)
-            return finish(allocator, .iteration_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, stack.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
-        if (control.lp.work_limit) |limit| if (work >= limit)
-            return finish(allocator, .work_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, stack.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
+    var open_views: std.ArrayListUnmanaged(plugin.OpenNode) = .empty;
+    defer open_views.deinit(allocator);
 
-        var node = stack.pop().?;
+    while (open_nodes.items.len != 0) {
+        if (nodes >= control.node_limit)
+            return finish(allocator, .node_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
+        if (iterations >= control.lp.max_iterations)
+            return finish(allocator, .iteration_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
+        if (control.lp.work_limit) |limit| if (work >= limit)
+            return finish(allocator, .work_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, incumbent_objective, have_incumbent), nodes, iterations, work, solutions, &lp_session);
+
+        open_views.clearRetainingCapacity();
+        for (open_nodes.items) |node| try open_views.append(allocator, .{ .bound = node.bound, .depth = node.depth });
+        const selected = node_selector.select(.{
+            .objective_sense = problem.relaxation.objective_sense,
+            .open = open_views.items,
+        }) orelse break;
+        if (selected >= open_nodes.items.len) break;
+        var node = open_nodes.orderedRemove(selected);
         defer node.deinit(allocator);
         nodes += 1;
         var relaxation = problem.relaxation;
@@ -160,24 +226,54 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             return finish(allocator, .numerical_failure, incumbent, incumbent_objective, 0.0, nodes, iterations, work, solutions, &lp_session);
         if (have_incumbent and cannotImprove(problem.relaxation.objective_sense, view.objective_value, incumbent_objective)) continue;
 
-        const violation = chooseViolation(problem, node, view.primal, control.integer_tolerance);
-        if (violation != null and control.rounding_heuristic) {
-            if (try roundedFeasibleSolution(allocator, problem, view.primal, control.integer_tolerance)) |candidate| {
-                if (!have_incumbent or betterObjective(problem.relaxation.objective_sense, candidate.objective, incumbent_objective)) {
-                    allocator.free(incumbent);
-                    incumbent = candidate.primal;
-                    incumbent_objective = candidate.objective;
-                    have_incumbent = true;
-                    solutions += 1;
-                    if (solutions >= control.solution_limit) {
-                        const pending_bound = combineBound(problem.relaxation.objective_sense, bestOpenBound(problem.relaxation.objective_sense, stack.items, view.objective_value, true), view.objective_value);
-                        return finish(allocator, .solution_limit, incumbent, incumbent_objective, pending_bound, nodes, iterations, work, solutions, &lp_session);
+        const branch_context = plugin.BranchingContext{
+            .problem = problem,
+            .node_lower = node.lower,
+            .node_upper = node.upper,
+            .lp_primal = view.primal,
+            .active_lower = active_lower,
+            .active_upper = active_upper,
+            .tolerance = control.integer_tolerance,
+        };
+        var violation: ?plugin.BranchingCandidate = null;
+        for (registry.branchingRuleEntries()) |entry| {
+            violation = entry.rule.select(branch_context);
+            if (violation != null) break;
+        }
+
+        if (violation != null) {
+            const heuristic_context = plugin.HeuristicContext{
+                .allocator = allocator,
+                .problem = problem,
+                .node_lower = node.lower,
+                .node_upper = node.upper,
+                .lp_primal = view.primal,
+                .active_lower = active_lower,
+                .active_upper = active_upper,
+                .tolerance = control.integer_tolerance,
+            };
+            for (registry.heuristicEntries()) |entry| {
+                const proposed = entry.heuristic.trySolution(heuristic_context) catch return error.OutOfMemory;
+                const raw = proposed orelse continue;
+                defer allocator.free(raw);
+                if (try copyFeasibleSolution(allocator, problem, raw, control.integer_tolerance)) |candidate| {
+                    if (!have_incumbent or betterObjective(problem.relaxation.objective_sense, candidate.objective, incumbent_objective)) {
+                        allocator.free(incumbent);
+                        incumbent = candidate.primal;
+                        incumbent_objective = candidate.objective;
+                        have_incumbent = true;
+                        solutions += 1;
+                        if (solutions >= control.solution_limit) {
+                            const pending_bound = combineBound(problem.relaxation.objective_sense, bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, view.objective_value, true), view.objective_value);
+                            return finish(allocator, .solution_limit, incumbent, incumbent_objective, pending_bound, nodes, iterations, work, solutions, &lp_session);
+                        }
+                    } else {
+                        allocator.free(candidate.primal);
                     }
-                } else {
-                    allocator.free(candidate.primal);
                 }
             }
         }
+
         if (violation == null) {
             const candidate = try allocator.dupe(f64, view.primal);
             allocator.free(incumbent);
@@ -186,8 +282,8 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             have_incumbent = true;
             solutions += 1;
             if (solutions >= control.solution_limit)
-                return finish(allocator, .solution_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, stack.items, incumbent_objective, true), nodes, iterations, work, solutions, &lp_session);
-            const open_bound = bestOpenBound(problem.relaxation.objective_sense, stack.items, incumbent_objective, true);
+                return finish(allocator, .solution_limit, incumbent, incumbent_objective, bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, incumbent_objective, true), nodes, iterations, work, solutions, &lp_session);
+            const open_bound = bestOpenBound(problem.relaxation.objective_sense, open_nodes.items, incumbent_objective, true);
             if (gapSatisfied(open_bound, incumbent_objective, control))
                 return finish(allocator, .optimal, incumbent, incumbent_objective, open_bound, nodes, iterations, work, solutions, &lp_session);
             continue;
@@ -201,13 +297,13 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
                     var child = try cloneNode(allocator, node, view.objective_value);
                     errdefer child.deinit(allocator);
                     child.upper[column] = @min(child.upper[column], @floor(value));
-                    if (child.lower[column] <= child.upper[column]) try stack.append(allocator, child) else child.deinit(allocator);
+                    if (child.lower[column] <= child.upper[column]) try open_nodes.append(allocator, child) else child.deinit(allocator);
                 }
                 if (@ceil(value) <= node.upper[column] + control.integer_tolerance) {
                     var child = try cloneNode(allocator, node, view.objective_value);
                     errdefer child.deinit(allocator);
                     child.lower[column] = @max(child.lower[column], @ceil(value));
-                    if (child.lower[column] <= child.upper[column]) try stack.append(allocator, child) else child.deinit(allocator);
+                    if (child.lower[column] <= child.upper[column]) try open_nodes.append(allocator, child) else child.deinit(allocator);
                 }
             },
             .semi_activation => {
@@ -216,13 +312,13 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
                     errdefer zero.deinit(allocator);
                     zero.lower[column] = 0;
                     zero.upper[column] = 0;
-                    try stack.append(allocator, zero);
+                    try open_nodes.append(allocator, zero);
                 }
                 var active = try cloneNode(allocator, node, view.objective_value);
                 errdefer active.deinit(allocator);
-                active.lower[column] = @max(active.lower[column], activeLower(problem, column, control.integer_tolerance));
-                active.upper[column] = @min(active.upper[column], activeUpper(problem, column, control.integer_tolerance));
-                if (active.lower[column] <= active.upper[column]) try stack.append(allocator, active) else active.deinit(allocator);
+                active.lower[column] = @max(active.lower[column], active_lower[column]);
+                active.upper[column] = @min(active.upper[column], active_upper[column]);
+                if (active.lower[column] <= active.upper[column]) try open_nodes.append(allocator, active) else active.deinit(allocator);
             },
         }
     }
@@ -264,43 +360,6 @@ fn normalizeRootBounds(integrality: []const Integrality, lower: []f64, upper: []
 fn hasIntegerColumns(integrality: []const Integrality) bool {
     for (integrality) |kind| if (kind != .continuous) return true;
     return false;
-}
-
-const Violation = struct {
-    column: usize,
-    kind: enum { integer, semi_activation },
-};
-
-fn chooseViolation(problem: ProblemView, node: Node, primal: []const f64, tolerance: f64) ?Violation {
-    var best: ?Violation = null;
-    var score: f64 = 0;
-    for (problem.integrality, primal, 0..) |kind, value, column| {
-        if (kind == .continuous) continue;
-        if (kind == .semi_continuous or kind == .semi_integer) {
-            const zero_allowed = node.lower[column] <= tolerance and node.upper[column] >= -tolerance;
-            const active = value >= activeLower(problem, column, tolerance) - tolerance and
-                value <= activeUpper(problem, column, tolerance) + tolerance;
-            if (zero_allowed and @abs(value) <= tolerance) continue;
-            if (!active) return .{ .column = column, .kind = .semi_activation };
-            if (kind == .semi_continuous) continue;
-        }
-        const fractionality = @abs(value - @round(value));
-        if (fractionality > tolerance and fractionality > score) {
-            best = .{ .column = column, .kind = .integer };
-            score = fractionality;
-        }
-    }
-    return best;
-}
-
-fn activeLower(problem: ProblemView, column: usize, tolerance: f64) f64 {
-    const lower = problem.relaxation.col_lower[column];
-    return if (problem.integrality[column] == .semi_integer and std.math.isFinite(lower)) @ceil(lower - tolerance) else lower;
-}
-
-fn activeUpper(problem: ProblemView, column: usize, tolerance: f64) f64 {
-    const upper = problem.relaxation.col_upper[column];
-    return if (problem.integrality[column] == .semi_integer and std.math.isFinite(upper)) @floor(upper + tolerance) else upper;
 }
 
 const Candidate = struct { primal: []f64, objective: f64 };
@@ -370,30 +429,6 @@ fn copyFeasibleSolution(allocator: std.mem.Allocator, problem: ProblemView, valu
     return .{ .primal = primal, .objective = objective };
 }
 
-fn roundedFeasibleSolution(allocator: std.mem.Allocator, problem: ProblemView, relaxation: []const f64, tolerance: f64) !?Candidate {
-    const rounded = try allocator.dupe(f64, relaxation);
-    defer allocator.free(rounded);
-    for (problem.integrality, rounded, 0..) |kind, *value, column| switch (kind) {
-        .continuous => {},
-        .integer => value.* = std.math.clamp(@round(value.*), activeLower(problem, column, tolerance), activeUpper(problem, column, tolerance)),
-        .binary => value.* = std.math.clamp(@round(value.*), @max(0.0, problem.relaxation.col_lower[column]), @min(1.0, problem.relaxation.col_upper[column])),
-        .semi_continuous, .semi_integer => {
-            const lower = activeLower(problem, column, tolerance);
-            const upper = activeUpper(problem, column, tolerance);
-            if (lower > upper) {
-                value.* = 0;
-                continue;
-            }
-            const active = if (kind == .semi_integer)
-                std.math.clamp(@round(value.*), lower, upper)
-            else
-                std.math.clamp(value.*, lower, upper);
-            value.* = if (@abs(value.*) <= @abs(value.* - active)) 0 else active;
-        },
-    };
-    return copyFeasibleSolution(allocator, problem, rounded, tolerance);
-}
-
 fn betterObjective(sense: solver.LpObjectiveSense, candidate: f64, incumbent: f64) bool {
     return switch (sense) {
         .minimize => candidate < incumbent,
@@ -411,7 +446,7 @@ fn unknownBound(sense: solver.LpObjectiveSense) f64 {
 fn cloneNode(allocator: std.mem.Allocator, source: Node, bound: f64) !Node {
     const lower = try allocator.dupe(f64, source.lower);
     errdefer allocator.free(lower);
-    return .{ .lower = lower, .upper = try allocator.dupe(f64, source.upper), .bound = bound };
+    return .{ .lower = lower, .upper = try allocator.dupe(f64, source.upper), .bound = bound, .depth = source.depth + 1 };
 }
 
 fn cannotImprove(sense: solver.LpObjectiveSense, bound: f64, incumbent: f64) bool {
@@ -473,10 +508,8 @@ fn finish(allocator: std.mem.Allocator, status: SolveStatus, primal: []f64, obje
     };
 }
 
-test "branch-and-bound solves a fractional binary relaxation" {
-    const matrix = @import("matrix");
-    const foundation = @import("foundation");
-    const relaxation = solver.LpProblemView{
+fn fractionalBinaryRelaxation() solver.LpProblemView {
+    return .{
         .num_rows = 1,
         .num_cols = 2,
         .col_cost = &.{ 1.0, 1.0 },
@@ -488,6 +521,10 @@ test "branch-and-bound solves a fractional binary relaxation" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
+}
+
+test "branch-and-bound solves a fractional binary relaxation" {
+    const relaxation = fractionalBinaryRelaxation();
     var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{});
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
@@ -520,8 +557,6 @@ test "branch-and-bound solves a fractional binary relaxation" {
 }
 
 test "branch-and-bound reoptimizes stable node LP mappings" {
-    const matrix = @import("matrix");
-    const foundation = @import("foundation");
     const relaxation = solver.LpProblemView{
         .num_rows = 2,
         .num_cols = 2,
@@ -543,8 +578,6 @@ test "branch-and-bound reoptimizes stable node LP mappings" {
 }
 
 test "branch-and-bound proves integer infeasibility" {
-    const matrix = @import("matrix");
-    const foundation = @import("foundation");
     const relaxation = solver.LpProblemView{
         .num_rows = 1,
         .num_cols = 1,
@@ -560,4 +593,61 @@ test "branch-and-bound proves integer infeasibility" {
     var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{.integer} }, .{});
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.infeasible, result.status);
+}
+
+test "plugin components can override node selection and branching" {
+    const FirstFractional = struct {
+        pub const name = "first-fractional-test";
+        pub fn select(_: *const @This(), ctx: plugin.BranchingContext) ?plugin.BranchingCandidate {
+            for (ctx.problem.integrality, ctx.lp_primal, 0..) |kind, value, column| {
+                if (kind == .continuous or kind == .semi_continuous) continue;
+                if (@abs(value - @round(value)) > ctx.tolerance) return .{ .column = column, .kind = .integer };
+            }
+            return null;
+        }
+    };
+    const Fifo = struct {
+        pub const name = "fifo-test";
+        pub fn select(_: *const @This(), ctx: plugin.NodeSelectionContext) ?usize {
+            return if (ctx.open.len == 0) null else 0;
+        }
+    };
+    var branching = FirstFractional{};
+    var selector = Fifo{};
+    var result = try solve(std.testing.allocator, .{
+        .relaxation = fractionalBinaryRelaxation(),
+        .integrality = &.{ .integer, .integer },
+    }, .{ .components = .{
+        .branching_rule = plugin.bindBranching(FirstFractional, &branching),
+        .node_selector = plugin.bindNodeSelector(Fifo, &selector),
+    } });
+    defer result.deinit();
+    try std.testing.expectEqual(SolveStatus.optimal, result.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.objective_value, 1e-9);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 1.0 }, result.primal);
+}
+
+test "best-bound node selection preserves optimal objective" {
+    var selector = builtin_plugins.node_selectors.BestBound{};
+    var result = try solve(std.testing.allocator, .{
+        .relaxation = fractionalBinaryRelaxation(),
+        .integrality = &.{ .integer, .integer },
+    }, .{ .components = .{
+        .node_selector = plugin.bindNodeSelector(builtin_plugins.node_selectors.BestBound, &selector),
+    } });
+    defer result.deinit();
+    try std.testing.expectEqual(SolveStatus.optimal, result.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.objective_value, 1e-9);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 1.0 }, result.primal);
+}
+
+test "disabling the rounding heuristic keeps the search correct" {
+    var result = try solve(std.testing.allocator, .{
+        .relaxation = fractionalBinaryRelaxation(),
+        .integrality = &.{ .integer, .integer },
+    }, .{ .rounding_heuristic = false });
+    defer result.deinit();
+    try std.testing.expectEqual(SolveStatus.optimal, result.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.objective_value, 1e-9);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 1.0 }, result.primal);
 }

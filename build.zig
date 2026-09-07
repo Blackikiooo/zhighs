@@ -46,6 +46,33 @@ pub fn build(b: *std.Build) void {
             .{ .name = "presolve", .module = presolve_module },
         },
     });
+    const plugin_module = b.createModule(.{
+        .root_source_file = b.path("src/plugin/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "solver", .module = solver_module },
+        },
+    });
+    const framework_module = b.createModule(.{
+        .root_source_file = b.path("src/framework/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "plugin", .module = plugin_module },
+        },
+    });
+    const plugins_builtin_module = b.createModule(.{
+        .root_source_file = b.path("src/plugins_builtin/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "solver", .module = solver_module },
+            .{ .name = "plugin", .module = plugin_module },
+        },
+    });
     const mip_module = b.createModule(.{
         .root_source_file = b.path("src/mip/root.zig"),
         .target = target,
@@ -54,6 +81,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
             .{ .name = "solver", .module = solver_module },
+            .{ .name = "plugin", .module = plugin_module },
+            .{ .name = "framework", .module = framework_module },
+            .{ .name = "plugins_builtin", .module = plugins_builtin_module },
         },
     });
     const io_module = b.createModule(.{
@@ -91,6 +121,9 @@ pub fn build(b: *std.Build) void {
     mod.addImport("solver", solver_module);
     mod.addImport("mip", mip_module);
     mod.addImport("io", io_module);
+    mod.addImport("plugin", plugin_module);
+    mod.addImport("framework", framework_module);
+    mod.addImport("plugins_builtin", plugins_builtin_module);
 
     const exe = b.addExecutable(.{
         .name = "zhighs",
@@ -131,6 +164,15 @@ pub fn build(b: *std.Build) void {
     const mip_tests = b.addTest(.{ .root_module = mip_module });
     const run_mip_tests = b.addRunArtifact(mip_tests);
 
+    const plugin_tests = b.addTest(.{ .root_module = plugin_module });
+    const run_plugin_tests = b.addRunArtifact(plugin_tests);
+
+    const framework_tests = b.addTest(.{ .root_module = framework_module });
+    const run_framework_tests = b.addRunArtifact(framework_tests);
+
+    const plugins_builtin_tests = b.addTest(.{ .root_module = plugins_builtin_module });
+    const run_plugins_builtin_tests = b.addRunArtifact(plugins_builtin_tests);
+
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -147,6 +189,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_presolve_tests.step);
     test_step.dependOn(&run_solver_tests.step);
     test_step.dependOn(&run_mip_tests.step);
+    test_step.dependOn(&run_plugin_tests.step);
+    test_step.dependOn(&run_framework_tests.step);
+    test_step.dependOn(&run_plugins_builtin_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
     const hcd_bench = b.addExecutable(.{

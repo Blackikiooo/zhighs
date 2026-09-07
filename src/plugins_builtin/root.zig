@@ -5,6 +5,10 @@
 
 const std = @import("std");
 
+pub const branching = @import("branching.zig");
+pub const heuristics = @import("heuristics.zig");
+pub const node_selectors = @import("node_selectors.zig");
+
 test {
     std.testing.refAllDecls(@This());
 }
