@@ -163,6 +163,8 @@ pub fn build(b: *std.Build) void {
 
     const mip_tests = b.addTest(.{ .root_module = mip_module });
     const run_mip_tests = b.addRunArtifact(mip_tests);
+    const mip_test_step = b.step("test-mip", "Run mixed-integer solver tests");
+    mip_test_step.dependOn(&run_mip_tests.step);
 
     const plugin_tests = b.addTest(.{ .root_module = plugin_module });
     const run_plugin_tests = b.addRunArtifact(plugin_tests);
@@ -456,6 +458,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_io_parser_bench.addArgs(args);
     const io_bench_step = b.step("bench-io", "Benchmark model parsing and canonical construction");
     io_bench_step.dependOn(&run_io_parser_bench.step);
+
+    const mip_solver_bench = b.addExecutable(.{
+        .name = "mip-solver-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/mip/solver_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_mip_solver_bench = b.addRunArtifact(mip_solver_bench);
+    if (b.args) |args| run_mip_solver_bench.addArgs(args);
+    const mip_bench_step = b.step("bench-mip", "Benchmark end-to-end branch-and-bound solves");
+    mip_bench_step.dependOn(&run_mip_solver_bench.step);
+    const install_mip_solver_bench = b.addInstallArtifact(mip_solver_bench, .{});
+    const build_mip_bench_step = b.step("build-bench-mip", "Build the MIP profiling binary without running it");
+    build_mip_bench_step.dependOn(&install_mip_solver_bench.step);
 
     const perf_profile = b.addExecutable(.{
         .name = "perf-profile",

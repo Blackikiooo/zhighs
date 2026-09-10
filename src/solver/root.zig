@@ -202,6 +202,26 @@ pub const LpSolveSession = struct {
         return status;
     }
 
+    /// Solve a bound-varying relaxation without rebuilding presolve mappings.
+    ///
+    /// MIP node processing keeps matrix structure and values fixed while
+    /// changing column bounds. Re-running top-level presolve at every node can
+    /// change the reduced mapping and defeat basis/factorization reuse. The
+    /// first call after a presolved solve is forced cold in original
+    /// coordinates; subsequent compatible calls use direct reoptimization.
+    pub fn solveRelaxation(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
+        problem.validate() catch {
+            self.clearPresolveState();
+            self.last_revision = null;
+            self.last_rows = 0;
+            self.last_cols = 0;
+            return self.engine.solveProblem(problem, control);
+        };
+        const force_cold = self.presolved_problem != null;
+        self.clearPresolveState();
+        return self.solveReduced(problem, control, revision, force_cold);
+    }
+
     fn solveReduced(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp, force_cold: bool) LpSolveStatus {
         const reusable = !force_cold and if (self.last_revision) |last|
             last.structure == revision.structure and last.matrix_values == revision.matrix_values and
@@ -517,13 +537,13 @@ const ExpandedBasis = struct {
         result.basic_index = try allocator.alloc(u32, pp.original_num_rows);
         result.row_scale = try allocator.alloc(f64, pp.original_num_rows);
 
-        @memset(result.structural_status, .at_lower);
+        @memset(result.structural_status, LpBasisStatus.at_lower);
         for (pp.column_substitutions[0..pp.column_substitution_count]) |record|
             result.structural_status[record.original_column] = record.basis_status;
         for (pp.reduced_to_original_col, 0..) |original_col, reduced_col|
             result.structural_status[original_col] = reduced_structural_status[reduced_col];
-
-        @memset(result.logical_status, .basic);
+        
+        @memset(result.logical_status, LpBasisStatus.basic);
         @memset(result.row_scale, 1.0);
         for (pp.reduced_to_original_row, 0..) |original_row, reduced_row| {
             result.logical_status[original_row] = reduced_logical_status[reduced_row];
