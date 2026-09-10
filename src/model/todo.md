@@ -130,7 +130,7 @@
 
 | C API | 状态 | zhighs 对应 | 说明 |
 | --- | --- | --- | --- |
-| `optimize` | 🧪 | `Model.optimize` | **仅 continuous LP** 路径完整。MILP/QP/MIQP/NLP 均返回 `FeatureNotAvailable` |
+| `optimize` | 🧪 | `Model.optimize` | LP 与 MILP 路径完整（MILP 经 `src/mip` branch-and-bound）；QP/MIQP/NLP 仍返回 `FeatureNotAvailable` |
 | `optimizeasync` | ❌ | — | 异步求解未实现 |
 | `presolvemodel` | 🪣 | `model_advanced.presolveModel` | Stub（仅 set status） |
 | `computeIIS` | 🪣 | `model_advanced.computeIIS` | Stub（仅 set status） |
@@ -260,7 +260,7 @@ PWL 目标                ██████████ 100%
 
 ```
 Continuous LP          ██████████ 100%  simplex 引擎完整接入
-MILP (branch&bound)    ░░░░░░░░░░   0%  返回 FeatureNotAvailable
+MILP (branch&bound)    ████████░░  80%  src/mip B&B 已接入 Model.optimize；cuts/heuristics 待增强
 QP / MIQP              ░░░░░░░░░░   0%  返回 FeatureNotAvailable
 QCP / MIQCP            ░░░░░░░░░░   0%  返回 FeatureNotAvailable
 NLP / MINLP            ░░░░░░░░░░   0%  返回 FeatureNotAvailable
@@ -296,12 +296,10 @@ Advanced Simplex       ██░░░░░░░░  20%  getBasisHead ✓, FT
 
 ### 当前建议执行顺序
 
-1. **MILP 求解路径**（branch-and-bound + cuts + heuristics）— 解锁 `Model.optimize` 对 MIP 模型的完整支持。这是从 "仅 LP" 到 "可对标 HiGHS" 的关键步骤。
+1. **Presolve 实现** — 对 LP 和 MILP 同时生效的性能提升。依赖 `src/presolve/` 模块的 reduction rule 实现。（MILP 求解路径已接入：`src/model/model_solve.zig` → `src/mip` branch-and-bound。）
 
-2. **Presolve 实现** — 对 LP 和 MILP 同时生效的性能提升。依赖 `src/presolve/` 模块的 reduction rule 实现。
+2. **MIP 回调接入** — `cbCut`（lazy constraints）、`cbSolution`（heuristic solutions）、`cbGet`（callback-time query）。MILP solver 已就位，回调仍是 stub。
 
-3. **MIP 回调接入** — `cbCut`（lazy constraints）、`cbSolution`（heuristic solutions）、`cbGet`（callback-time query）。MILP solver 就位后可以接入。
+3. **QP 求解路径** — Active-set 或 barrier QP solver。数据层已完整，仅缺 solver 实现。
 
-4. **QP 求解路径** — Active-set 或 barrier QP solver。数据层已完整，仅缺 solver 实现。
-
-5. **一般约束求解** — 将 GenConstr 翻译为 MIP 等价形式（big-M、SOS、PWL 近似）或接入 NLP solver。
+4. **一般约束求解** — 将 GenConstr 翻译为 MIP 等价形式（big-M、SOS、PWL 近似）或接入 NLP solver。

@@ -10,7 +10,13 @@ const std = @import("std");
 const solver = @import("solver");
 
 /// Integrality classification of a structural column in a mixed-integer model.
-pub const Integrality = enum { continuous, integer, binary, semi_continuous, semi_integer };
+pub const Integrality = enum {
+    continuous,
+    integer,
+    binary,
+    semi_continuous,
+    semi_integer,
+};
 
 /// A mixed-integer problem described by its LP relaxation plus column
 /// integrality. Borrowed, never owned, by every plugin context.

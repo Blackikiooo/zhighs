@@ -580,6 +580,7 @@ pub fn build(b: *std.Build) void {
     const run_model_tests = b.addRunArtifact(model_tests);
     const model_test_step = b.step("test-model", "Run model core tests (no API/solver)");
     model_test_step.dependOn(&run_model_tests.step);
+    test_step.dependOn(&run_model_tests.step);
 
     const io_tests = b.addTest(.{ .root_module = io_module });
     const run_io_tests = b.addRunArtifact(io_tests);

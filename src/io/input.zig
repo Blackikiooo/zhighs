@@ -27,18 +27,31 @@ pub const FileInput = union(enum) {
         const size = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
         if (size == 0) return .empty;
 
-        const use_memory_map = switch (options.input_mode) {
+        var use_memory_map = switch (options.input_mode) {
             .automatic => size >= options.memory_map_threshold_bytes,
             .buffered => false,
             .memory_map => true,
         };
+        // The Windows backend rejects mappings for small files with an
+        // NTSTATUS failure before its own buffered fallback can engage;
+        // buffer tiny sources up front so forced mappings stay quiet.
+        if (builtin.os.tag == .windows and size < options.memory_map_threshold_bytes) {
+            use_memory_map = false;
+        }
         if (!use_memory_map) return loadBuffered(io, allocator, file, size, options);
 
+        // Mapping is an optimisation, not a requirement: some backends reject
+        // mappings for small or transient files, so fall back to a buffered
+        // read instead of failing the load.
         const mapping = file.createMemoryMap(io, .{
             .len = size,
             .protection = .{ .read = true },
             .populate = options.memory_map_populate,
-        }) catch |err| return mapMemoryMapError(err);
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AccessDenied, error.PermissionDenied => return error.PermissionDenied,
+            else => return loadBuffered(io, allocator, file, size, options),
+        };
         return .{ .memory_map = mapping };
     }
 
@@ -100,14 +113,6 @@ fn mapStatError(err: anyerror) types.IoError {
     };
 }
 
-/// Collapse platform mapping errors without leaking OS-specific error sets.
-fn mapMemoryMapError(err: anyerror) types.IoError {
-    return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.AccessDenied, error.PermissionDenied => error.PermissionDenied,
-        else => error.ReadFailed,
-    };
-}
 
 test "forced memory map borrows regular file bytes" {
     const source = "Minimize\n obj: x\nSubject To\n c: x <= 1\nEnd\n";

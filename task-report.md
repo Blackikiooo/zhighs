@@ -119,13 +119,16 @@ graph TD
 
 以下模型类型可以**表达**但当前求解器无法**求解**：
 
-- **MILP**：LinearModel 可存储 integrality，但 optimize() 返回 `FeatureNotAvailable`。
 - **QP/MIQP**：QuadraticModel + Hessian 可表达二次目标，但无 QP 求解器接入。
 - **QCP/MIQCP**：QuadraticModel 可存储二次约束，但无 QP 求解器。
 - **NLP/MINLP**：NonlinearModel + ExpressionGraph 可表达非线性问题，但无 NLP 求解器。
-- **LP**：是本轮唯一接近可求解的类别，但仍需 simplex dispatcher 接入。
 
-`SolverCapability` 机制可以查询哪些类支持求解。目前所有位均为 `false`。
+已接入的求解路径：
+
+- **LP**：`Model.optimize` 分派到 simplex 引擎。
+- **MILP**：`Model.optimize` 经 `src/model/model_solve.zig` 分派到 `src/mip/root.zig` 的 branch-and-bound 求解器，目标值、对偶界、节点数与解均可用。遗留缺口：presolve 未接入 MIP 路径、MIP 回调仍为 stub。
+
+`SolverCapability` 机制可以查询哪些类支持求解。
 
 ## 10. 已知风险
 
@@ -147,10 +150,12 @@ graph TD
 
 仅规划，不执行：
 
-1. **`compile_model.zig`** — 实现 `Model → CompiledModel` 编译路径。将 Gurobi 风格 Model 的快照转换为求解器内部 IR。
-2. **`Solution/Basis/Info`** — 实现 primal/dual solution、basis status、求解信息结构。
-3. **求解 dispatcher** — 将 `CompiledModel` 分派到当前可用的求解器（LP → simplex）。
+1. **Presolve 接入** — 对 LP 和 MILP 同时生效的性能提升，依赖 `src/presolve/` 的 reduction rule 实现。
+2. **MIP 回调接入** — `cbCut` / `cbSolution` / `cbGet` 等回调目前为 stub，MILP solver 就位后可接通。
+3. **QP 求解路径** — Active-set 或 barrier QP solver；QuadraticModel 数据层已完整。
 4. **ExpressionGraph 增强** — 自动微分、区间传播、求值缓存。
+
+已完成：`compile_model.zig` 编译路径、Solution/Basis/Info 结构、求解 dispatcher（LP → simplex，MILP → `src/mip` branch-and-bound）。
 
 ## 12. Git 状态
 

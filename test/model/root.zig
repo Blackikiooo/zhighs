@@ -59,3 +59,24 @@ test "new object scalar edits fold into structural initialization" {
     try std.testing.expectEqual(@as(f64, 3.0), try instance.getCoeff(0, 0));
     try instance.matrix.csc().validate();
 }
+
+test "MPS file with integer variables solves to the known MIP optimum" {
+    // test/model/data/tiny_mip.mps:
+    //   maximize 3 X + 2 Y  s.t. 2 X + 3 Y <= 4, X, Y binary.
+    // The LP relaxation is fractional (X=1, Y=2/3), so branch-and-bound must
+    // run; the integer optimum is X=1, Y=0 with objective 3.
+    var env = try model.Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    var instance = try model.Model.init(std.testing.allocator, &env, "tiny_mip");
+    defer instance.deinit();
+
+    try instance.read("test/model/data/tiny_mip.mps");
+    try std.testing.expectEqual(@as(i64, 1), try instance.getIntAttr(.is_mip));
+    try instance.optimize();
+
+    try std.testing.expectEqual(model.Status.optimal, instance.status);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), try instance.getDblAttr(.obj_val), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), try instance.getDblAttr(.obj_bound), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try instance.getDblAttrElement(.x, 0), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), try instance.getDblAttrElement(.x, 1), 1e-6);
+}
