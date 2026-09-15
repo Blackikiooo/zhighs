@@ -9,6 +9,15 @@ pub const BoundChange = struct {
     upper: ?f64 = null,
 };
 
+pub const ChangeReason = union(enum) {
+    branch,
+    row: usize,
+    clique,
+    conflict: usize,
+    reduced_cost,
+    unspecified,
+};
+
 /// Strongly typed index into a solve-local persistent change arena.
 pub const ChangeId = enum(usize) {
     _,
@@ -26,6 +35,7 @@ pub const DomainChangeArena = struct {
     const Entry = struct {
         change: BoundChange,
         parent: ?ChangeId,
+        reason: ChangeReason,
     };
 
     entries: std.ArrayListUnmanaged(Entry) = .empty,
@@ -41,9 +51,31 @@ pub const DomainChangeArena = struct {
         parent: ?ChangeId,
         change: BoundChange,
     ) std.mem.Allocator.Error!ChangeId {
+        return self.appendWithReason(allocator, parent, change, .unspecified);
+    }
+
+    pub fn appendWithReason(
+        self: *DomainChangeArena,
+        allocator: std.mem.Allocator,
+        parent: ?ChangeId,
+        change: BoundChange,
+        reason: ChangeReason,
+    ) std.mem.Allocator.Error!ChangeId {
         const id = ChangeId.fromIndex(self.entries.items.len);
-        try self.entries.append(allocator, .{ .change = change, .parent = parent });
+        try self.entries.append(allocator, .{ .change = change, .parent = parent, .reason = reason });
         return id;
+    }
+
+    pub fn changeAt(self: *const DomainChangeArena, id: ChangeId) BoundChange {
+        return self.entries.items[id.toIndex()].change;
+    }
+
+    pub fn parentOf(self: *const DomainChangeArena, id: ChangeId) ?ChangeId {
+        return self.entries.items[id.toIndex()].parent;
+    }
+
+    pub fn reasonAt(self: *const DomainChangeArena, id: ChangeId) ChangeReason {
+        return self.entries.items[id.toIndex()].reason;
     }
 };
 
@@ -57,6 +89,7 @@ pub const Domain = struct {
     active_upper: []f64,
     lower: []f64,
     upper: []f64,
+    root_revision: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,

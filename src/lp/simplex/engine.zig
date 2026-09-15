@@ -619,6 +619,34 @@ pub const DualPhaseOneAssessment = struct {
 };
 
 /// Owning revised-simplex solver instance and reusable workspace.
+/// Identity of the model slices behind the last matrix materialization.
+///
+/// Warm reoptimization reuses the retained basis, factorization and scaling,
+/// so the session contract guarantees that an unchanged revision implies
+/// unchanged matrix/objective content. Slice identity is compared to skip
+/// matrix-invariant work (scaled-coefficient materialization, the
+/// structurally-empty-row scan, the exact reduced-cost reprice) on the warm
+/// entry path.
+pub const ModelCache = struct {
+    col_starts: []const usize,
+    row_indices: []const foundation.RowId,
+    values: []const f64,
+    col_cost: []const f64,
+    /// Whether the matrix has any structurally empty row, in which case the
+    /// empty-row Farkas scan must keep running after bound changes.
+    empty_rows_possible: bool = false,
+
+    pub fn matrixMatches(self: ModelCache, problem: problem_module.ProblemView) bool {
+        return self.col_starts.ptr == problem.matrix.col_starts.ptr and self.col_starts.len == problem.matrix.col_starts.len and
+            self.row_indices.ptr == problem.matrix.row_indices.ptr and self.row_indices.len == problem.matrix.row_indices.len and
+            self.values.ptr == problem.matrix.values.ptr and self.values.len == problem.matrix.values.len;
+    }
+
+    pub fn objectiveMatches(self: ModelCache, problem: problem_module.ProblemView) bool {
+        return self.col_cost.ptr == problem.col_cost.ptr and self.col_cost.len == problem.col_cost.len;
+    }
+};
+
 pub const SimplexEngine = struct {
     /// Allocator owning the basis and every reusable sub-workspace.
     allocator: std.mem.Allocator,
@@ -643,6 +671,9 @@ pub const SimplexEngine = struct {
     /// order, materialized once per solve and consumed by the column
     /// pricing loops. Empty until the first scaled solve.
     scaled_coefficients: []f64 = &.{},
+    /// Matrix/objective slice identity recorded alongside the scaled
+    /// coefficients; guards warm-entry reuse of matrix-invariant work.
+    model_cache: ?ModelCache = null,
     // ── Policy ─ algorithm choice and pricing/ratio/numerical rules ──────────
     /// Revised-simplex direction currently executing.
     algorithm: Algorithm = .dual_revised,
@@ -676,6 +707,10 @@ pub const SimplexEngine = struct {
     fresh_factorization_pivots_remaining: usize = 0,
     /// Incremental reduced-cost updates since the last exact reprice.
     reduced_cost_update_count: usize = 0,
+    /// Whether `basis.reduced_cost` currently reflects the original
+    /// objective rather than Phase-I or shifted working costs. Guards the
+    /// warm-entry reuse of the retained reduced-cost vector.
+    reduced_costs_original: bool = false,
     /// Fixed/adaptive maximum incremental updates between exact reprices.
     reduced_cost_refresh_period: usize = 8,
     /// Per-solve FT update-chain limit resolved from start diagnostics.
@@ -1108,6 +1143,7 @@ pub const SimplexEngine = struct {
     pub const initializeLogicalBasicValues = @import("engine_setup.zig").initializeLogicalBasicValues;
     pub const installArtificialPhaseOneBasis = @import("engine_setup.zig").installArtificialPhaseOneBasis;
     pub const materializeScaledCoefficients = @import("engine_setup.zig").materializeScaledCoefficients;
+    pub const retainedReducedCostsValid = @import("engine_setup.zig").retainedReducedCostsValid;
     pub const installSparseCrashBasis = @import("engine_setup.zig").installSparseCrashBasis;
     pub const refreshProblemStorage = @import("engine_setup.zig").refreshProblemStorage;
     pub const initializeProblemStorage = @import("engine_setup.zig").initializeProblemStorage;
@@ -1203,7 +1239,8 @@ pub const SimplexEngine = struct {
         self.maximum_reduced_cost_drift = 0.0;
         self.exact_reprices = 0;
         self.iterations = 0;
-        problem.validate() catch return .invalid_model;
+        // The session validates the problem before dispatching warm or cold;
+        // re-validation here would repeat an O(nnz) scan per reoptimization.
         if (self.controlledStop(control)) |status| return status;
         self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         if (self.active_pricing_kernel != .column)
@@ -1215,7 +1252,12 @@ pub const SimplexEngine = struct {
         }
         self.iterations = 0;
         if (self.publishEmptyRowInfeasibilityRay(problem)) return .infeasible;
-        if (self.recomputeBasicValuesUnchecked(problem) != .optimal or self.recomputeReducedCosts(problem) != .optimal)
+        if (self.recomputeBasicValuesUnchecked(problem) != .optimal) return .numerical_failure;
+        // Reduced costs depend only on the matrix, objective and basis; when
+        // the model slices are unchanged the retained (drift-bounded) values
+        // from the previous solve remain valid, matching the engine's
+        // mid-solve refresh design.
+        if (!self.retainedReducedCostsValid(problem) and self.recomputeReducedCosts(problem) != .optimal)
             return .numerical_failure;
         const feasibility = self.classifyFeasibility(problem);
         if (feasibility.primal) {

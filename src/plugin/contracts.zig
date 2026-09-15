@@ -39,6 +39,15 @@ pub const BranchingCandidate = struct {
     kind: BranchingKind,
 };
 
+/// Directional objective-gain estimates prepared by the search for the current
+/// LP point. Stateful branching rules consume this read-only projection.
+pub const PseudocostScore = struct {
+    down_gain: f64,
+    up_gain: f64,
+    down_reliable: bool,
+    up_reliable: bool,
+};
+
 /// Read-only state the engine hands to branching rules when the node LP is
 /// fractional. `active_lower`/`active_upper` are the root-level nonzero-branch
 /// bounds of semi-continuous / semi-integer columns; both are constant across
@@ -51,6 +60,7 @@ pub const BranchingContext = struct {
     active_lower: []const f64,
     active_upper: []const f64,
     tolerance: f64,
+    pseudocost_scores: ?[]const PseudocostScore = null,
 };
 
 /// Branching-rule contract. Implementations inspect the fractional LP solution
@@ -76,6 +86,9 @@ pub const BranchingRule = struct {
 
 /// State a primal heuristic may use to construct a candidate solution.
 pub const HeuristicContext = struct {
+    /// Optional original-model basis, borrowed only for this invocation.
+    /// Omitted when the node LP includes additional cut rows.
+    lp_basis: ?solver.LpBasisView = null,
     /// Allocator for the returned candidate; the engine frees it after
     /// validation, so heuristics never manage incumbent memory themselves.
     allocator: std.mem.Allocator,

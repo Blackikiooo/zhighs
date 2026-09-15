@@ -5,14 +5,25 @@ const BoundChange = @import("domain.zig").BoundChange;
 const ChangeId = @import("domain.zig").ChangeId;
 const DomainChangeArena = @import("domain.zig").DomainChangeArena;
 
+pub const BranchDirection = enum { down, up };
+
+/// Information needed to turn a child LP result into a pseudocost sample.
+pub const BranchOrigin = struct {
+    column: usize,
+    direction: BranchDirection,
+    distance: f64,
+    parent_objective: f64,
+};
+
 pub const Node = struct {
     change_head: ?ChangeId = null,
     bound: ?f64 = null,
     depth: u32 = 0,
+    branch_origin: ?BranchOrigin = null,
 
     pub fn childWith(self: Node, arena: *DomainChangeArena, allocator: std.mem.Allocator, bound: f64, change: BoundChange) !Node {
         return .{
-            .change_head = try arena.append(allocator, self.change_head, change),
+            .change_head = try arena.appendWithReason(allocator, self.change_head, change, .branch),
             .bound = bound,
             .depth = self.depth + 1,
         };

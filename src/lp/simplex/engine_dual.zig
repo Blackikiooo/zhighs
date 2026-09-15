@@ -97,6 +97,7 @@ pub fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, cont
 /// HiGHS: flip avoidable boxed infeasibilities and shift one-sided costs.
 /// Free-variable infeasibilities remain the responsibility of dual Phase I.
 pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    self.reduced_costs_original = false;
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = problem.num_cols + problem.num_rows;
     self.dual_work.beginCostEpoch(basis, count) catch return .numerical_failure;
@@ -248,6 +249,11 @@ fn solveDualLoop(
     var no_entering_recovery_used = false;
     var no_entering_devex_recovery_used = false;
     var fresh_no_entering_basis = false;
+    // Consecutive exact-cost no-entering rebuilds without an accepted pivot.
+    // Reset whenever an entering column is accepted so a long solve can
+    // refresh the chain before every genuinely fresh no-entering decision.
+    var no_entering_exact_rebuilds: usize = 0;
+    const max_no_entering_exact_rebuilds: usize = 2;
     defer if (use_work_costs and !shifted_iterations_recorded) {
         self.stats.shifted_dual_iterations += self.iterations -| shifted_iteration_started;
     };
@@ -317,6 +323,7 @@ fn solveDualLoop(
                 self.shifted_dual_exit = .original_dual_feasible;
                 no_entering_recovery_used = false;
                 fresh_no_entering_basis = true;
+                no_entering_exact_rebuilds = 0;
                 continue;
             }
             // Exact-cost dual infeasibility after the perturbed Phase II:
@@ -392,8 +399,12 @@ fn solveDualLoop(
         }
         const entering_col = entering.column orelse {
             if (!use_work_costs) {
-                if (!no_entering_recovery_used) {
-                    no_entering_recovery_used = true;
+                if (!fresh_no_entering_basis and no_entering_exact_rebuilds < max_no_entering_exact_rebuilds) {
+                    // A stale factor chain can report no entering candidate
+                    // spuriously. Refresh the basis before trusting the
+                    // decision; the cap only bounds consecutive rebuilds
+                    // without an intervening accepted pivot.
+                    no_entering_exact_rebuilds += 1;
                     if (rebuildDualState(self, problem, false, .solve_residual, false) != null and
                         self.classifyFeasibility(problem).dual)
                     {
@@ -513,6 +524,7 @@ fn solveDualLoop(
         };
         const entering_index: usize = @intCast(entering_col);
         fresh_no_entering_basis = false;
+        no_entering_exact_rebuilds = 0;
         switch (self.computeDualDirection(problem, entering_index, @intCast(leaving.row))) {
             .ready => {},
             .rebuild_required => {
@@ -853,6 +865,7 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
 /// ratio ties. The borrowed matrix is never copied and every iteration
 /// uses engine-owned work arrays.
 pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    self.reduced_costs_original = false;
     self.dual_control.enterPhase(.phase_one);
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;

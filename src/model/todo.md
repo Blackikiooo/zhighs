@@ -260,7 +260,7 @@ PWL 目标                ██████████ 100%
 
 ```
 Continuous LP          ██████████ 100%  simplex 引擎完整接入
-MILP (branch&bound)    ████████░░  80%  src/mip B&B 已接入 Model.optimize；cuts/heuristics 待增强
+MILP (branch&bound)    █████████░  90%  src/mip B&B 已接入 Model.optimize；pseudocost branching（默认）、conflict learning、clique/cut/reduced-cost 已就位；warm dual no-entering 证书缺陷已修复；已知最优解回归套件 `zig build test-mip-regression` 已就位；cuts/propagation 增强待后续
 QP / MIQP              ░░░░░░░░░░   0%  返回 FeatureNotAvailable
 QCP / MIQCP            ░░░░░░░░░░   0%  返回 FeatureNotAvailable
 NLP / MINLP            ░░░░░░░░░░   0%  返回 FeatureNotAvailable
@@ -270,7 +270,7 @@ NLP / MINLP            ░░░░░░░░░░   0%  返回 FeatureNotAva
 
 ```
 回调系统                ████░░░░░░  40%  iteration 回调 ✓, MIP 回调 ✗
-Presolve               █░░░░░░░░░  10%  model 入口 stub 存在, 无实际 reduction
+Presolve               █████░░░░░  50%  LP 路径经 LpSolveSession 接入; MIP 安全模式已接入 MILP 求解路径
 IIS                    █░░░░░░░░░  10%  stub
 FeasRelax              █░░░░░░░░░  10%  stub
 Multi-objective        ░░░░░░░░░░   0%  stub
@@ -296,7 +296,12 @@ Advanced Simplex       ██░░░░░░░░  20%  getBasisHead ✓, FT
 
 ### 当前建议执行顺序
 
-1. **Presolve 实现** — 对 LP 和 MILP 同时生效的性能提升。依赖 `src/presolve/` 模块的 reduction rule 实现。（MILP 求解路径已接入：`src/model/model_solve.zig` → `src/mip` branch-and-bound。）
+端到端验收入口：`zig build test-end-to-end`（同时包含在 `zig build test`）。
+覆盖 LP/MPS 文件读取、LP/MILP 求解、原坐标解恢复、CLI 状态/目标值及解文件输出。
+半连续/半整数模型目前跳过区间预处理，交由 MIP 引擎保留零分支；
+二进制预处理保留 0/1 域限制。未求解节点的目标界保持未知，无 incumbent 时不输出伪目标值。
+
+1. **Presolve 实现** — ✅ 求解路径接入已完成：LP 经 `LpSolveSession`，MILP 经 `src/model/model_solve.zig` 的 MIP 安全 pipeline（`presolve.PresolvePipeline.initMip`）。可选增强：probing、系数收紧等更强规则。
 
 2. **MIP 回调接入** — `cbCut`（lazy constraints）、`cbSolution`（heuristic solutions）、`cbGet`（callback-time query）。MILP solver 已就位，回调仍是 stub。
 

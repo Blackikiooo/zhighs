@@ -136,6 +136,40 @@ pub const LpSolveSession = struct {
     last_cols: usize = 0,
     cold_solves: usize = 0,
     reoptimizations: usize = 0,
+    /// Matrix slices validated by the previous `solve`/`solveRelaxation` call,
+    /// used to skip the O(nnz) CSC scan when reoptimizations reuse them.
+    validated_matrix: ?MatrixIdentity = null,
+
+    const MatrixIdentity = struct {
+        col_starts: []const usize,
+        row_indices: []const foundation.RowId,
+        values: []const f64,
+
+        fn matches(self: MatrixIdentity, problem: LpProblemView) bool {
+            return self.col_starts.ptr == problem.matrix.col_starts.ptr and self.col_starts.len == problem.matrix.col_starts.len and
+                self.row_indices.ptr == problem.matrix.row_indices.ptr and self.row_indices.len == problem.matrix.row_indices.len and
+                self.values.ptr == problem.matrix.values.ptr and self.values.len == problem.matrix.values.len;
+        }
+    };
+
+    /// Validate the problem, skipping the O(nnz) CSC scan when the matrix
+    /// slices are identical to the ones validated by the previous call
+    /// (bound-only reoptimizations reuse them by construction).
+    fn validateProblem(self: *LpSolveSession, problem: LpProblemView) bool {
+        if (self.validated_matrix) |cached| {
+            if (cached.matches(problem)) {
+                problem.validateExceptMatrix() catch return false;
+                return true;
+            }
+        }
+        problem.validate() catch return false;
+        self.validated_matrix = .{
+            .col_starts = problem.matrix.col_starts,
+            .row_indices = problem.matrix.row_indices,
+            .values = problem.matrix.values,
+        };
+        return true;
+    }
 
     pub fn init(allocator: std.mem.Allocator) LpSolveSession {
         return .{ .allocator = allocator, .engine = lp.simplex.engine.SimplexEngine.init(allocator) };
@@ -151,13 +185,13 @@ pub const LpSolveSession = struct {
         if (self.projection) |*value| value.deinit();
         self.projection = null;
 
-        problem.validate() catch {
+        if (!self.validateProblem(problem)) {
             self.clearPresolveState();
             self.last_revision = null;
             self.last_rows = 0;
             self.last_cols = 0;
             return self.engine.solveProblem(problem, control);
-        };
+        }
 
         if (!hasPresolveReductions(self.allocator, problem)) {
             if (self.presolved_problem) |*value| value.deinit();
@@ -210,13 +244,13 @@ pub const LpSolveSession = struct {
     /// first call after a presolved solve is forced cold in original
     /// coordinates; subsequent compatible calls use direct reoptimization.
     pub fn solveRelaxation(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
-        problem.validate() catch {
+        if (!self.validateProblem(problem)) {
             self.clearPresolveState();
             self.last_revision = null;
             self.last_rows = 0;
             self.last_cols = 0;
             return self.engine.solveProblem(problem, control);
-        };
+        }
         const force_cold = self.presolved_problem != null;
         self.clearPresolveState();
         return self.solveReduced(problem, control, revision, force_cold);
@@ -542,7 +576,7 @@ const ExpandedBasis = struct {
             result.structural_status[record.original_column] = record.basis_status;
         for (pp.reduced_to_original_col, 0..) |original_col, reduced_col|
             result.structural_status[original_col] = reduced_structural_status[reduced_col];
-        
+
         @memset(result.logical_status, LpBasisStatus.basic);
         @memset(result.row_scale, 1.0);
         for (pp.reduced_to_original_row, 0..) |original_row, reduced_row| {

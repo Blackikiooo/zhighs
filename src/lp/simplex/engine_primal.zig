@@ -571,6 +571,7 @@ pub fn solveWarmPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemVi
 }
 
 fn solvePhaseOneGeneric(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, comptime warm: bool) SolveStatus {
+    self.reduced_costs_original = false;
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.pricing.rule;
@@ -865,6 +866,7 @@ pub fn cleanupArtificialBasis(self: *SimplexEngine, problem: problem_module.Prob
 /// A successful call resets the incremental reduced-cost update counter.
 pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    self.reduced_costs_original = false;
     const artificial_begin = problem.num_cols + problem.num_rows;
     for (basis.basic_index, 0..) |global_col, row| basis.dual[row] = if (global_col >= artificial_begin) 1.0 else 0.0;
     self.nla.factorization.solveTranspose(basis.dual) catch return .numerical_failure;
@@ -926,6 +928,7 @@ fn deterministicUnit(index: usize, epoch: u64) f64 {
 /// the reduced costs are `-A^T y` with no artificial columns involved.
 pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    self.reduced_costs_original = false;
     @memset(basis.dual, 0.0);
     var infeasible_rows: usize = 0;
     // HiGHS perturbs the +/-1 Phase-I costs by 5e-7 * random so a ray that

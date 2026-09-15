@@ -180,11 +180,18 @@ pub fn installSparseCrashBasis(
 
 /// Refresh bounds and nonbasic values while preserving the current basis/scaling.
 ///
-/// Returns false when model dimensions changed or a retained nonbasic status is
-/// incompatible with the new bounds, in which case the caller must cold-start.
+/// Returns false when model dimensions changed, the retained basis still
+/// contains artificial Phase-I columns (a previous solve was interrupted by
+/// an iteration/work/time limit before `cleanupArtificialBasis` ran), or a
+/// retained nonbasic status is incompatible with the new bounds, in which
+/// case the caller must cold-start.
 pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (basis.num_rows != problem.num_rows or basis.num_structural_cols != problem.num_cols) return false;
+    const original_count = problem.num_cols + problem.num_rows;
+    for (basis.basic_index) |column| {
+        if (column >= original_count) return false;
+    }
     for (problem.col_lower, problem.col_upper, 0..) |lower, upper, column| {
         if (lower > upper) return false;
         const scale = basis.column_scale[column];
@@ -247,6 +254,9 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
 
 /// Initialize bounds, scaling and the logical basis using the selected policy.
 pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+    // Cold initialization recomputes scaling; previously materialized scaled
+    // coefficients no longer necessarily apply to the incoming model.
+    self.model_cache = null;
     return if (self.active_dual_initialization_strategy == .highs)
         initializeProblemStorageHighs(self, problem)
     else
@@ -257,9 +267,15 @@ pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.Pr
 /// whose bounds exclude zero. Raw nonzero coefficients are honored here even
 /// when the numerical matrix policy would drop them: the returned certificate
 /// is valid against the original model, not only the scaled working matrix.
+///
+/// The structural scan depends only on the matrix; when the cached matrix has
+/// no structurally empty row, warm reoptimizations skip the O(nnz) pass.
 pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (basis.infeasibility_ray.len != problem.num_rows or basis.residual_work.len != problem.num_rows) return false;
+    if (self.model_cache) |cache| {
+        if (cache.matrixMatches(problem) and !cache.empty_rows_possible) return false;
+    }
     @memset(basis.residual_work, 0.0);
     for (problem.matrix.row_indices, problem.matrix.values) |row, coefficient| {
         if (coefficient != 0.0) basis.residual_work[row.toUsize()] = 1.0;
@@ -268,8 +284,10 @@ pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_mo
     var selected_row: ?usize = null;
     var selected_multiplier: f64 = 0.0;
     var selected_gap: f64 = self.numerical.primal_tolerance;
+    var saw_empty_row = false;
     for (basis.residual_work, problem.row_lower, problem.row_upper, 0..) |has_coefficient, lower, upper, row| {
         if (has_coefficient != 0.0) continue;
+        saw_empty_row = true;
         const multiplier: f64, const gap: f64 = if (std.math.isFinite(lower) and lower > self.numerical.primal_tolerance)
             .{ 1.0, lower }
         else if (std.math.isFinite(upper) and upper < -self.numerical.primal_tolerance)
@@ -280,6 +298,9 @@ pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_mo
         selected_row = row;
         selected_multiplier = multiplier;
         selected_gap = gap;
+    }
+    if (self.model_cache) |*cache| {
+        if (cache.matrixMatches(problem)) cache.empty_rows_possible = saw_empty_row;
     }
     const row = selected_row orelse return false;
     @memset(basis.infeasibility_ray, 0.0);
@@ -491,8 +512,15 @@ fn powerOfTwoScale(maximum: f64, exponent_limit: comptime_int) f64 {
 
 /// Materialize the pre-scaled matrix coefficients in HiGHS' exact order
 /// `A * (colScale * rowScale)` for the column pricing loops.
+///
+/// Warm reoptimizations reuse the retained scaling, so when the matrix
+/// slices match those recorded in `model_cache` the existing coefficients are
+/// still exact and the O(nnz) pass is skipped.
 pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
+    if (self.model_cache) |cache| {
+        if (cache.matrixMatches(problem)) return true;
+    }
     const nnz = problem.matrix.values.len;
     if (self.scaled_coefficients.len != nnz) {
         self.allocator.free(self.scaled_coefficients);
@@ -511,7 +539,25 @@ pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_modu
             position += 1;
         }
     }
+    // A fresh matrix invalidates the previous empty-row finding; the next
+    // `publishEmptyRowInfeasibilityRay` re-runs the scan and records the
+    // authoritative value.
+    self.model_cache = .{
+        .col_starts = problem.matrix.col_starts,
+        .row_indices = problem.matrix.row_indices,
+        .values = problem.matrix.values,
+        .col_cost = problem.col_cost,
+        .empty_rows_possible = true,
+    };
     return true;
+}
+
+/// Whether the retained reduced-cost vector is valid for `problem`: the
+/// matrix and objective slices match those it was last computed against and
+/// it reflects the original objective rather than Phase-I working costs.
+pub fn retainedReducedCostsValid(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+    const cache = self.model_cache orelse return false;
+    return self.reduced_costs_original and cache.matrixMatches(problem) and cache.objectiveMatches(problem);
 }
 
 /// Compute a power-of-two objective scale from the largest absolute cost.
@@ -578,6 +624,40 @@ pub fn fillInternalColumnSparse(
         count = 1;
     } else return null;
     return count;
+}
+
+test "reoptimize cold-starts when an interrupted Phase I left artificial columns basic" {
+    // min x s.t. x >= 2: the logical slack basis is primal infeasible, so the
+    // primal Phase I installs an artificial column for the row.
+    const row = foundation.RowId.fromUsizeAssumeValid(0);
+    const problem = problem_module.ProblemView{
+        .num_rows = 1,
+        .num_cols = 1,
+        .col_cost = &.{1.0},
+        .col_lower = &.{0.0},
+        .col_upper = &.{10.0},
+        .row_lower = &.{2.0},
+        .row_upper = &.{std.math.inf(f64)},
+        .matrix = matrix.CscView.initAssumeValid(1, 1, &[_]usize{ 0, 1 }, &.{row}, &.{1.0}),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var engine = SimplexEngine.init(std.testing.allocator);
+    defer engine.deinit();
+    // Interrupt before any Phase-I pivot: the retained basis still has the
+    // artificial column basic, which is not a valid warm start. MIP strong
+    // branching reaches this state through per-probe iteration/work limits.
+    const limited = engine.solveProblem(problem, .{ .max_iterations = 0, .phase_one_strategy = .primal });
+    try std.testing.expectEqual(SolveStatus.iteration_limit, limited);
+    try std.testing.expect(engine.basis.?.basic_index[0] >= problem.num_cols + problem.num_rows);
+    // The warm-reuse gate must reject the contaminated basis so that
+    // reoptimization cold-starts instead of indexing original bounds
+    // through the artificial column index.
+    try std.testing.expect(!engine.refreshProblemStorage(problem));
+    try std.testing.expectEqual(SolveStatus.optimal, engine.reoptimizeProblem(problem, .{}));
+    const view = engine.solutionView(problem, .optimal).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), view.objective_value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), view.primal[0], 1e-9);
 }
 
 test "empty-row Farkas terminal honors raw coefficients below the working floor" {

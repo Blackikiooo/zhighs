@@ -11,7 +11,9 @@ pub const presolve_mod = @import("presolve.zig");
 pub const PresolvedProblem = presolve_mod.PresolvedProblem;
 pub const PresolvePipeline = presolve_mod.PresolvePipeline;
 pub const PresolveResult = presolve_mod.PresolveResult;
+pub const ColumnNature = presolve_mod.ColumnNature;
 pub const presolve = presolve_mod.presolve;
+pub const presolveMip = presolve_mod.presolveMip;
 pub const presolvePipeline = PresolvePipeline.init;
 pub const postsolve = presolve_mod.postsolve;
 

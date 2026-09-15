@@ -15,6 +15,7 @@ const compiled_model_view_module = @import("compiled_model_view.zig");
 const matrix = @import("matrix");
 const solver = @import("solver");
 const mip = @import("mip");
+const presolve = @import("presolve");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
@@ -145,19 +146,70 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
         },
         .objective_offset = linear.objective_offset,
     };
+
+    // MIP-safe presolve: only reductions that remain exact under integrality
+    // are applied (see `presolve.presolveMip`). The reduced problem is solved
+    // by branch-and-bound and the incumbent is postsolved back to original
+    // coordinates, so every published attribute uses original-model indexing.
+    // Presolve=0 disables the reduction; an allocation failure falls back to
+    // the unpresolved solve rather than failing the model.
+    var pipeline: ?presolve.PresolvePipeline = null;
+    defer if (pipeline) |*pipe| pipe.deinit();
+    const presolve_setting = self.env.getIntParam("Presolve") catch -1;
+    // The current presolver represents interval domains only. Semi-variable
+    // bounds describe the active interval, with zero as a separate choice;
+    // applying LP reductions to that interval would discard valid solutions.
+    const has_semi = for (integrality) |kind| {
+        if (kind == .semi_continuous or kind == .semi_integer) break true;
+    } else false;
+    if (presolve_setting != 0 and !has_semi) {
+        const nature = self.allocator.alloc(presolve.ColumnNature, linear.num_cols) catch return error.OutOfMemory;
+        defer self.allocator.free(nature);
+        for (self.var_type, nature) |source, *target| target.* = switch (source) {
+            .continuous, .semicont => .continuous,
+            .binary => .binary,
+            .integer, .semiint => .discrete,
+        };
+        presolve_blk: {
+            var pipe = presolve.PresolvePipeline.initMip(self.allocator, relaxation, nature) catch break :presolve_blk;
+            if (!pipe.wasApplied()) {
+                pipe.deinit();
+                break :presolve_blk;
+            }
+            pipeline = pipe;
+        }
+    }
+
+    var solve_problem = relaxation;
+    var solve_integrality: []const mip.Integrality = integrality;
+    var reduced_integrality: ?[]mip.Integrality = null;
+    defer if (reduced_integrality) |slice| self.allocator.free(slice);
+    var initial: ?[]const f64 = if (self.mip_start.len == linear.num_cols) self.mip_start else null;
+    var reduced_start: ?[]f64 = null;
+    defer if (reduced_start) |slice| self.allocator.free(slice);
+    if (pipeline) |*pipe| {
+        solve_problem = pipe.reducedView();
+        reduced_integrality = mapThroughPipeline(mip.Integrality, self.allocator, pipe, integrality) catch return error.OutOfMemory;
+        solve_integrality = reduced_integrality.?;
+        if (initial) |start| {
+            reduced_start = mapThroughPipeline(f64, self.allocator, pipe, start) catch return error.OutOfMemory;
+            initial = reduced_start.?;
+        }
+    }
+
     const node_limit_value = self.env.getIntParam("NodeLimit") catch std.math.maxInt(i64);
     const solution_limit_value = self.env.getIntParam("SolutionLimit") catch std.math.maxInt(i64);
     const iteration_limit_value = self.env.getIntParam("IterationLimit") catch std.math.maxInt(i64);
     const time_limit_seconds = self.env.getDblParam("TimeLimit") catch std.math.inf(f64);
     const work_limit_value = self.env.getDblParam("WorkLimit") catch std.math.inf(f64);
     var callback_bridge = SimplexCallbackBridge{ .model = self };
-    var result = mip.solve(self.allocator, .{ .relaxation = relaxation, .integrality = integrality }, .{
+    var result = mip.solve(self.allocator, .{ .relaxation = solve_problem, .integrality = solve_integrality }, .{
         .node_limit = nonnegativeLimit(node_limit_value),
         .solution_limit = nonnegativeLimit(solution_limit_value),
         .integer_tolerance = self.env.getDblParam("FeasibilityTol") catch 1e-6,
         .absolute_gap = self.env.getDblParam("MIPGapAbs") catch 1e-10,
         .relative_gap = self.env.getDblParam("MIPGap") catch 1e-4,
-        .initial_solution = if (self.mip_start.len == linear.num_cols) self.mip_start else null,
+        .initial_solution = initial,
         .lp = .{
             .max_iterations = nonnegativeLimit(iteration_limit_value),
             .time_limit_ns = secondsToNanoseconds(time_limit_seconds),
@@ -169,10 +221,19 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
     }) catch return error.OutOfMemory;
     defer result.deinit();
 
+    if (pipeline) |*pipe| {
+        if (result.primal.len == solve_problem.num_cols and result.solution_count != 0) {
+            postsolveMipIncumbent(self.allocator, pipe, &result) catch return error.OutOfMemory;
+        }
+    }
+
     self.clearPublishedResult();
     self.status = mapMipStatus(result.status);
     self.node_count = std.math.cast(i64, result.nodes) orelse std.math.maxInt(i64);
     self.iter_count = std.math.cast(i64, result.lp_iterations) orelse std.math.maxInt(i64);
+    // A dual bound is meaningful even if a limit stopped the search before
+    // its first incumbent. Do not replace it with the reset value of zero.
+    self.obj_bound = result.objective_bound;
     if (result.primal.len == linear.num_cols and result.solution_count != 0) {
         const slack = self.allocator.alloc(f64, linear.num_rows) catch return error.OutOfMemory;
         errdefer self.allocator.free(slack);
@@ -191,9 +252,53 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
         result.primal = &.{};
         self.slack = slack;
         self.obj_val = result.objective_value;
-        self.obj_bound = result.objective_bound;
         self.sol_count = std.math.cast(i64, result.solution_count) orelse std.math.maxInt(i64);
     }
+}
+
+/// Compose a per-column array through every presolve pass into the final
+/// reduced coordinates (integrality, MIP start values).
+fn mapThroughPipeline(comptime T: type, allocator: std.mem.Allocator, pipe: *const presolve.PresolvePipeline, original: []const T) ![]T {
+    var current = try allocator.dupe(T, original);
+    errdefer allocator.free(current);
+    for (pipe.passes.items) |*pass| {
+        const next = try allocator.alloc(T, pass.num_cols);
+        for (next, pass.reduced_to_original_col) |*target, source| target.* = current[source];
+        allocator.free(current);
+        current = next;
+    }
+    return current;
+}
+
+/// Replace the reduced-coordinate incumbent of a presolved MIP solve with its
+/// original-coordinate reconstruction. Duals and reduced costs are not part
+/// of the MIP result, so postsolve receives zero scratch buffers and only the
+/// primal vector and objective value are kept. The reduced objective bound is
+/// exact in original coordinates because every applied reduction preserves
+/// objective value, so `result.objective_bound` transfers unchanged.
+fn postsolveMipIncumbent(allocator: std.mem.Allocator, pipe: *const presolve.PresolvePipeline, result: *mip.SolveResult) !void {
+    const reduced = pipe.reducedView();
+    const dual_scratch = try allocator.alloc(f64, reduced.num_rows);
+    defer allocator.free(dual_scratch);
+    @memset(dual_scratch, 0.0);
+    const rc_scratch = try allocator.alloc(f64, reduced.num_cols);
+    defer allocator.free(rc_scratch);
+    @memset(rc_scratch, 0.0);
+    var recovered = try pipe.postsolveAll(.{
+        .status = .optimal,
+        .primal = result.primal,
+        .dual = dual_scratch,
+        .reduced_cost = rc_scratch,
+        .unbounded_ray = &.{},
+        .infeasibility_ray = &.{},
+        .objective_value = result.objective_value,
+        .iterations = result.lp_iterations,
+    }, allocator);
+    defer recovered.deinit();
+    allocator.free(result.primal);
+    result.primal = recovered.primal;
+    recovered.primal = &.{};
+    result.objective_value = recovered.objective_value;
 }
 
 fn nonnegativeLimit(value: i64) usize {

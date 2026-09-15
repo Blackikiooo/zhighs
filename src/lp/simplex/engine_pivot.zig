@@ -463,6 +463,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
 /// Recompute reduced costs exactly from the original scaled objective.
 pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
+    self.reduced_costs_original = true;
     const maximize = problem.objective_sense == .maximize;
     for (basis.basic_index, 0..) |global_col, row| {
         basis.dual[row] = if (global_col < problem.num_cols)

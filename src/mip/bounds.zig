@@ -32,16 +32,24 @@ pub fn gapSatisfied(bound: f64, incumbent: f64, control: SolveControl) bool {
 }
 
 pub fn bestOpen(sense: solver.LpObjectiveSense, nodes: []const Node, incumbent: f64, have_incumbent: bool) f64 {
-    var result: ?f64 = null;
+    var result: ?f64 = if (have_incumbent) incumbent else null;
     for (nodes) |node| {
         if (node.bound) |bound| {
             result = if (result) |old| switch (sense) {
                 .minimize => @min(old, bound),
                 .maximize => @max(old, bound),
             } else bound;
-        }
+        } else return unknown(sense);
     }
-    return result orelse if (have_incumbent) incumbent else 0.0;
+    return result orelse unknown(sense);
+}
+
+test "unprocessed nodes cannot certify the incumbent or a zero bound" {
+    for ([_]solver.LpObjectiveSense{ .minimize, .maximize }) |sense| {
+        try std.testing.expectEqual(unknown(sense), bestOpen(sense, &.{.{}}, 3.0, false));
+        try std.testing.expectEqual(unknown(sense), bestOpen(sense, &.{ .{ .bound = 2.0 }, .{} }, 3.0, true));
+        try std.testing.expectEqual(@as(f64, 3.0), bestOpen(sense, &.{}, 3.0, true));
+    }
 }
 
 pub fn combine(sense: solver.LpObjectiveSense, left: f64, right: f64) f64 {

@@ -37,6 +37,43 @@ pub const MostFractional = struct {
     }
 };
 
+/// Product-score pseudocost branching. Before observations exist, the global
+/// estimate makes this equivalent to balanced most-fractional branching.
+pub const Pseudocost = struct {
+    pub const name = "pseudocost";
+
+    pub fn select(_: *Pseudocost, ctx: plugin.BranchingContext) ?plugin.BranchingCandidate {
+        const scores = ctx.pseudocost_scores orelse {
+            var fallback = MostFractional{};
+            return fallback.select(ctx);
+        };
+        if (scores.len != ctx.lp_primal.len) return null;
+
+        var best: ?plugin.BranchingCandidate = null;
+        var best_score: f64 = -1.0;
+        var best_fractionality: f64 = -1.0;
+        for (ctx.problem.integrality, ctx.lp_primal, scores, 0..) |kind, value, score, column| {
+            if (kind == .continuous) continue;
+            if (kind == .semi_continuous or kind == .semi_integer) {
+                const zero_allowed = ctx.node_lower[column] <= ctx.tolerance and ctx.node_upper[column] >= -ctx.tolerance;
+                const active = value >= ctx.active_lower[column] - ctx.tolerance and value <= ctx.active_upper[column] + ctx.tolerance;
+                if (zero_allowed and @abs(value) <= ctx.tolerance) continue;
+                if (!active) return .{ .column = column, .kind = .semi_activation };
+                if (kind == .semi_continuous) continue;
+            }
+            const fractionality = @abs(value - @round(value));
+            if (fractionality <= ctx.tolerance) continue;
+            const product = @max(score.down_gain, 1e-6) * @max(score.up_gain, 1e-6);
+            if (product > best_score or (product == best_score and fractionality > best_fractionality)) {
+                best = .{ .column = column, .kind = .integer };
+                best_score = product;
+                best_fractionality = fractionality;
+            }
+        }
+        return best;
+    }
+};
+
 const matrix = @import("matrix");
 
 fn contextFor(
@@ -129,4 +166,22 @@ test "most-fractional accepts a semi column resting at an allowed zero" {
     const candidate = rule.select(ctx).?;
     try std.testing.expectEqual(@as(usize, 1), candidate.column);
     try std.testing.expectEqual(plugin.BranchingKind.integer, candidate.kind);
+}
+
+test "pseudocost scores can outweigh raw fractionality" {
+    var rule = Pseudocost{};
+    var ctx = contextFor(
+        &.{ .integer, .integer },
+        &.{ 0.5, 0.25 },
+        &.{ 0, 0 },
+        &.{ 1, 1 },
+        &.{ 0, 0 },
+        &.{ 1, 1 },
+    );
+    ctx.pseudocost_scores = &.{
+        .{ .down_gain = 0.1, .up_gain = 0.1, .down_reliable = true, .up_reliable = true },
+        .{ .down_gain = 1.0, .up_gain = 1.0, .down_reliable = true, .up_reliable = true },
+    };
+    const candidate = rule.select(ctx).?;
+    try std.testing.expectEqual(@as(usize, 1), candidate.column);
 }

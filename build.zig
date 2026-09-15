@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "solver", .module = solver_module },
             .{ .name = "mip", .module = mip_module },
             .{ .name = "io", .module = io_module },
+            .{ .name = "presolve", .module = presolve_module },
         },
     });
 
@@ -606,4 +607,53 @@ pub fn build(b: *std.Build) void {
     const io_test_step = b.step("test-io", "Run model file parser and writer tests");
     io_test_step.dependOn(&run_io_tests.step);
     test_step.dependOn(&run_io_tests.step);
+
+    const mip_regression_root = b.createModule(.{
+        .root_source_file = b.path("test/mip/regression.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "io", .module = io_module },
+            .{ .name = "mip", .module = mip_module },
+            .{ .name = "plugin", .module = plugin_module },
+            .{ .name = "plugins_builtin", .module = plugins_builtin_module },
+        },
+    });
+    const mip_regression_tests = b.addTest(.{ .root_module = mip_regression_root });
+    const run_mip_regression_tests = b.addRunArtifact(mip_regression_tests);
+    const mip_regression_test_step = b.step("test-mip-regression", "Run the MIP known-optimum regression suite");
+    mip_regression_test_step.dependOn(&run_mip_regression_tests.step);
+    test_step.dependOn(&run_mip_regression_tests.step);
+
+    const end_to_end_step = b.step("test-end-to-end", "Verify file parsing, optimization, result reporting, and solution export");
+    end_to_end_step.dependOn(&run_model_tests.step);
+    test_step.dependOn(end_to_end_step);
+    const cli_cases = [_]struct {
+        path: []const u8,
+        expected: []const []const u8,
+        solution: []const []const u8,
+    }{
+        .{ .path = "test/model/data/tiny_mip.mps", .expected = &.{ "objective: 3.000000", "bound: 3.000000" }, .solution = &.{ "X 1.0000000000", "Y 0.0000000000" } },
+        .{ .path = "test/model/data/presolve_mip.mps", .expected = &.{ "objective: 6.000000", "bound: 6.000000" }, .solution = &.{"Z 1.0000000000"} },
+        .{ .path = "test/model/data/pipeline_lp.lp", .expected = &.{"objective: 7.000000"}, .solution = &.{ "x 2.0000000000", "y 1.0000000000" } },
+    };
+    for (cli_cases) |case| {
+        const cli = b.addRunArtifact(exe);
+        cli.addArg("--solution");
+        const solution_file = cli.addOutputFileArg("solution.sol");
+        cli.addFileArg(b.path(case.path));
+        const output = b.addCheckFile(cli.captureStdOut(.{}), .{ .expected_matches = case.expected });
+        const status_output = b.addCheckFile(cli.captureStdOut(.{}), .{ .expected_matches = &.{"status: OPTIMAL"} });
+        const solution = b.addCheckFile(solution_file, .{ .expected_matches = case.solution });
+        end_to_end_step.dependOn(&output.step);
+        end_to_end_step.dependOn(&status_output.step);
+        end_to_end_step.dependOn(&solution.step);
+    }
+    const limited_cli = b.addRunArtifact(exe);
+    limited_cli.addArgs(&.{ "--param", "NodeLimit=0", "--param", "Presolve=0" });
+    limited_cli.addFileArg(b.path("test/model/data/tiny_mip.mps"));
+    const limited_output = b.addCheckFile(limited_cli.captureStdOut(.{}), .{
+        .expected_matches = &.{ "status: NODE_LIMIT", "objective: unavailable", "solutions: 0" },
+    });
+    end_to_end_step.dependOn(&limited_output.step);
 }

@@ -43,12 +43,19 @@ pub const ProblemView = struct {
     /// storage without taking ownership or allocating. Intended for the
     /// compile/dispatch boundary, not for repeated simplex iterations.
     pub fn validate(self: ProblemView) ViewError!void {
+        try self.validateExceptMatrix();
+        self.matrix.validate() catch return error.InvalidMatrix;
+    }
+
+    /// Validate everything except the O(nnz) CSC scan. Callers that reuse the
+    /// exact matrix slices validated previously (bound-only reoptimizations)
+    /// can skip that scan through slice-identity caching.
+    pub fn validateExceptMatrix(self: ProblemView) ViewError!void {
         if (self.col_cost.len != self.num_cols or self.col_lower.len != self.num_cols or self.col_upper.len != self.num_cols or
             self.row_lower.len != self.num_rows or self.row_upper.len != self.num_rows)
             return error.DimensionMismatch;
         if (self.matrix.num_rows != self.num_rows or self.matrix.num_cols != self.num_cols)
             return error.InvalidMatrix;
-        self.matrix.validate() catch return error.InvalidMatrix;
         if (!std.math.isFinite(self.objective_offset)) return error.InvalidObjective;
         for (self.col_cost) |cost| {
             if (!std.math.isFinite(cost)) return error.InvalidObjective;

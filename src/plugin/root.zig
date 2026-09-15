@@ -16,6 +16,7 @@ pub const Integrality = contracts.Integrality;
 pub const ProblemView = contracts.ProblemView;
 pub const BranchingKind = contracts.BranchingKind;
 pub const BranchingCandidate = contracts.BranchingCandidate;
+pub const PseudocostScore = contracts.PseudocostScore;
 pub const BranchingContext = contracts.BranchingContext;
 pub const BranchingRule = contracts.BranchingRule;
 pub const bindBranching = contracts.bindBranching;
