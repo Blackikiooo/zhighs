@@ -26,6 +26,7 @@ const usage_text =
     \\  --param Key=Value   set a solve parameter (repeatable), e.g.
     \\                      --param TimeLimit=10 --param NodeLimit=100 --param MIPGap=0.01
     \\                      --param Presolve=0
+    \\                      --param Method=2 (continuous LP interior-point)
     \\  --solution <file>   write the primal solution to <file>
     \\                      (one "variable value" pair per line)
     \\  --help, -h          show this usage text

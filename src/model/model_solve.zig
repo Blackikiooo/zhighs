@@ -16,6 +16,7 @@ const matrix = @import("matrix");
 const solver = @import("solver");
 const mip = @import("mip");
 const presolve = @import("presolve");
+const ipm = @import("ipm");
 
 const ModelError = types.ModelError;
 const VarType = types.VarType;
@@ -388,6 +389,22 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
         const max_work: f64 = @floatFromInt(std.math.maxInt(u64));
         break :blk if (work_limit_value >= max_work) std.math.maxInt(u64) else @intFromFloat(work_limit_value);
     };
+    if ((self.env.getIntParam("Method") catch -1) == 2) {
+        const requested_bar_limit = self.env.getIntParam("BarIterLimit") catch std.math.maxInt(i64);
+        const bar_limit = if (requested_bar_limit == std.math.maxInt(i64)) 100 else nonnegativeLimit(requested_bar_limit);
+        return solveInteriorPoint(self, problem, .{
+            .max_iterations = @min(max_iterations, bar_limit),
+            .time_limit_ns = time_limit_ns,
+            .work_limit = work_limit,
+            .interrupt_flag = &self.interrupted,
+            .iteration_callback = if (self.env.callback != null) barrierIteration else null,
+            .callback_context = self,
+            .tolerances = .{
+                .primal_feasibility = self.env.getDblParam("FeasibilityTol") catch 1e-8,
+                .dual_feasibility = self.env.getDblParam("OptimalityTol") catch 1e-8,
+            },
+        });
+    }
     const output_enabled = (self.env.getIntParam("OutputFlag") catch 1) != 0;
     const log_interval_value = self.env.getIntParam("SimplexLogInterval") catch 100;
     const log_interval: u64 = if (log_interval_value <= 0) 1 else @intCast(log_interval_value);
@@ -430,6 +447,7 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
     });
 
     self.status = mapLpStatus(solve_status);
+    self.bar_iter_count = 0;
     self.iter_count = std.math.cast(i64, self.lp_session.engine.iterations) orelse std.math.maxInt(i64);
     switch (solve_status) {
         .optimal => {
@@ -471,6 +489,51 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
         },
         else => self.clearPublishedResult(),
     }
+}
+
+/// Barrier publishes interior primal/dual values without claiming a simplex basis.
+fn barrierIteration(iteration: usize, context: ?*anyopaque) bool {
+    const self: *Model = @ptrCast(@alignCast(context.?));
+    self.bar_iter_count = std.math.cast(i64, iteration) orelse std.math.maxInt(i64);
+    if (self.env.callback) |callback| callback(.barrier, self.env.usrstate);
+    return self.interrupted.load(.acquire);
+}
+
+fn solveInteriorPoint(self: *Model, problem: solver.LpProblemView, options: ipm.Options) ModelError!void {
+    var result = ipm.engine.solveWithStats(self.allocator, problem, options, std.Io.Threaded.global_single_threaded.io(), null) catch |err| {
+        self.clearPublishedResult();
+        self.status = .numeric;
+        return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArgument;
+    };
+    defer result.deinit();
+    self.clearPublishedResult();
+    self.status = mapLpStatus(result.status);
+    self.iter_count = std.math.cast(i64, result.iterations) orelse std.math.maxInt(i64);
+    self.bar_iter_count = self.iter_count;
+    if (result.status != .optimal) return;
+    const slack = self.allocator.alloc(f64, problem.num_rows) catch {
+        self.status = .numeric;
+        return error.OutOfMemory;
+    };
+    @memset(slack, 0);
+    for (0..problem.num_cols) |j| {
+        for (problem.matrix.col_starts[j]..problem.matrix.col_starts[j + 1]) |k| {
+            slack[problem.matrix.row_indices[k].toUsize()] += problem.matrix.values[k] * result.primal[j];
+        }
+    }
+    for (slack, self.constr_sense, self.constr_rhs) |*value, sense, rhs| {
+        value.* = if (sense == .greater_equal) value.* - rhs else rhs - value.*;
+    }
+    self.solution = result.primal;
+    self.pi = result.dual;
+    self.reduced_cost = result.reduced_cost;
+    self.slack = slack;
+    self.obj_val = result.objective_value;
+    self.obj_bound = result.objective_value;
+    self.sol_count = 1;
+    result.primal = &.{};
+    result.dual = &.{};
+    result.reduced_cost = &.{};
 }
 
 fn mapLpStatus(status: solver.LpSolveStatus) types.Status {
