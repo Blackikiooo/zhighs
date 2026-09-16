@@ -1,0 +1,2213 @@
+{
+  "highs_version": "1.12.0",
+  "python": "3.11.5 | packaged by Anaconda, Inc. | (main, Sep 11 2023, 13:26:23) [MSC v.1916 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.26100-SP0",
+  "backend": "profile",
+  "configuration": {
+    "zhighs_iteration_limit": 100,
+    "zhighs_time_limit_s": 5,
+    "process_timeout_s": 20,
+    "highs_time_limit_s": 10,
+    "samples": 1,
+    "highs_threads": 1,
+    "highs_crossover": "off"
+  },
+  "models": [
+    {
+      "model": "adlittle",
+      "sha256": "fec81e24fa91bc545d97239b108b43e6034f37b4bf2455a3f8c179726b44d44c",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 225494.9631623803,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3121700,
+        "ipm_iterations": 0,
+        "simplex_iterations": 87
+      },
+      "rows": 56,
+      "cols": 97,
+      "nnz": 383,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 225494.9631624078,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3268100,
+        "ipm_iterations": 14,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 3.8722191675333306e-08,
+        "primal_rel": 1.7289135456621807e-08,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 9.61253839936567e-17,
+        "complementarity_abs": 4.99566957817299e-05,
+        "primal_dual_gap_rel": 5.7724297942152795e-09,
+        "reference_objective_error_rel": 3.17532733761857e-09,
+        "published_objective_error_rel": 1.290658597881939e-16,
+        "recomputed_objective": 225494.9638784038,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 225494.96387840377,
+        "iterations": 10,
+        "rows": 56,
+        "cols": 97,
+        "nnz": 383,
+        "parse_ns": 885900,
+        "solve_ns": 666800,
+        "stats": {
+          "normal_entries": 1219,
+          "assembly_ns": 130000,
+          "factor_ns": 225500,
+          "direction_ns": 133500,
+          "residual_ns": 42200,
+          "total_ns": 606300
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 49652800,
+      "accepted": true
+    },
+    {
+      "model": "afiro",
+      "sha256": "fd3562804ff19382a9cd8bcb22ec81bffd24a4143a2290783831d8c64516a24b",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -464.75314285714285,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 702900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 6
+      },
+      "rows": 27,
+      "cols": 32,
+      "nnz": 83,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -464.75314285687347,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1303100,
+        "ipm_iterations": 8,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.6402161069238239e-12,
+        "primal_rel": 1.6402161069238239e-12,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.4315647671704104e-17,
+        "complementarity_abs": 3.6600024132249447e-09,
+        "primal_dual_gap_rel": 2.7514579849621515e-10,
+        "reference_objective_error_rel": 1.5925996648723145e-10,
+        "published_objective_error_rel": 2.4409247577443e-16,
+        "recomputed_objective": -464.753142782967,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -464.7531427829669,
+        "iterations": 8,
+        "rows": 27,
+        "cols": 32,
+        "nnz": 83,
+        "parse_ns": 473800,
+        "solve_ns": 92600,
+        "stats": {
+          "normal_entries": 212,
+          "assembly_ns": 9700,
+          "factor_ns": 13100,
+          "direction_ns": 18700,
+          "residual_ns": 4800,
+          "total_ns": 67800
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 47981800,
+      "accepted": true
+    },
+    {
+      "model": "agg",
+      "sha256": "a9628559a665e6739dd9d18b00e32236eeed7833ede3d1e2384f78c3e39b82af",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -35991767.2865765,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 4429900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 94
+      },
+      "rows": 488,
+      "cols": 163,
+      "nnz": 2410,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -35991766.96395462,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14560100,
+        "ipm_iterations": 20,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 7.482947271379779e-06,
+        "primal_rel": 7.482947271379779e-06,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 2.2104646572138493e-16,
+        "complementarity_abs": 0.0036569083153602574,
+        "primal_dual_gap_rel": 2.3603813631823234e-09,
+        "reference_objective_error_rel": 6.935919965059993e-10,
+        "published_objective_error_rel": 1.0350395322019037e-15,
+        "recomputed_objective": -35991767.2616129,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": false
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -35991767.26161294,
+        "iterations": 30,
+        "rows": 488,
+        "cols": 163,
+        "nnz": 2410,
+        "parse_ns": 1304100,
+        "solve_ns": 323924000,
+        "stats": {
+          "normal_entries": 84450,
+          "assembly_ns": 10362000,
+          "factor_ns": 300506700,
+          "direction_ns": 11151200,
+          "residual_ns": 627500,
+          "total_ns": 323699500
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 389409200,
+      "accepted": false
+    },
+    {
+      "model": "beaconfd",
+      "sha256": "277ffc68fc6ab348066c708f362c5db1bc97d56c8d48d2d86094f5c537fd17d1",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 33592.4858072,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 7105000,
+        "ipm_iterations": 0,
+        "simplex_iterations": 8
+      },
+      "rows": 173,
+      "cols": 262,
+      "nnz": 3375,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 33592.48585110135,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14166300,
+        "ipm_iterations": 14,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.132483639533804e-07,
+        "primal_rel": 2.132483639533804e-07,
+        "dual_sign_abs": 2.3726034139913832e-14,
+        "stationarity_rel": 1.480027014574719e-16,
+        "complementarity_abs": 6.171562986192519e-09,
+        "primal_dual_gap_rel": 4.178639009236621e-12,
+        "reference_objective_error_rel": 1.6965365344635868e-12,
+        "published_objective_error_rel": 2.1658834858428553e-16,
+        "recomputed_objective": 33592.48580725699,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 33592.485807256984,
+        "iterations": 8,
+        "rows": 173,
+        "cols": 262,
+        "nnz": 3375,
+        "parse_ns": 1835600,
+        "solve_ns": 7026000,
+        "stats": {
+          "normal_entries": 9959,
+          "assembly_ns": 2014100,
+          "factor_ns": 3876100,
+          "direction_ns": 640400,
+          "residual_ns": 188800,
+          "total_ns": 6871100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 95191400,
+      "accepted": false
+    },
+    {
+      "model": "bgetam",
+      "sha256": "7da2e3c794c070c9084e616a2f8842117d3ea2e04d332461b5fedc8af6b34359",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": -668.7498171567098,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 5901600,
+        "ipm_iterations": 0,
+        "simplex_iterations": 9
+      },
+      "rows": 400,
+      "cols": 688,
+      "nnz": 2409,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 2442.6540047390604,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 16609300,
+        "ipm_iterations": 8,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 10,
+        "rows": 400,
+        "cols": 688,
+        "nnz": 2409,
+        "parse_ns": 1912100,
+        "solve_ns": 239034300,
+        "stats": {
+          "normal_entries": 120196,
+          "assembly_ns": 3658500,
+          "factor_ns": 228592100,
+          "direction_ns": 5359500,
+          "residual_ns": 261800,
+          "total_ns": 238639200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 308213800,
+      "accepted": false
+    },
+    {
+      "model": "blend",
+      "sha256": "c8bb193f8af5dcff735a3b8db62077db93625e93cfb26e2b01f83ca3039cbf7d",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -30.812149845828237,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1845500,
+        "ipm_iterations": 0,
+        "simplex_iterations": 80
+      },
+      "rows": 74,
+      "cols": 83,
+      "nnz": 491,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -30.812149735380782,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3246700,
+        "ipm_iterations": 11,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 3.148414862153004e-10,
+        "primal_rel": 3.148414862153004e-10,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.781252610841305e-16,
+        "complementarity_abs": 3.0846683716665717e-10,
+        "primal_dual_gap_rel": 1.0358481398071134e-10,
+        "reference_objective_error_rel": 5.5063005589031396e-11,
+        "published_objective_error_rel": 8.934230968265146e-16,
+        "recomputed_objective": -30.812149844076565,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -30.812149844076593,
+        "iterations": 10,
+        "rows": 74,
+        "cols": 83,
+        "nnz": 491,
+        "parse_ns": 743900,
+        "solve_ns": 1115000,
+        "stats": {
+          "normal_entries": 2352,
+          "assembly_ns": 221500,
+          "factor_ns": 536200,
+          "direction_ns": 187000,
+          "residual_ns": 43900,
+          "total_ns": 1053300
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 55841800,
+      "accepted": true
+    },
+    {
+      "model": "bore3d",
+      "sha256": "1bd24817ff568b4418181c1c40be017adf7c98e38ffbdd827a720d0609a32ca3",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 1373.0803942084926,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 2551300,
+        "ipm_iterations": 0,
+        "simplex_iterations": 34
+      },
+      "rows": 233,
+      "cols": 315,
+      "nnz": 1429,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 1373.0803963302437,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14053200,
+        "ipm_iterations": 20,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.6734232960734516e-07,
+        "primal_rel": 2.6734232960734516e-07,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.6892577956174656e-16,
+        "complementarity_abs": 1.3942555115046752e-07,
+        "primal_dual_gap_rel": 9.148609063665894e-10,
+        "reference_objective_error_rel": 4.886694210729905e-10,
+        "published_objective_error_rel": 0.0,
+        "recomputed_objective": 1373.0803948799637,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 1373.0803948799637,
+        "iterations": 16,
+        "rows": 233,
+        "cols": 315,
+        "nnz": 1429,
+        "parse_ns": 2083300,
+        "solve_ns": 34151800,
+        "stats": {
+          "normal_entries": 19355,
+          "assembly_ns": 2310100,
+          "factor_ns": 28424500,
+          "direction_ns": 2408200,
+          "residual_ns": 308300,
+          "total_ns": 33911700
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 128057600,
+      "accepted": false
+    },
+    {
+      "model": "box1",
+      "sha256": "f03f33d229c115e99b047425e611151e354ccfd98b01f91c1157f8b76c314782",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 265.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 973100,
+        "ipm_iterations": 0,
+        "simplex_iterations": 2
+      },
+      "rows": 231,
+      "cols": 261,
+      "nnz": 651,
+      "reference_ipm": {
+        "status": "Solve error",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 2978900,
+        "ipm_iterations": -1,
+        "simplex_iterations": -1
+      },
+      "zhighs": {
+        "status": "iteration_limit",
+        "objective": null,
+        "iterations": 100,
+        "rows": 231,
+        "cols": 261,
+        "nnz": 651,
+        "parse_ns": 910900,
+        "solve_ns": 15777900,
+        "stats": {
+          "normal_entries": 5160,
+          "assembly_ns": 1525700,
+          "factor_ns": 10074600,
+          "direction_ns": 2919800,
+          "residual_ns": 499800,
+          "total_ns": 15698600
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 80747100,
+      "accepted": false
+    },
+    {
+      "model": "brandy",
+      "sha256": "53b17390ddb1831ef8ec3834303e39a21ac598c2fe159698bba342ea13909ed6",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 1518.5098964881279,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 6010800,
+        "ipm_iterations": 0,
+        "simplex_iterations": 203
+      },
+      "rows": 220,
+      "cols": 249,
+      "nnz": 2148,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 1518.5098977654116,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 20439800,
+        "ipm_iterations": 18,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 23,
+        "rows": 220,
+        "cols": 249,
+        "nnz": 2148,
+        "parse_ns": 1391500,
+        "solve_ns": 25846200,
+        "stats": {
+          "normal_entries": 14127,
+          "assembly_ns": 3806800,
+          "factor_ns": 19164200,
+          "direction_ns": 1996300,
+          "residual_ns": 395800,
+          "total_ns": 25686200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 76099200,
+      "accepted": false
+    },
+    {
+      "model": "capri",
+      "sha256": "7200826e526a47d53fb57b2b45661675217ede75406945e2820a0a73d3b946c0",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 2690.0129137681593,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 5296200,
+        "ipm_iterations": 0,
+        "simplex_iterations": 150
+      },
+      "rows": 271,
+      "cols": 353,
+      "nnz": 1767,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 2690.0129137735535,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 25460400,
+        "ipm_iterations": 25,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 17,
+        "rows": 271,
+        "cols": 353,
+        "nnz": 1767,
+        "parse_ns": 1189000,
+        "solve_ns": 78600700,
+        "stats": {
+          "normal_entries": 46791,
+          "assembly_ns": 3399600,
+          "factor_ns": 70078400,
+          "direction_ns": 3878900,
+          "residual_ns": 368100,
+          "total_ns": 78363000
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 137587400,
+      "accepted": false
+    },
+    {
+      "model": "etamacro",
+      "sha256": "bad29069b427ee33aa2a7110f164a7f522d01c337e326eb60e279cf0c9752c8e",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -755.7152333522955,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14877800,
+        "ipm_iterations": 0,
+        "simplex_iterations": 423
+      },
+      "rows": 400,
+      "cols": 688,
+      "nnz": 2409,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -755.7152318078876,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 34376000,
+        "ipm_iterations": 29,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.5845103007450234e-11,
+        "primal_rel": 1.5845103007450234e-11,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 8.641262395600801e-17,
+        "complementarity_abs": 7.952799210675202e-09,
+        "primal_dual_gap_rel": 1.3866988012670515e-09,
+        "reference_objective_error_rel": 9.368222819031708e-10,
+        "published_objective_error_rel": 1.5023727925296368e-16,
+        "recomputed_objective": -755.7152326433878,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -755.7152326433879,
+        "iterations": 32,
+        "rows": 400,
+        "cols": 688,
+        "nnz": 2409,
+        "parse_ns": 1349000,
+        "solve_ns": 732732000,
+        "stats": {
+          "normal_entries": 120196,
+          "assembly_ns": 9471700,
+          "factor_ns": 703713200,
+          "direction_ns": 16996300,
+          "residual_ns": 820100,
+          "total_ns": 732367300
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 869090400,
+      "accepted": true
+    },
+    {
+      "model": "ex72a",
+      "sha256": "d80e736ff842954a1e38157ab4eebdd57c1ec82edc3638daea1d6c5957200d7c",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 325.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1241000,
+        "ipm_iterations": 0,
+        "simplex_iterations": 6
+      },
+      "rows": 197,
+      "cols": 215,
+      "nnz": 467,
+      "reference_ipm": {
+        "status": "Solve error",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 7294200,
+        "ipm_iterations": -1,
+        "simplex_iterations": -1
+      },
+      "zhighs": {
+        "status": "iteration_limit",
+        "objective": null,
+        "iterations": 100,
+        "rows": 197,
+        "cols": 215,
+        "nnz": 467,
+        "parse_ns": 884400,
+        "solve_ns": 45820900,
+        "stats": {
+          "normal_entries": 7816,
+          "assembly_ns": 3458600,
+          "factor_ns": 35812800,
+          "direction_ns": 4933300,
+          "residual_ns": 594300,
+          "total_ns": 45721100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 115111300,
+      "accepted": false
+    },
+    {
+      "model": "finnis",
+      "sha256": "401a243cc72b056bed39baeac3697fb4f95865d9b7993d215c3674daae31eea5",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 172791.06559561164,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 8358600,
+        "ipm_iterations": 0,
+        "simplex_iterations": 246
+      },
+      "rows": 497,
+      "cols": 614,
+      "nnz": 2310,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 172791.0660851985,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 47700600,
+        "ipm_iterations": 29,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 3.4114767801468014e-09,
+        "primal_rel": 3.4114767801468014e-09,
+        "dual_sign_abs": 1.4210854715202004e-14,
+        "stationarity_rel": 1.8721258752280293e-16,
+        "complementarity_abs": 2.555548405402515e-06,
+        "primal_dual_gap_rel": 3.5171923229256927e-09,
+        "reference_objective_error_rel": 2.2923246269857985e-09,
+        "published_objective_error_rel": 2.8633555303877107e-14,
+        "recomputed_objective": 172791.06599170715,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 172791.0659917022,
+        "iterations": 22,
+        "rows": 497,
+        "cols": 614,
+        "nnz": 2310,
+        "parse_ns": 1821500,
+        "solve_ns": 691246200,
+        "stats": {
+          "normal_entries": 113064,
+          "assembly_ns": 9143500,
+          "factor_ns": 663769400,
+          "direction_ns": 15244800,
+          "residual_ns": 967700,
+          "total_ns": 690711100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 849511400,
+      "accepted": true
+    },
+    {
+      "model": "forest6",
+      "sha256": "75dad945ffb9a78f1df19151a05bf109221ca038ab1f9346b8c063653dab98ca",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 2744999.7075749026,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1253700,
+        "ipm_iterations": 0,
+        "simplex_iterations": 16
+      },
+      "rows": 66,
+      "cols": 95,
+      "nnz": 210,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 460426.3750677308,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 5796900,
+        "ipm_iterations": 13,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 12,
+        "rows": 66,
+        "cols": 95,
+        "nnz": 210,
+        "parse_ns": 922300,
+        "solve_ns": 464200,
+        "stats": {
+          "normal_entries": 991,
+          "assembly_ns": 51700,
+          "factor_ns": 148200,
+          "direction_ns": 115500,
+          "residual_ns": 24000,
+          "total_ns": 422200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 71102900,
+      "accepted": false
+    },
+    {
+      "model": "galenet",
+      "sha256": "c0c0b157f690cafc57719a922d50065881a9e464543fd55b1e5a0fb00f77aee4",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 100000,
+        "ipm_iterations": 0,
+        "simplex_iterations": 0
+      },
+      "rows": 8,
+      "cols": 8,
+      "nnz": 16,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 765000,
+        "ipm_iterations": 6,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 10,
+        "rows": 8,
+        "cols": 8,
+        "nnz": 16,
+        "parse_ns": 650200,
+        "solve_ns": 91700,
+        "stats": {
+          "normal_entries": 104,
+          "assembly_ns": 5900,
+          "factor_ns": 11600,
+          "direction_ns": 14500,
+          "residual_ns": 3800,
+          "total_ns": 58800
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 60286600,
+      "accepted": false
+    },
+    {
+      "model": "gams10am",
+      "sha256": "a5e172e8e3132e94708ec521b01173e3dd8c392cf0d214d52f4d616de3607358",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 274000,
+        "ipm_iterations": 0,
+        "simplex_iterations": 0
+      },
+      "rows": 114,
+      "cols": 61,
+      "nnz": 297,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 0.8421530391883366,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1107100,
+        "ipm_iterations": 7,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 7,
+        "rows": 114,
+        "cols": 61,
+        "nnz": 297,
+        "parse_ns": 1135400,
+        "solve_ns": 3357700,
+        "stats": {
+          "normal_entries": 8639,
+          "assembly_ns": 240600,
+          "factor_ns": 2546400,
+          "direction_ns": 323500,
+          "residual_ns": 44600,
+          "total_ns": 3264100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 67601100,
+      "accepted": false
+    },
+    {
+      "model": "gas11",
+      "sha256": "98e050ceb7f6cc9f139eb91b6c63fc6c203dcfc40b68f8eb172be86dc6cff8cf",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Unbounded",
+        "objective": -8544722779.968357,
+        "read_status": "HighsStatus.kWarning",
+        "solve_ns": 19902500,
+        "ipm_iterations": 0,
+        "simplex_iterations": 561
+      },
+      "rows": 459,
+      "cols": 862,
+      "nnz": 2154,
+      "reference_ipm": {
+        "status": "Primal infeasible or unbounded",
+        "objective": 634277868666262.1,
+        "read_status": "HighsStatus.kWarning",
+        "solve_ns": 5058200,
+        "ipm_iterations": 1,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 10,
+        "rows": 459,
+        "cols": 862,
+        "nnz": 2166,
+        "parse_ns": 2111600,
+        "solve_ns": 555481900,
+        "stats": {
+          "normal_entries": 150175,
+          "assembly_ns": 5617900,
+          "factor_ns": 537626200,
+          "direction_ns": 9701600,
+          "residual_ns": 502300,
+          "total_ns": 554792500
+        }
+      },
+      "parser_dimensions_match": false,
+      "process_ns": 627345100,
+      "accepted": false
+    },
+    {
+      "model": "grow7",
+      "sha256": "7072888d957cf01949854eac5ce171710d8b674566f1f2695d9f44de7b8cb74d",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -47787811.8147115,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 27746900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 392
+      },
+      "rows": 140,
+      "cols": 301,
+      "nnz": 2612,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -47787811.81461519,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 36884200,
+        "ipm_iterations": 16,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 8.116767276078463e-07,
+        "primal_rel": 8.116767276078463e-07,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.4877840329258242e-16,
+        "complementarity_abs": 3.6313667099858273e-05,
+        "primal_dual_gap_rel": 1.7289755216271373e-11,
+        "reference_objective_error_rel": 1.3184186718495526e-11,
+        "published_objective_error_rel": 1.5590963800562123e-16,
+        "recomputed_objective": -47787811.81408146,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -47787811.81408147,
+        "iterations": 11,
+        "rows": 140,
+        "cols": 301,
+        "nnz": 2612,
+        "parse_ns": 2966200,
+        "solve_ns": 116395400,
+        "stats": {
+          "normal_entries": 63035,
+          "assembly_ns": 4102800,
+          "factor_ns": 106929700,
+          "direction_ns": 3986500,
+          "residual_ns": 363900,
+          "total_ns": 116021900
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 231897300,
+      "accepted": false
+    },
+    {
+      "model": "israel",
+      "sha256": "119a04d815f7db33d67c0647144703a348087397f4440b2d83f1458d9253e5ab",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -896644.8218630459,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 8586500,
+        "ipm_iterations": 0,
+        "simplex_iterations": 133
+      },
+      "rows": 174,
+      "cols": 142,
+      "nnz": 2269,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -896644.8218623352,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 34897400,
+        "ipm_iterations": 24,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 0.0,
+        "primal_rel": 0.0,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 2.0059020046116866e-16,
+        "complementarity_abs": 5.482695606479179e-06,
+        "primal_dual_gap_rel": 2.1704297711816517e-10,
+        "reference_objective_error_rel": 3.538008793992779e-11,
+        "published_objective_error_rel": 1.0386738575476007e-15,
+        "recomputed_objective": -896644.8218313225,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -896644.8218313216,
+        "iterations": 24,
+        "rows": 174,
+        "cols": 142,
+        "nnz": 2269,
+        "parse_ns": 3193300,
+        "solve_ns": 39311300,
+        "stats": {
+          "normal_entries": 13915,
+          "assembly_ns": 11198900,
+          "factor_ns": 24166000,
+          "direction_ns": 2749100,
+          "residual_ns": 520200,
+          "total_ns": 39078200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 119983800,
+      "accepted": true
+    },
+    {
+      "model": "kb2",
+      "sha256": "b8a3df09b7e76059cb1abd04b8a36c6bf9d9781e20a3d51b38c56f31f47606ea",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -1749.9001299062056,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1720300,
+        "ipm_iterations": 0,
+        "simplex_iterations": 34
+      },
+      "rows": 43,
+      "cols": 41,
+      "nnz": 286,
+      "reference_ipm": {
+        "status": "Unknown",
+        "objective": -1407.0756079000307,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3808400,
+        "ipm_iterations": 10,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.8690116121433675e-10,
+        "primal_rel": 1.8690116121433675e-10,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 2.4594875590791555e-17,
+        "complementarity_abs": 3.4251652373446143e-07,
+        "primal_dual_gap_rel": 2.535019814185847e-09,
+        "reference_objective_error_rel": 3.209621576357064e-10,
+        "published_objective_error_rel": 1.2986101927377814e-16,
+        "recomputed_objective": -1749.900129344233,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -1749.9001293442332,
+        "iterations": 18,
+        "rows": 43,
+        "cols": 41,
+        "nnz": 286,
+        "parse_ns": 961400,
+        "solve_ns": 897800,
+        "stats": {
+          "normal_entries": 1250,
+          "assembly_ns": 272700,
+          "factor_ns": 304100,
+          "direction_ns": 165800,
+          "residual_ns": 46200,
+          "total_ns": 862300
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 74373800,
+      "accepted": true
+    },
+    {
+      "model": "klein1",
+      "sha256": "7028fd263edc30c25e8c8f713b1b1695f8d9981c9959c1d9b8d2416bf56458e1",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3089900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 131
+      },
+      "rows": 54,
+      "cols": 54,
+      "nnz": 696,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 6014300,
+        "ipm_iterations": 12,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 64,
+        "rows": 54,
+        "cols": 54,
+        "nnz": 696,
+        "parse_ns": 839900,
+        "solve_ns": 3859900,
+        "stats": {
+          "normal_entries": 1443,
+          "assembly_ns": 1157400,
+          "factor_ns": 1681500,
+          "direction_ns": 634500,
+          "residual_ns": 135400,
+          "total_ns": 3810000
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 74103000,
+      "accepted": false
+    },
+    {
+      "model": "lotfi",
+      "sha256": "21438697b88d8e6be102e3f14b9cd525abee550c18051ad10a6f7dca3ba8dd54",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -25.264706061880002,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3985900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 93
+      },
+      "rows": 153,
+      "cols": 308,
+      "nnz": 1078,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -25.26470606190811,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 12362100,
+        "ipm_iterations": 22,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 13,
+        "rows": 153,
+        "cols": 308,
+        "nnz": 1078,
+        "parse_ns": 949400,
+        "solve_ns": 4858300,
+        "stats": {
+          "normal_entries": 7605,
+          "assembly_ns": 318500,
+          "factor_ns": 3780900,
+          "direction_ns": 442100,
+          "residual_ns": 57100,
+          "total_ns": 4769800
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 83517300,
+      "accepted": false
+    },
+    {
+      "model": "recipe",
+      "sha256": "f967ab6466e4e9ad1914eb40d07d912149b4c5a6005252e86ba181048c3ca59c",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -266.61600000000027,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1572600,
+        "ipm_iterations": 0,
+        "simplex_iterations": 19
+      },
+      "rows": 91,
+      "cols": 180,
+      "nnz": 663,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -266.6159999986479,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 5883500,
+        "ipm_iterations": 15,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 7.147173164412379e-08,
+        "primal_rel": 7.147173164412379e-08,
+        "dual_sign_abs": 2.2419222348689213e-14,
+        "stationarity_rel": 9.521289647645912e-17,
+        "complementarity_abs": 5.4533103940948194e-09,
+        "primal_dual_gap_rel": 2.2963113339383717e-10,
+        "reference_objective_error_rel": 1.83173125384861e-10,
+        "published_objective_error_rel": 4.248133061642065e-16,
+        "recomputed_objective": -266.6159999509802,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -266.6159999509801,
+        "iterations": 10,
+        "rows": 91,
+        "cols": 180,
+        "nnz": 663,
+        "parse_ns": 880700,
+        "solve_ns": 2581000,
+        "stats": {
+          "normal_entries": 5627,
+          "assembly_ns": 344100,
+          "factor_ns": 1603200,
+          "direction_ns": 349900,
+          "residual_ns": 78000,
+          "total_ns": 2501100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 72404300,
+      "accepted": true
+    },
+    {
+      "model": "refinery",
+      "sha256": "49f56ac2fa177f3f194d04567fa21f5a0f06de2b527d58e633da55300ef16d01",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 95397904.89128084,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 8522500,
+        "ipm_iterations": 0,
+        "simplex_iterations": 227
+      },
+      "rows": 323,
+      "cols": 464,
+      "nnz": 1626,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": -31441.28223541628,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 17554200,
+        "ipm_iterations": 14,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 29,
+        "rows": 323,
+        "cols": 464,
+        "nnz": 1626,
+        "parse_ns": 1354000,
+        "solve_ns": 704134900,
+        "stats": {
+          "normal_entries": 109814,
+          "assembly_ns": 13233100,
+          "factor_ns": 663764200,
+          "direction_ns": 24401300,
+          "residual_ns": 921500,
+          "total_ns": 703705200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 798407700,
+      "accepted": false
+    },
+    {
+      "model": "sc105",
+      "sha256": "771da8cb34bf412831f3eab58edbd40a1c0f2962c61e3b1578eedbbb67682fb6",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -52.20206121170723,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 2374300,
+        "ipm_iterations": 0,
+        "simplex_iterations": 40
+      },
+      "rows": 105,
+      "cols": 103,
+      "nnz": 280,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -52.20206091945243,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 7381700,
+        "ipm_iterations": 11,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 4.202945547149284e-09,
+        "primal_rel": 1.0011831363954116e-09,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 3.700743415416643e-17,
+        "complementarity_abs": 6.909043831043262e-10,
+        "primal_dual_gap_rel": 6.401034172573529e-11,
+        "reference_objective_error_rel": 4.440359444840146e-11,
+        "published_objective_error_rel": 0.0,
+        "recomputed_objective": -52.20206120934487,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -52.20206120934487,
+        "iterations": 9,
+        "rows": 105,
+        "cols": 103,
+        "nnz": 280,
+        "parse_ns": 1125000,
+        "solve_ns": 608700,
+        "stats": {
+          "normal_entries": 802,
+          "assembly_ns": 80600,
+          "factor_ns": 107500,
+          "direction_ns": 216100,
+          "residual_ns": 47400,
+          "total_ns": 539400
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 178665600,
+      "accepted": true
+    },
+    {
+      "model": "sc205",
+      "sha256": "3fde67ec21ff86d763704d4c20a4e5f94b86f6b03217e5b235ab4a53015f63d6",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -52.20206121170721,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 8140500,
+        "ipm_iterations": 0,
+        "simplex_iterations": 76
+      },
+      "rows": 205,
+      "cols": 203,
+      "nnz": 551,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -52.20206121169921,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14539600,
+        "ipm_iterations": 12,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 8.640199666842818e-11,
+        "primal_rel": 8.640199666842818e-11,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.2108487475829712e-17,
+        "complementarity_abs": 1.1751844643766475e-11,
+        "primal_dual_gap_rel": 1.621951293550075e-11,
+        "reference_objective_error_rel": 2.424032144680882e-12,
+        "published_objective_error_rel": 0.0,
+        "recomputed_objective": -52.20206121157825,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -52.20206121157825,
+        "iterations": 11,
+        "rows": 205,
+        "cols": 203,
+        "nnz": 551,
+        "parse_ns": 1487600,
+        "solve_ns": 2763100,
+        "stats": {
+          "normal_entries": 1618,
+          "assembly_ns": 408300,
+          "factor_ns": 241800,
+          "direction_ns": 838200,
+          "residual_ns": 173900,
+          "total_ns": 2635700
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 127203200,
+      "accepted": true
+    },
+    {
+      "model": "sc50a",
+      "sha256": "c4571004af37a0c7d49099f8fcc513885401784d32f712bf44e014e40348c521",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -64.5750770585645,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1460900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 18
+      },
+      "rows": 50,
+      "cols": 48,
+      "nnz": 130,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -64.5750770585645,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 4516300,
+        "ipm_iterations": 12,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.5579538487363607e-11,
+        "primal_rel": 2.5579538487363607e-11,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 4.242006805361108e-17,
+        "complementarity_abs": 7.759932015453438e-10,
+        "primal_dual_gap_rel": 9.960047506659646e-11,
+        "reference_objective_error_rel": 6.964209979263991e-11,
+        "published_objective_error_rel": 0.0,
+        "recomputed_objective": -64.57507705399772,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -64.57507705399772,
+        "iterations": 8,
+        "rows": 50,
+        "cols": 48,
+        "nnz": 130,
+        "parse_ns": 1113800,
+        "solve_ns": 284100,
+        "stats": {
+          "normal_entries": 352,
+          "assembly_ns": 38400,
+          "factor_ns": 35500,
+          "direction_ns": 62600,
+          "residual_ns": 25300,
+          "total_ns": 217800
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 155424700,
+      "accepted": true
+    },
+    {
+      "model": "sc50b",
+      "sha256": "15c9d96e1d518dddc197e8e107febce590d0ae94594c676ff0d135b5642c1be5",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -69.99999999999999,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 1426800,
+        "ipm_iterations": 0,
+        "simplex_iterations": 15
+      },
+      "rows": 50,
+      "cols": 48,
+      "nnz": 118,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -69.99999999815837,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3067800,
+        "ipm_iterations": 8,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 9.322320693172514e-12,
+        "primal_rel": 9.322320693172514e-12,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.1102230244549133e-17,
+        "complementarity_abs": 5.593634003192853e-09,
+        "primal_dual_gap_rel": 5.760956408669615e-10,
+        "reference_objective_error_rel": 3.323016228382009e-10,
+        "published_objective_error_rel": 0.0,
+        "recomputed_objective": -69.99999997640657,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -69.99999997640657,
+        "iterations": 7,
+        "rows": 50,
+        "cols": 48,
+        "nnz": 118,
+        "parse_ns": 937300,
+        "solve_ns": 259200,
+        "stats": {
+          "normal_entries": 371,
+          "assembly_ns": 35000,
+          "factor_ns": 37300,
+          "direction_ns": 61000,
+          "residual_ns": 23400,
+          "total_ns": 204000
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 133971400,
+      "accepted": true
+    },
+    {
+      "model": "scagr25",
+      "sha256": "53bca778f79d1ba8a0aea8235b906edf5b60828fdbfcd54575b1d5cdc1057350",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -14753433.060768528,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 20471600,
+        "ipm_iterations": 0,
+        "simplex_iterations": 338
+      },
+      "rows": 471,
+      "cols": 500,
+      "nnz": 1554,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -14753433.032982003,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 51836500,
+        "ipm_iterations": 17,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.657998265931383e-07,
+        "primal_rel": 2.657998265931383e-07,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.1798331856162614e-16,
+        "complementarity_abs": 0.000747652905745586,
+        "primal_dual_gap_rel": 3.6908823041611683e-09,
+        "reference_objective_error_rel": 2.700424342066288e-09,
+        "published_objective_error_rel": 1.1362647041562574e-15,
+        "recomputed_objective": -14753433.020927995,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -14753433.020928012,
+        "iterations": 15,
+        "rows": 471,
+        "cols": 500,
+        "nnz": 1554,
+        "parse_ns": 2344300,
+        "solve_ns": 34997700,
+        "stats": {
+          "normal_entries": 4959,
+          "assembly_ns": 1042300,
+          "factor_ns": 1226500,
+          "direction_ns": 31518300,
+          "residual_ns": 373700,
+          "total_ns": 34731100
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 513237000,
+      "accepted": false
+    },
+    {
+      "model": "scagr7",
+      "sha256": "30cccee0e5adb619dc0f1ea257b350a3cc407c1212d814249ab2ab6218936bc3",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -2331389.824330984,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 4392400,
+        "ipm_iterations": 0,
+        "simplex_iterations": 104
+      },
+      "rows": 129,
+      "cols": 140,
+      "nnz": 420,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -2331389.824330894,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 13451800,
+        "ipm_iterations": 16,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.426986611681059e-09,
+        "primal_rel": 2.426986611681059e-09,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 9.968332423720481e-17,
+        "complementarity_abs": 1.826664294780788e-06,
+        "primal_dual_gap_rel": 2.416319018946111e-11,
+        "reference_objective_error_rel": 1.656225940407287e-11,
+        "published_objective_error_rel": 3.994708072586481e-16,
+        "recomputed_objective": -2331389.824292371,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -2331389.824292372,
+        "iterations": 13,
+        "rows": 129,
+        "cols": 140,
+        "nnz": 420,
+        "parse_ns": 1320900,
+        "solve_ns": 1135500,
+        "stats": {
+          "normal_entries": 1287,
+          "assembly_ns": 231800,
+          "factor_ns": 254400,
+          "direction_ns": 315700,
+          "residual_ns": 90300,
+          "total_ns": 1040500
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 196016500,
+      "accepted": true
+    },
+    {
+      "model": "scfxm1",
+      "sha256": "10fed25568aee378ae9f043a77ac7b53ba838eac06ec14f6664c24e481716177",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 18416.759028348948,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 28733900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 375
+      },
+      "rows": 330,
+      "cols": 457,
+      "nnz": 2589,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 18416.759028818895,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 76688700,
+        "ipm_iterations": 19,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.308339617229649e-06,
+        "primal_rel": 2.308339617229649e-06,
+        "dual_sign_abs": 1.7763568394002505e-15,
+        "stationarity_rel": 1.3232261642850275e-16,
+        "complementarity_abs": 5.269236986599637e-06,
+        "primal_dual_gap_rel": 3.37293323127543e-10,
+        "reference_objective_error_rel": 3.373956412718519e-10,
+        "published_objective_error_rel": 1.9752559487392078e-16,
+        "recomputed_objective": 18416.759022134876,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": false
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 18416.75902213488,
+        "iterations": 19,
+        "rows": 330,
+        "cols": 457,
+        "nnz": 2589,
+        "parse_ns": 3248000,
+        "solve_ns": 19591600,
+        "stats": {
+          "normal_entries": 12813,
+          "assembly_ns": 3716200,
+          "factor_ns": 10501900,
+          "direction_ns": 3536300,
+          "residual_ns": 719900,
+          "total_ns": 19158200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 281749800,
+      "accepted": false
+    },
+    {
+      "model": "scorpion",
+      "sha256": "36006710427a2b6c6575f41fdc284ca78e89a0af3f7572742d5336d7d7793130",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 1878.1248227381068,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 14393700,
+        "ipm_iterations": 0,
+        "simplex_iterations": 78
+      },
+      "rows": 388,
+      "cols": 358,
+      "nnz": 1426,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 1878.1248413465337,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 32693800,
+        "ipm_iterations": 13,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 4.0366043840833754e-12,
+        "primal_rel": 4.0366043840833754e-12,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.1347652265507823e-16,
+        "complementarity_abs": 3.764964871287368e-08,
+        "primal_dual_gap_rel": 7.943253891342581e-10,
+        "reference_objective_error_rel": 3.5089812931523196e-10,
+        "published_objective_error_rel": 4.83999088537688e-16,
+        "recomputed_objective": 1878.1248233974882,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 1878.1248233974873,
+        "iterations": 11,
+        "rows": 388,
+        "cols": 358,
+        "nnz": 1426,
+        "parse_ns": 2577100,
+        "solve_ns": 6220400,
+        "stats": {
+          "normal_entries": 7953,
+          "assembly_ns": 1079900,
+          "factor_ns": 2774100,
+          "direction_ns": 1204800,
+          "residual_ns": 268600,
+          "total_ns": 5713700
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 270910000,
+      "accepted": true
+    },
+    {
+      "model": "scrs8",
+      "sha256": "789adeb2c5a392c5ac6419dc0f3b0e2bfdd8b875c3cd633c88eb8f9e68e982fb",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 904.296953800792,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 58233300,
+        "ipm_iterations": 0,
+        "simplex_iterations": 361
+      },
+      "rows": 490,
+      "cols": 1169,
+      "nnz": 3182,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 904.296953872581,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 105683200,
+        "ipm_iterations": 24,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.5006662579253316e-11,
+        "primal_rel": 1.5006662579253316e-11,
+        "dual_sign_abs": 6.222986455950095e-16,
+        "stationarity_rel": 1.0030191595329635e-16,
+        "complementarity_abs": 8.881784186973764e-10,
+        "primal_dual_gap_rel": 3.513428633905934e-11,
+        "reference_objective_error_rel": 1.6517360426219686e-11,
+        "published_objective_error_rel": 8.790572647980905e-16,
+        "recomputed_objective": 904.2969538157452,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 904.2969538157444,
+        "iterations": 21,
+        "rows": 490,
+        "cols": 1169,
+        "nnz": 3182,
+        "parse_ns": 4115400,
+        "solve_ns": 17102000,
+        "stats": {
+          "normal_entries": 13647,
+          "assembly_ns": 2726200,
+          "factor_ns": 7825800,
+          "direction_ns": 3867100,
+          "residual_ns": 956800,
+          "total_ns": 16614600
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 564437300,
+      "accepted": true
+    },
+    {
+      "model": "scsd1",
+      "sha256": "bb9ff57e9f39ddac9f02c96406f664b74861c324d128c3d7abf49c857abe6722",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 8.666666674333358,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 8065000,
+        "ipm_iterations": 0,
+        "simplex_iterations": 90
+      },
+      "rows": 77,
+      "cols": 760,
+      "nnz": 2388,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 8.666666675866324,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 22409400,
+        "ipm_iterations": 14,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.8137821356130984e-14,
+        "primal_rel": 1.8137821356130984e-14,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.0670298322501799e-16,
+        "complementarity_abs": 2.546571347367975e-11,
+        "primal_dual_gap_rel": 1.900436587866151e-10,
+        "reference_objective_error_rel": 1.7503423983674472e-10,
+        "published_objective_error_rel": 1.8376105217384357e-16,
+        "recomputed_objective": 8.666666676025356,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 8.666666676025358,
+        "iterations": 8,
+        "rows": 77,
+        "cols": 760,
+        "nnz": 2388,
+        "parse_ns": 3292200,
+        "solve_ns": 2643800,
+        "stats": {
+          "normal_entries": 1485,
+          "assembly_ns": 560100,
+          "factor_ns": 310500,
+          "direction_ns": 781900,
+          "residual_ns": 272100,
+          "total_ns": 2269800
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 331798900,
+      "accepted": true
+    },
+    {
+      "model": "seba",
+      "sha256": "0df2fe9070d28a4da3fa91f5c08fa41cb1937d6b4d43f44bcaf06f155eb6a712",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 15711.599999999999,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 11795400,
+        "ipm_iterations": 0,
+        "simplex_iterations": 1
+      },
+      "rows": 515,
+      "cols": 1028,
+      "nnz": 4352,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 15711.600006629553,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 64047200,
+        "ipm_iterations": 17,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.4320031598014094e-08,
+        "primal_rel": 1.4320031598014094e-08,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 3.8862866130907923e-16,
+        "complementarity_abs": 1.6400792465140851e-06,
+        "primal_dual_gap_rel": 5.707692035135635e-09,
+        "reference_objective_error_rel": 4.79073136115137e-09,
+        "published_objective_error_rel": 2.315325782915071e-16,
+        "recomputed_objective": 15711.600075274844,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 15711.60007527484,
+        "iterations": 16,
+        "rows": 515,
+        "cols": 1028,
+        "nnz": 4352,
+        "parse_ns": 6532200,
+        "solve_ns": 3638588400,
+        "stats": {
+          "normal_entries": 364599,
+          "assembly_ns": 107090700,
+          "factor_ns": 3451258400,
+          "direction_ns": 71325500,
+          "residual_ns": 2582600,
+          "total_ns": 3636671200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 4401828100,
+      "accepted": true
+    },
+    {
+      "model": "share1b",
+      "sha256": "e31eb15e886236ff331c29433bb930017793606c7c5e86feb6c4e9f41fae4dde",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -76589.31857918572,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 13562800,
+        "ipm_iterations": 0,
+        "simplex_iterations": 164
+      },
+      "rows": 117,
+      "cols": 225,
+      "nnz": 1151,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -76589.31857877984,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 32198800,
+        "ipm_iterations": 21,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.2566705647861962e-07,
+        "primal_rel": 1.2565449102951667e-07,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 9.76630084065681e-17,
+        "complementarity_abs": 6.39717582781198e-06,
+        "primal_dual_gap_rel": 5.235197798502288e-09,
+        "reference_objective_error_rel": 3.4854260761622318e-09,
+        "published_objective_error_rel": 1.8999679788564194e-16,
+        "recomputed_objective": -76589.31831223583,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -76589.31831223582,
+        "iterations": 22,
+        "rows": 117,
+        "cols": 225,
+        "nnz": 1151,
+        "parse_ns": 1369200,
+        "solve_ns": 4159400,
+        "stats": {
+          "normal_entries": 3109,
+          "assembly_ns": 1108000,
+          "factor_ns": 1477000,
+          "direction_ns": 880200,
+          "residual_ns": 274700,
+          "total_ns": 4024000
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 260546000,
+      "accepted": false
+    },
+    {
+      "model": "share2b",
+      "sha256": "b861a8d9711956007c0419f956d29e78f20d12aac5b2c65d1a85a88468423754",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": -415.73224074141945,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 4720900,
+        "ipm_iterations": 0,
+        "simplex_iterations": 99
+      },
+      "rows": 96,
+      "cols": 79,
+      "nnz": 694,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": -415.7322407412409,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 13721900,
+        "ipm_iterations": 14,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 2.248725650133565e-10,
+        "primal_rel": 2.248725650133565e-10,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.2421026459081075e-16,
+        "complementarity_abs": 2.8726370647676596e-09,
+        "primal_dual_gap_rel": 1.5053488063807264e-10,
+        "reference_objective_error_rel": 4.376086297018473e-11,
+        "published_objective_error_rel": 1.3640273851181729e-16,
+        "recomputed_objective": -415.7322407231829,
+        "failed_checks": [],
+        "accepted": true,
+        "absolute_primal_1e_6_pass": true
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": -415.7322407231828,
+        "iterations": 11,
+        "rows": 96,
+        "cols": 79,
+        "nnz": 694,
+        "parse_ns": 1107600,
+        "solve_ns": 1195300,
+        "stats": {
+          "normal_entries": 1770,
+          "assembly_ns": 268300,
+          "factor_ns": 429600,
+          "direction_ns": 261200,
+          "residual_ns": 55900,
+          "total_ns": 1129200
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 110663400,
+      "accepted": true
+    },
+    {
+      "model": "shell",
+      "sha256": "3ef58427f7f252865fe258102e152558e59c16003f7880022c53d2eaf5ed7d81",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 1208825346.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 37049700,
+        "ipm_iterations": 0,
+        "simplex_iterations": 325
+      },
+      "rows": 536,
+      "cols": 1775,
+      "nnz": 3556,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 1208825346.000088,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 51226400,
+        "ipm_iterations": 22,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.3058361219009385e-06,
+        "primal_rel": 1.3058361219009385e-06,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.5160229411730194e-17,
+        "complementarity_abs": 0.13427753784025018,
+        "primal_dual_gap_rel": 6.545772812133967e-09,
+        "reference_objective_error_rel": 4.058308381454768e-09,
+        "published_objective_error_rel": 3.352937492861629e-15,
+        "recomputed_objective": 1208825350.905786,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": false
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 1208825350.905782,
+        "iterations": 20,
+        "rows": 536,
+        "cols": 1775,
+        "nnz": 3556,
+        "parse_ns": 4462100,
+        "solve_ns": 353236700,
+        "stats": {
+          "normal_entries": 82704,
+          "assembly_ns": 7783200,
+          "factor_ns": 326855800,
+          "direction_ns": 14542200,
+          "residual_ns": 1081500,
+          "total_ns": 352457900
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 1152632500,
+      "accepted": false
+    },
+    {
+      "model": "vtp-base",
+      "sha256": "ab568fd861228875310ba3eb9f1d9eec1d8444c0116df78fbbc1eda38b6b9c8a",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Optimal",
+        "objective": 129831.46246136137,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 2397600,
+        "ipm_iterations": 0,
+        "simplex_iterations": 20
+      },
+      "rows": 198,
+      "cols": 203,
+      "nnz": 908,
+      "reference_ipm": {
+        "status": "Optimal",
+        "objective": 129831.46283593569,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 54878500,
+        "ipm_iterations": 39,
+        "simplex_iterations": 0
+      },
+      "validation": {
+        "primal_abs": 1.561609769851202e-05,
+        "primal_rel": 2.7398081289542464e-06,
+        "dual_sign_abs": 0.0,
+        "stationarity_rel": 1.502491671114057e-16,
+        "complementarity_abs": 0.000496178693525486,
+        "primal_dual_gap_rel": 4.854078494061932e-10,
+        "reference_objective_error_rel": 3.0157143075748174e-10,
+        "published_objective_error_rel": 6.724935327314976e-16,
+        "recomputed_objective": 129831.46250051513,
+        "failed_checks": [
+          "primal_rel"
+        ],
+        "accepted": false,
+        "absolute_primal_1e_6_pass": false
+      },
+      "zhighs": {
+        "status": "optimal",
+        "objective": 129831.46250051522,
+        "iterations": 42,
+        "rows": 198,
+        "cols": 203,
+        "nnz": 908,
+        "parse_ns": 1989600,
+        "solve_ns": 298704500,
+        "stats": {
+          "normal_entries": 32150,
+          "assembly_ns": 12750300,
+          "factor_ns": 267688900,
+          "direction_ns": 15540900,
+          "residual_ns": 1093900,
+          "total_ns": 298387700
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 454291500,
+      "accepted": false
+    },
+    {
+      "model": "woodinfe",
+      "sha256": "26cb8633b4d9bb9dcbd60b04534ef7b9b0709a67b0ba62c0a95481a8ea71181f",
+      "frozen_corpus_hash_match": true,
+      "reference_simplex": {
+        "status": "Infeasible",
+        "objective": 0.0,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 196100,
+        "ipm_iterations": 0,
+        "simplex_iterations": 0
+      },
+      "rows": 35,
+      "cols": 89,
+      "nnz": 140,
+      "reference_ipm": {
+        "status": "Infeasible",
+        "objective": 25366.816915023268,
+        "read_status": "HighsStatus.kOk",
+        "solve_ns": 3392700,
+        "ipm_iterations": 6,
+        "simplex_iterations": 0
+      },
+      "zhighs": {
+        "status": "numerical_failure",
+        "objective": null,
+        "iterations": 4,
+        "rows": 35,
+        "cols": 89,
+        "nnz": 140,
+        "parse_ns": 1247800,
+        "solve_ns": 280400,
+        "stats": {
+          "normal_entries": 576,
+          "assembly_ns": 33300,
+          "factor_ns": 61800,
+          "direction_ns": 48200,
+          "residual_ns": 20400,
+          "total_ns": 217400
+        }
+      },
+      "parser_dimensions_match": true,
+      "process_ns": 247220600,
+      "accepted": false
+    }
+  ]
+}
