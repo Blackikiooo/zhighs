@@ -54,7 +54,7 @@ fn fillPermutedBasis(data: []f64, n: usize) void {
     }
 }
 
-fn runKernel(lu: *zhighs.matrix.DenseLU, allocator: std.mem.Allocator, n: usize, kernel: Kernel, repeats: usize) !void {
+fn runKernel(lu: *zhighs.nla.DenseLU, allocator: std.mem.Allocator, n: usize, kernel: Kernel, repeats: usize) !void {
     const seed = try allocator.alloc(f64, n);
     defer allocator.free(seed);
     const rhs = try allocator.alloc(f64, n);
@@ -96,7 +96,7 @@ fn runDimension(allocator: std.mem.Allocator, n: usize, selected_kernel: ?Kernel
     const coefficient_count = std.math.mul(usize, n, n) catch return error.InvalidDimension;
     const basis = try allocator.alloc(f64, coefficient_count);
     fillPermutedBasis(basis, n);
-    var lu = zhighs.matrix.DenseLU.init(allocator);
+    var lu = zhighs.nla.DenseLU.init(allocator);
     defer lu.deinit();
     try lu.factorizeOwned(n, basis);
 

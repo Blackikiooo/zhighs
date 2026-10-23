@@ -953,7 +953,7 @@ pub const SimplexEngine = struct {
         self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         var has_dropped_model_coefficient = false;
         for (problem.matrix.values) |coefficient| {
-            if (coefficient != 0.0 and !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) {
+            if (coefficient != 0.0 and !foundation.retainsModelCoefficient(coefficient)) {
                 has_dropped_model_coefficient = true;
                 break;
             }

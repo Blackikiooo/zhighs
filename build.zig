@@ -16,6 +16,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "foundation", .module = foundation.module }},
     });
+    // Numerical kernels (LU / basis factorization / FTRAN-BTRAN) depend on
+    // canonical storage but keep solver policy out of `matrix`.
+    const nla_module = b.createModule(.{
+        .root_source_file = b.path("src/nla/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+        },
+    });
     const lp_module = b.createModule(.{
         .root_source_file = b.path("src/lp/root.zig"),
         .target = target,
@@ -23,6 +34,17 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "nla", .module = nla_module },
+        },
+    });
+    const ipm_module = b.createModule(.{
+        .root_source_file = b.path("src/ipm/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "foundation", .module = foundation.module },
+            .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "lp", .module = lp_module },
         },
     });
     const presolve_module = b.createModule(.{
@@ -103,6 +125,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
             .{ .name = "solver", .module = solver_module },
+            .{ .name = "ipm", .module = ipm_module },
             .{ .name = "mip", .module = mip_module },
             .{ .name = "io", .module = io_module },
             .{ .name = "presolve", .module = presolve_module },
@@ -116,8 +139,10 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("foundation", foundation.module);
     mod.addImport("matrix", matrix_module);
+    mod.addImport("nla", nla_module);
     mod.addImport("model", model_module);
     mod.addImport("lp", lp_module);
+    mod.addImport("ipm", ipm_module);
     mod.addImport("presolve", presolve_module);
     mod.addImport("solver", solver_module);
     mod.addImport("mip", mip_module);
@@ -162,6 +187,33 @@ pub fn build(b: *std.Build) void {
     const solver_tests = b.addTest(.{ .root_module = solver_module });
     const run_solver_tests = b.addRunArtifact(solver_tests);
 
+    const ipm_tests = b.addTest(.{ .root_module = ipm_module });
+    const run_ipm_tests = b.addRunArtifact(ipm_tests);
+    const ipm_test_step = b.step("test-ipm", "Run interior-point solver tests");
+    ipm_test_step.dependOn(&run_ipm_tests.step);
+
+    const ipm_bench = b.addExecutable(.{
+        .name = "ipm-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ipm/solver_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_ipm_bench = b.addRunArtifact(ipm_bench);
+    b.step("bench-ipm", "Compare dense and profile IPM solves").dependOn(&run_ipm_bench.step);
+    const ipm_corpus = b.addExecutable(.{
+        .name = "ipm-corpus",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/ipm/corpus_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    b.step("build-ipm-corpus", "Build real-model IPM validation runner").dependOn(&b.addInstallArtifact(ipm_corpus, .{}).step);
+
     const mip_tests = b.addTest(.{ .root_module = mip_module });
     const run_mip_tests = b.addRunArtifact(mip_tests);
     const mip_test_step = b.step("test-mip", "Run mixed-integer solver tests");
@@ -191,6 +243,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_presolve_tests.step);
     test_step.dependOn(&run_solver_tests.step);
+    test_step.dependOn(&run_ipm_tests.step);
     test_step.dependOn(&run_mip_tests.step);
     test_step.dependOn(&run_plugin_tests.step);
     test_step.dependOn(&run_framework_tests.step);
@@ -219,6 +272,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "foundation", .module = foundation.module },
             .{ .name = "matrix", .module = matrix_module },
+            .{ .name = "nla", .module = nla_module },
         },
     });
 
@@ -567,6 +621,26 @@ pub fn build(b: *std.Build) void {
     const matrix_test_step = b.step("test-matrix", "Run matrix-only tests (no model/API)");
     matrix_test_step.dependOn(&run_matrix_tests.step);
 
+    // ── NLA-only test (numerical kernels, no model/API) ────────
+    // Keeps LU / basis-factorization coverage runnable independently of the
+    // simplex engine, mirroring the matrix-only gate above.
+
+    const nla_test_root = b.createModule(.{
+        .root_source_file = b.path("test/nla/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "nla", .module = nla_module },
+        },
+    });
+
+    const nla_tests = b.addTest(.{
+        .root_module = nla_test_root,
+    });
+    const run_nla_tests = b.addRunArtifact(nla_tests);
+    const nla_test_step = b.step("test-nla", "Run numerical linear algebra tests (no model/API)");
+    nla_test_step.dependOn(&run_nla_tests.step);
+
     const matrix_acceptance_root = b.createModule(.{
         .root_source_file = b.path("test/matrix/acceptance.zig"),
         .target = target,
@@ -650,6 +724,23 @@ pub fn build(b: *std.Build) void {
         end_to_end_step.dependOn(&solution.step);
     }
     const limited_cli = b.addRunArtifact(exe);
+    for ([_][]const u8{ "test/model/data/pipeline_lp.lp", "test/model/data/ipm_lp.mps" }, 0..) |path, i| {
+        const barrier_cli = b.addRunArtifact(exe);
+        barrier_cli.addArgs(&.{ "--param", "Method=2", "--solution" });
+        const solution_file = barrier_cli.addOutputFileArg("barrier.sol");
+        barrier_cli.addFileArg(b.path(path));
+        const output = b.addCheckFile(barrier_cli.captureStdOut(.{}), .{ .expected_matches = if (i == 0)
+            &.{ "status: OPTIMAL", "objective: 7.000000" }
+        else
+            &.{ "status: OPTIMAL", "objective: 3.333333" } });
+        // Barrier values approximate vertices; verify names and stable digits.
+        const solution = b.addCheckFile(solution_file, .{ .expected_matches = if (i == 0)
+            &.{ "x 2.000000", "y 1.000000" }
+        else
+            &.{ "X 2.66666", "Y 0.66666" } });
+        end_to_end_step.dependOn(&output.step);
+        end_to_end_step.dependOn(&solution.step);
+    }
     limited_cli.addArgs(&.{ "--param", "NodeLimit=0", "--param", "Presolve=0" });
     limited_cli.addFileArg(b.path("test/model/data/tiny_mip.mps"));
     const limited_output = b.addCheckFile(limited_cli.captureStdOut(.{}), .{

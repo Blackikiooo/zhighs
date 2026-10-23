@@ -86,7 +86,7 @@ pub fn main() !void {
     defer transpose_buffers.deinit(allocator);
     var transform_buffers = try zhighs.matrix.CscTransformBuffers.initCapacity(allocator, dimension, nnz + appended_nnz, dimension);
     defer transform_buffers.deinit(allocator);
-    var csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, csr_buffers.cursor);
+    var csr_cache = try zhighs.matrix.CsrCache.buildAssumeValid(allocator, matrix, 0);
     defer csr_cache.deinit(allocator);
     const csr = csr_cache.viewAssumeCurrent();
 
@@ -261,7 +261,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..transform_repeats) |revision| {
-        var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, revision, csr_buffers.cursor);
+        var cache = try zhighs.matrix.CsrCache.buildAssumeValid(allocator, matrix, revision);
         clobberPtr(cache.values.ptr);
         cache.deinit(allocator);
     }

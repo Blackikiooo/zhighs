@@ -1,93 +1,93 @@
-# IPM 40-model corpus: end-to-end validation and comparison with HiGHS 1.12.0
+# IPM 40-model real-corpus validation
 
-Environment: Windows 10, zig 0.16.0, `ReleaseFast` `ipm-corpus` runner, HiGHS
-1.12.0 (highspy) with `threads=1`, `parallel=off`, `run_crossover=off`,
-presolve on for the simplex reference and off for the IPM reference. Corpus:
-the 40 frozen SoPlex `check/instances` LPs (netlib-era models, 8x8 to
-536x1775, hash-locked against `bench/simplex/end_to_end_corpus.lock.tsv`).
-Fresh results: `real_corpus_results_fresh.json` (summary:
-`python bench/ipm/analyze_results.py <json>`).
+This report records the final run in `real_corpus_results_final.json`. The
+corpus is the complete 40-model SoPlex `check/instances` continuous-LP set:
+8x8 through 536x1775. Every input SHA-256 matches
+`bench/simplex/end_to_end_corpus.lock.tsv`.
 
-## Headline numbers
+The candidate is the ReleaseFast sparse-Cholesky IPM. HiGHS 1.12.0 runs with
+one thread and deterministic settings. HiGHS simplex with presolve supplies
+the independent status/objective oracle; HiGHS IPM without presolve or
+crossover supplies the timing reference. Timings are one sample per model and
+are diagnostic rather than a stable benchmark claim.
 
-| Metric | Value |
-|---|---|
-| Models solved to `optimal` | 27/40 (HiGHS IPM: 38/40; two `Solve error`s are box1/ex72a) |
-| Correct optimal status + full independent KKT validation | 18/40 |
-| Reference simplex disagrees on any objective | 0/30 (all validated optima match HiGHS simplex objectives within 1e-9 relative) |
-| zhighs/HiGHS-IPM time, 26 comparable optimal-optimal | geometric mean 0.63x (faster on 17/26), best 0.063x, worst 56.8x |
-| zhighs solve time spent in the Cholesky factor | 93.4% |
+Run it with:
 
-## Failure taxonomy (13 no-answer + 9 accuracy-miss models)
+```powershell
+zig build build-ipm-corpus -Doptimize=ReleaseFast
+python -I -S bench/ipm/validate_corpus.py `
+  --corpus D:/CodesFiles/CppFiles/scipoptsuite-10.0.0/soplex/check/instances `
+  --runner zig-out/bin/ipm-corpus.exe `
+  --highspy-path .zig-cache/highs-1.12 `
+  --highspy-path .zig-cache/bench-python `
+  --output bench/ipm/real_corpus_results_final.json `
+  --refinement-steps 0 --max-iterations 200 `
+  --feasibility-tolerance 1e-7 --primal-correction-steps 5 `
+  --max-regularization 1e-6
+python -I -S bench/ipm/analyze_results.py bench/ipm/real_corpus_results_final.json
+```
 
-1. **Infeasible/unbounded models (8): bgetam, forest6, galenet, gams10am,
-   gas11, klein1, refinery, woodinfe.** HiGHS simplex reports 7 infeasible + 1
-   unbounded; HiGHS IPM also detects every one of them. zhighs reports
-   `numerical_failure` because the engine only has divergence heuristics, no
-   infeasibility certificate and no self-dual embedding. This is the largest
-   single capability gap.
-2. **Iteration limit (2): box1, ex72a.** Infeasible models that neither
-   converge nor trip the divergence bound within 100 iterations. HiGHS IPM
-   errors on these too, so the bar is "detect", which zhighs currently
-   cannot.
-3. **Numerical failure on feasible models (3): brandy, capri, lotfi.** The
-   reference is Optimal; zhighs exits via divergence detection after 13-23
-   iterations. Regularization tops out at 1e-6 and there is no iterative
-   refinement, so ill-conditioned late-phase normals are fatal.
-4. **Optimal but outside strict validation thresholds (9): agg, beaconfd,
-   bore3d, grow7, scagr25, scfxm1, share1b, shell, vtp-base.** All nine fail
-   only `primal_rel` (1e-7 bar): raw primal violations land at 1e-7..1e-5
-   scale. Objectives still match the reference within ~1e-9 relative. Without
-   crossover this is the classic interior-point "slightly-interior" answer;
-   HiGHS produces crossover-clean vertices by default.
+## Correctness result
 
-## Where zhighs is faster
+| Metric | Current | Previous | Initial |
+|---|---:|---:|---:|
+| Independently KKT-validated models | 29/40 | 27/40 | 18/40 |
+| Validated among reference-optimal models | 29/30 | 27/30 | 18/30 |
+| Candidate status `optimal` | 29/40 | 27/40 | 27/40 |
+| Hash-matched inputs | 40/40 | 40/40 | 40/40 |
 
-Every model with a friendly normal-equation envelope (m below ~250 or
-near-banded structure) beats HiGHS IPM by 3-16x: afiro 0.07x, sc50a 0.06x,
-scsd1 0.12x, share2b 0.09x, sc205 0.19x. These solves run in 0.1-3 ms — the
-assembly and solve loops are tight, allocations are hoisted once per solve,
-and there is no presolve or crossover overhead in the timed path.
+All 29 published optima pass checks performed on the matrix independently
+parsed by HiGHS: dimensions, finite vectors, original row and column bounds,
+dual signs, stationarity, primal-dual gap, recomputed objective, and agreement
+with the HiGHS simplex objective. Across accepted models, the worst relative
+primal residual is 9.31e-8, stationarity is 4.24e-16, primal-dual gap is
+9.96e-8, and reference-objective error is 7.41e-8.
 
-## Where HiGHS is faster, and why
+The two new accepted models are `agg` and `vtp-base`. A failed unscaled solve
+now retries once with max-norm equilibration within the original time budget;
+models whose matrix coefficient range reaches 1e7 start with the scaled path.
+The scaled convergence test evaluates primal residuals in unscaled row units;
+the old denominator could report convergence while original-coordinate row
+violations remained around 1e-6. An active-set projection on the scaled retry
+removes correction variables that would cross zero.
 
-The profile (envelope) Cholesky stores the full row envelope of A·Aᵀ with no
-ordering, so fill is decided by raw row order:
+`capri` is the only remaining reference-optimal failure. It reaches a late
+normal-equation factorization failure after 17 iterations. Dense factorization,
+equilibration, two refinement steps, 500 iterations, and regularization up to
+1.0 were also tested and did not recover it.
 
-| model | rows | A nnz | stored normal entries | stored/m² |
-|---|---|---|---|---|
-| seba | 515 | 4,352 | 364,599 | 1.375 |
-| grow7 | 140 | 2,612 | 63,035 | 3.216 |
-| etamacro | 400 | 2,409 | 120,196 | 0.751 |
-| bgetam | 400 | 2,409 | 120,196 | 0.751 |
-| finnis | 497 | 2,310 | 113,064 | 0.458 |
+The other ten failures match the non-optimal reference set: nine infeasible
+models and the unbounded `gas11`. The current infeasible-start formulation has
+no homogeneous self-dual embedding or certificate path, so it does not yet
+publish those statuses. No false optimal result occurred.
 
-seba stores 84x the nonzeros of A (and 1.375x a fully dense triangle: the
-envelope exceeds m²/2 by a third). The factor phase then owns 93.4% of solve
-time, and the same six slowest models are exactly the six worst fill ratios:
-seba 56.8x, etamacro 21.3x, agg 22.3x, finnis 14.5x. Iteration counts on
-these models are equal to HiGHS (seba 16 vs 17), so the entire deficit is
-the linear-algebra kernel. HiGHS/IPX factors the same systems with an
-approximate-minimum-degree ordering and a sparse up-looking LDLᵀ whose
-factor is typically a small multiple of nnz.
+## Performance result
 
-## Conclusion vs open-source state of the art
+The normal-equation backend now uses exact minimum-degree row ordering, with
+RCM selected for row graphs above 60% density, and a row-oriented sparse
+Cholesky pattern. Normal assembly positions and sparse
+dot-product intersections are precomputed; intersection pairs use packed
+32-bit indices. This replaced the skyline envelope that dominated the earlier
+run. Examples:
 
-The Mehrotra predictor-corrector iteration itself is competitive: comparable
-iteration counts on every model that converges, and a 0.63x geometric-mean
-solve time. The gaps, in priority order:
+| Model | Previous stored entries | Current stored entries |
+|---|---:|---:|
+| seba | 364,599 | 55,449 |
+| etamacro | 120,196 | 12,208 |
+| finnis | 113,064 | 5,973 |
+| shell | 82,704 | 4,583 |
+| grow7 | 63,035 | 5,293 |
 
-1. **P0 — ordering for the normal-equation factorization.** Replace the
-   unordered envelope with an AMD/minimum-degree permutation + sparse
-   LDLᵀ (supernodal or up-looking). This alone should move the worst six
-   models from 14-57x slower to parity or better, since fill collapses from
-   O(m²) to O(nnz·small factor).
-2. **P0 — infeasible/unbounded detection.** A self-dual embedding (IPX's
-   approach) or explicit infeasibility certificates. Eight models currently
-   exit as `numerical_failure` that HiGHS resolves exactly.
-3. **P1 — numerical robustness.** brandy/capri/lotfi need either iterative
-   refinement of the normal-equation solve, a less conservative
-   regularization schedule, or both.
-4. **P1 — crossover (or tighter termination).** Nine models lose acceptance
-   on 1e-7..1e-5 primal residuals only; a crossover to a basic solution
-   would close the gap to the simplex-layer accuracy contract.
+Among the 28 models where both candidate and reference IPM report optimal,
+the candidate/HiGHS-IPM solve-time geometric mean is 0.29x. The candidate is
+faster on 25/28, compared with 19/26 previously. The best ratio is 0.060x.
+Factorization now accounts for 59.7% of successful solve time, down from 94.3%.
+
+The requested comprehensive performance win is not yet achieved. The three
+measured counterexamples are `seba` (12.54x), `agg` (2.70x), and `israel`
+(1.44x). `seba` performs 5,233,661 symbolic factor products per numeric
+factorization; it needs a supernodal/block sparse kernel or a materially better
+ordering. `agg` now starts scaled but its factorization remains slower than the
+reference on this model.
+These are the next concrete performance targets; the current evidence supports
+a broad 25/28 win and a 3.45x geometric-mean speedup, not a universal win.

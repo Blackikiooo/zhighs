@@ -53,7 +53,7 @@ pub const RowView = struct {
 
         // First pass: count retained nonzeros per row to build the row pointers.
         for (csc.row_indices, csc.values) |row_id, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             starts[row_id.toUsize() + 1] += 1;
         }
         // Prefix-sum the per-row counts into CSR row pointers.
@@ -65,7 +65,7 @@ pub const RowView = struct {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
             for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row = row_id.toUsize();
                 const target = cursor[row];
                 self.row_columns[target] = @intCast(column);

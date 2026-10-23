@@ -98,7 +98,14 @@ def main():
     p.add_argument('--runner', type=Path, required=True)
     p.add_argument('--highspy-path', type=Path, action='append', required=True)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--backend', choices=['profile', 'dense'], default='profile')
+    p.add_argument('--backend', choices=['sparse', 'profile', 'dense'], default='sparse')
+    p.add_argument('--refinement-steps', type=int, default=0)
+    p.add_argument('--max-iterations', type=int, default=200)
+    p.add_argument('--feasibility-tolerance', type=float, default=1e-7)
+    p.add_argument('--primal-correction-steps', type=int, default=5)
+    p.add_argument('--max-regularization', type=float, default=1e-4)
+    p.add_argument('--equilibrate', action='store_true')
+    p.add_argument('--ordering', choices=['automatic', 'natural', 'rcm', 'minimum-degree'], default='automatic')
     p.add_argument('--models', nargs='*')
     args = p.parse_args()
     sys.path[:0] = [str(path.resolve()) for path in args.highspy_path]
@@ -107,7 +114,13 @@ def main():
     records = []
     report = dict(highs_version=highspy.Highs().version(), python=sys.version,
                   platform=platform.platform(), backend=args.backend,
-                  configuration={'zhighs_iteration_limit': 100, 'zhighs_time_limit_s': 5,
+                  configuration={'zhighs_iteration_limit': args.max_iterations, 'zhighs_time_limit_s': 5,
+                                 'zhighs_refinement_steps': args.refinement_steps,
+                                 'zhighs_feasibility_tolerance': args.feasibility_tolerance,
+                                 'zhighs_primal_correction_steps': args.primal_correction_steps,
+                                 'zhighs_max_regularization': args.max_regularization,
+                                 'zhighs_equilibrate': args.equilibrate,
+                                 'zhighs_ordering': args.ordering,
                                  'process_timeout_s': 20, 'highs_time_limit_s': 10,
                                  'samples': 1, 'highs_threads': 1, 'highs_crossover': 'off'}, models=records)
     paths = sorted(args.corpus.glob('*.mps'))
@@ -128,7 +141,11 @@ def main():
         _, row['reference_ipm'] = reference(highspy, path, 'ipm', 'off')
         start = time.perf_counter_ns()
         try:
-            run = subprocess.run([str(args.runner.resolve()), str(path.resolve()), args.backend],
+            run = subprocess.run([str(args.runner.resolve()), str(path.resolve()), args.backend,
+                                  str(args.refinement_steps), str(args.max_iterations),
+                                  str(args.feasibility_tolerance), str(args.primal_correction_steps),
+                                  str(args.max_regularization), 'scaled' if args.equilibrate else 'unscaled',
+                                  args.ordering],
                                  capture_output=True, text=True, timeout=20)
             if run.returncode:
                 row['zhighs'] = dict(status='process_error', returncode=run.returncode, stderr=run.stderr[-2000:])

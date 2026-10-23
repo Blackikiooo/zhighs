@@ -11,7 +11,7 @@ fn nowNs() i128 {
 
 const ChainTiming = struct { aq_ns: u64 = 0, update_ns: u64 = 0, checksum: f64 = 0 };
 
-fn runChain(lu: *zhighs.matrix.SparseLU, aq: []f64, chain_length: usize, timed: bool) !ChainTiming {
+fn runChain(lu: *zhighs.nla.SparseLU, aq: []f64, chain_length: usize, timed: bool) !ChainTiming {
     const n = aq.len;
     var result = ChainTiming{};
     for (0..chain_length) |update_index| {
@@ -62,8 +62,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     starts[n] = @intCast(output);
-    const basis = zhighs.matrix.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
-    var lu = zhighs.matrix.SparseLU.init(allocator);
+    const basis = zhighs.nla.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
+    var lu = zhighs.nla.SparseLU.init(allocator);
     defer lu.deinit();
     const aq = try allocator.alloc(f64, n);
     defer allocator.free(aq);

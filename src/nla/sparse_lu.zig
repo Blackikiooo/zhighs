@@ -6,7 +6,8 @@
 //! the packed streams and mapped to pivot positions by compact lookup arrays.
 
 const std = @import("std");
-const memory = @import("memory.zig");
+// `matrix` owns the SIMD clear kernel used by packed solve scatter phases.
+const memory = @import("matrix");
 const sparse_basis = @import("sparse_basis.zig");
 const sparse_kernel = @import("sparse_kernel.zig");
 const sparse_symbolic = @import("sparse_symbolic.zig");

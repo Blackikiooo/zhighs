@@ -95,7 +95,7 @@ zhighs/
 | `src/presolve/` | 模型简化、reduction 记录、postsolve、basis/证书恢复。 | 依赖 `model`，每项变换必须可逆或显式标记恢复能力。 |
 | `src/presolve/rules/` | 内置 presolve 规则。 | 规则不能绕过 postsolve stack 修改模型。 |
 | `src/mip/` | LP relaxation、节点、domain、cuts、conflicts、implications、pseudo-cost 和 incumbent。 | 依赖 LP/model/framework，不反向进入基础层。 |
-| `src/ipm/` | 内点法、KKT 系统、crossover 和公共结果转换。 | 延后实现；复用 model/nla。 |
+| `src/ipm/` | Mehrotra 内点法、轮廓 Cholesky 和公共结果转换。 | `Method=2` 支持连续 LP 端到端求解；详见 [IPM](docs/ipm.md)。 |
 | `src/pdlp/` | PDHG/PDLP、scaling、步长、restart 和终止条件。 | 延后实现；不能作为需要 basis 的 MIP 节点主求解器。 |
 | `src/qp/` | 凸 QP Hessian 处理和 active-set 求解器。 | 延后实现；复用 model/nla。 |
 | `src/framework/` | Stage、Registry、Scheduler、Event、结果码和受限 Services。 | 只负责编排组件，不实现具体割或启发式。 |
@@ -124,9 +124,9 @@ zhighs/
 
 | 状态 | 模块 |
 |---|---|
-| 已实现 | `foundation` 中的整数、强类型 ID、`HD/HCD`；`matrix` 中的稀疏向量、SoA 构建、CSC/CSR、MatrixStore、乘法、稳定范数、转置、切片、scaling、permutation、结构编辑、动态行和稀疏累加；`model` 中的 LinearModel/QuadraticModel/NonlinearModel/ExpressionGraph 及分类体系；`lp/simplex` 中的 serial revised simplex 全链路（SparseLU + Forrest–Tomlin 分解、IndexedVector、primal/dual Phase I/II、CHUZC/CHUZR、BFRT、DSE/Devex、crash、ratio test、pivot 提交与证书）。 |
+| 已实现 | `foundation` 中的整数、强类型 ID、`HD/HCD`；`matrix` 中的稀疏向量、SoA 构建、CSC/CSR、MatrixStore、乘法、稳定范数、转置、切片、scaling、permutation、结构编辑、动态行和稀疏累加；`nla` 中的 dense/sparse LU、basis CSC 组装、符号消元分析、可变消元内核与 Forrest–Tomlin 更新后端；`model` 中的 LinearModel/QuadraticModel/NonlinearModel/ExpressionGraph 及分类体系；`lp/simplex` 中的 serial revised simplex 全链路（SparseLU + Forrest–Tomlin 分解、IndexedVector、primal/dual Phase I/II、CHUZC/CHUZR、BFRT、DSE/Devex、crash、ratio test、pivot 提交与证书）。 |
 | 骨架 | `model` 的部分验证/重构，`presolve`、`analysis`、`mip`、`framework`、`plugin`、`solver`、`api`、`io`、`diagnostics`。 |
-| 延后骨架 | `ipm/pdlp/qp/parallel/bindings/plugins_builtin`。 |
+| 延后骨架 | `pdlp/qp/parallel/bindings/plugins_builtin`。 |
 
 Simplex 的对齐状态以 [`src/lp/simplex/todo.md`](src/lp/simplex/todo.md) 为准：当前 forced-dual
 40 模型正确性 40/40，aggregate committed pivots 为 `10889 vs HiGHS 8774`（1.241x），
@@ -148,7 +148,7 @@ exit 与增量更新路径。
 | `simplex/` | `lp/simplex/` | Primal/dual revised simplex 主线。 |
 | `presolve/` | `presolve/`, `presolve/rules/` | 强制 reduction 与 postsolve 成对实现。 |
 | `mip/` | `mip/`, `plugins_builtin/` | 树和状态留在 MIP；策略逐步组件化。 |
-| `ipm/`, `pdlp/`, `qpsolver/` | `ipm/`, `pdlp/`, `qp/` | 保留完整产品边界，但延后实现。 |
+| `ipm/`, `pdlp/`, `qpsolver/` | `ipm/`, `pdlp/`, `qp/` | IPM 已支持连续 LP；PDLP/QP 保留产品边界。 |
 | `io/` | `io/`, `diagnostics/` | 文件转换与日志/统计分开。 |
 | `parallel/` | `parallel/` | 可选并行设施，不污染串行算法。 |
 | `interfaces/`, `highspy/` | `bindings/` | 先稳定 C ABI，再扩展语言绑定。 |

@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..n) |diagonal| try builder.append(allocator, try zhighs.RowId.fromUsize(diagonal), try zhighs.ColId.fromUsize(diagonal), 1);
     var matrix = try builder.freeze(allocator, 0);
     defer matrix.deinit(allocator);
-    const basis = zhighs.matrix.SparseBasisView{
+    const basis = zhighs.nla.SparseBasisView{
         .dimension = n,
         .starts = matrix.compact_col_starts orelse return error.DimensionTooLarge,
         .rows = matrix.row_indices,
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
         if (!(margin > 0)) return error.DiagonalDominanceCertificateFailed;
         minimum_margin = @min(minimum_margin, margin);
     }
-    var lu = zhighs.matrix.SparseLU.init(allocator);
+    var lu = zhighs.nla.SparseLU.init(allocator);
     defer lu.deinit();
     try lu.factorize(basis);
     const rhs = try allocator.alloc(f64, n);

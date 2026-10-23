@@ -214,3 +214,49 @@ test "strong-branching probe interrupted mid Phase I cannot poison the warm basi
     try std.testing.expectApproxEqAbs(@as(f64, 63.0), try instance.getDblAttr(.obj_val), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f64, 63.0), try instance.getDblAttr(.obj_bound), 1e-6);
 }
+
+test "Model Method=2 publishes LP primal dual slack and no simplex basis" {
+    var env = try model.Env.initSimple(std.testing.allocator);
+    defer env.deinit();
+    try env.setIntParam("Method", 2);
+    var instance = try model.Model.init(std.testing.allocator, &env, "ipm-api");
+    defer instance.deinit();
+    try instance.addConstr(0, &.{}, &.{}, .less_equal, 4, "r0");
+    try instance.addConstr(0, &.{}, &.{}, .less_equal, 12, "r1");
+    try instance.addVar(2, &.{ 0, 1 }, &.{ 1, 4 }, 1, 0, std.math.inf(f64), .continuous, "x");
+    try instance.addVar(2, &.{ 0, 1 }, &.{ 2, 2 }, 1, 0, std.math.inf(f64), .continuous, "y");
+    try instance.setIntAttr(.model_sense, -1);
+    try instance.optimize();
+    try std.testing.expectEqual(model.Status.optimal, instance.status);
+    try std.testing.expect(instance.bar_iter_count > 0);
+    try std.testing.expectApproxEqAbs(10.0 / 3.0, instance.obj_val, 1e-6);
+    try std.testing.expectApproxEqAbs(1.0 / 3.0, instance.pi[0], 1e-6);
+    try std.testing.expectApproxEqAbs(1.0 / 6.0, instance.pi[1], 1e-6);
+    for (instance.slack) |value| try std.testing.expectApproxEqAbs(0.0, value, 1e-6);
+    for (instance.reduced_cost) |value| try std.testing.expectApproxEqAbs(0.0, value, 1e-6);
+    try std.testing.expect(!instance.basis_available);
+    try std.testing.expectEqual(@as(i64, 1), instance.sol_count);
+
+    // A stopped re-solve must not expose the previous optimum or basis.
+    try env.setIntParam("BarIterLimit", 0);
+    try instance.optimize();
+    try std.testing.expectEqual(model.Status.iteration_limit, instance.status);
+    try std.testing.expectEqual(@as(usize, 0), instance.solution.len);
+    try std.testing.expectEqual(@as(i64, 0), instance.sol_count);
+    try env.setIntParam("BarIterLimit", 100);
+    try env.setDblParam("TimeLimit", 0);
+    try instance.optimize();
+    try std.testing.expectEqual(model.Status.time_limit, instance.status);
+    try env.setDblParam("TimeLimit", 60);
+    const Stop = struct {
+        fn callback(where: model.types.CallbackWhere, context: ?*anyopaque) void {
+            if (where == .barrier) {
+                const target: *model.Model = @ptrCast(@alignCast(context.?));
+                target.terminate();
+            }
+        }
+    };
+    instance.setCallbackFunc(Stop.callback, &instance);
+    try instance.optimize();
+    try std.testing.expectEqual(model.Status.interrupted, instance.status);
+}

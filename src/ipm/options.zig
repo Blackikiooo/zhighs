@@ -27,10 +27,27 @@ pub const Tolerances = struct {
     heuristic_residual_relaxation: f64 = 100.0,
 };
 
+pub const RowOrdering = enum {
+    automatic,
+    natural,
+    reverse_cuthill_mckee,
+    minimum_degree,
+    /// Approximate minimum degree: near-minimum fill at a fraction of the
+    /// exact ordering's cost; the default for the automatic policy.
+    amd,
+};
+
 /// Top-level engine controls.
 pub const Options = struct {
     /// Keep the original dense kernel available for validation/benchmarking.
     dense_normal: bool = false,
+    /// Apply one-pass row/column max-norm equilibration to standard form.
+    equilibrate: bool = false,
+    /// Retry a failed unscaled solve with equilibration while preserving the
+    /// original total time budget.
+    retry_equilibrated_on_failure: bool = true,
+    /// Reorder equality rows before sparse symbolic factorization.
+    row_ordering: RowOrdering = .automatic,
     time_limit_ns: ?u64 = null,
     interrupt_flag: ?*const @import("std").atomic.Value(bool) = null,
     /// Iteration work budget (one unit per predictor-corrector iteration).
@@ -42,6 +59,14 @@ pub const Options = struct {
     tolerances: Tolerances = .{},
     /// Hard cap on Mehrotra predictor-corrector iterations.
     max_iterations: usize = 100,
+    /// Iterative-refinement corrections after each normal-equation solve.
+    refinement_steps: usize = 0,
+    /// Gondzio centrality corrections per iteration; each reuses the current
+    /// factorization to widen the step, so one is nearly free.
+    centrality_corrections: usize = 2,
+    /// Feasibility-correction steps when global residuals indicate a candidate
+    /// optimum but an individually scaled row still misses tolerance.
+    primal_correction_steps: usize = 3,
     /// Fraction-to-boundary backstep applied to primal and dual step lengths.
     step_fraction: f64 = 0.999,
     /// Minimal positive coordinate enforced when lifting the starting point.

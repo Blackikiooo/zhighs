@@ -776,7 +776,7 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
         // CSC and original bounds below; this is not a feasibility-tolerance
         // relaxation.
         if (apply_coefficient_floor and
-            relative_contribution <= matrix.MatrixTargetPolicy.model_coefficient_tolerance) value = 0.0;
+            relative_contribution <= foundation.model_coefficient_tolerance) value = 0.0;
         if (value > 0.0) {
             if (!std.math.isFinite(lower)) {
                 self.infeasibility_certificate_infinite_row_mass = @max(
@@ -837,7 +837,7 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
         }
     }
     if (has_infinite_column_bound and
-        self.infeasibility_certificate_infinite_column_mass > matrix.MatrixTargetPolicy.model_coefficient_tolerance)
+        self.infeasibility_certificate_infinite_column_mass > foundation.model_coefficient_tolerance)
     {
         self.infeasibility_certificate_failure = .infinite_column_bound;
         return false;
@@ -1911,7 +1911,7 @@ pub fn accumulateBoundFlipRhs(
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row_index = row.toUsize();
                 if (row_index >= iteration.col_bfrt.values.len) return .numerical_failure;
                 const contribution = delta * coefficient * basis.row_scale[row_index] * column_scale;

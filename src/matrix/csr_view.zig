@@ -186,24 +186,35 @@ pub const CsrBuffers = struct {
 
 /// Owning, rebuildable CSR cache.
 ///
+/// This is the single CSR cache implementation in `matrix`: `MatrixStore`
+/// delegates to it, and standalone consumers (MIP relaxations, benchmarks)
+/// build one directly. Row offsets, column IDs, coefficients, and the
+/// per-row insertion cursor share one 64-byte-aligned allocation, so repeated
+/// revisions reuse the high-water-mark block instead of re-entering the
+/// allocator.
+///
 /// The revision is supplied by the owner of the authoritative CSC matrix. The
 /// cache cannot infer mutations from raw slices, so revision ownership belongs
-/// at Model level where structural changes are already coordinated.
+/// at model level where structural changes are already coordinated.
 pub const CsrCache = struct {
-    /// Revision of the authoritative CSC matrix used to build this cache.
-    source_revision: u64,
+    /// Single aligned allocation backing all four streams; null until built.
+    storage: ?[]align(64) u8 = null,
+    /// CSR row-offset capacity; the active prefix length is `num_rows + 1`.
+    row_starts: []foundation.HUInt = &.{},
+    /// CSR column-ID capacity; the active prefix length is `nonzeros`.
+    col_indices: []ColId = &.{},
+    /// CSR coefficient capacity; the active prefix length is `nonzeros`.
+    values: []f64 = &.{},
+    /// Per-row insertion cursor used only while rebuilding.
+    cursor: []foundation.HUInt = &.{},
+    /// Revision materialized in the active prefixes, or null when stale.
+    source_revision: ?u64 = null,
     /// Cached logical row dimension.
-    num_rows: usize,
+    num_rows: usize = 0,
     /// Cached logical column dimension.
-    num_cols: usize,
-    /// Mutable CSR row offsets within `storage`.
-    row_starts: []foundation.HUInt,
-    /// Mutable CSR column IDs within `storage`.
-    col_indices: []ColId,
-    /// Mutable CSR values within `storage`.
-    values: []f64,
-    /// Single aligned allocation owning all three CSR arrays.
-    storage: []align(64) u8,
+    num_cols: usize = 0,
+    /// Active number of retained CSR coefficients.
+    nonzeros: usize = 0,
 
     const Self = @This();
 
@@ -221,62 +232,80 @@ pub const CsrCache = struct {
     /// It avoids a redundant O(nnz) structural scan while retaining allocation
     /// and dimension-overflow errors. The caller owns the validity proof.
     pub fn buildAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64) (std.mem.Allocator.Error || csc.MatrixError)!Self {
-        const next = try allocator.alloc(foundation.HUInt, matrix.num_rows);
-        defer allocator.free(next);
-        return buildWithScratchAssumeValid(allocator, matrix, source_revision, next);
+        var cache = Self{};
+        errdefer cache.deinit(allocator);
+        try cache.rebuildAssumeValid(allocator, matrix, source_revision);
+        return cache;
     }
 
-    /// Validate CSC input, then build a cache while reusing caller-owned row
-    /// insertion cursors.
-    pub fn buildWithScratch(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []foundation.HUInt) (std.mem.Allocator.Error || csc.MatrixError)!Self {
-        try matrix.validate();
-        return buildWithScratchAssumeValid(allocator, matrix, source_revision, row_cursor_scratch);
-    }
+    /// Rebuild in place, retaining capacity when the revision fits the
+    /// high-water-mark allocation. This is the rebuild path for matrix stores
+    /// that mutate values or replace structure repeatedly.
+    pub fn rebuildAssumeValid(self: *Self, allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64) (std.mem.Allocator.Error || csc.MatrixError)!void {
+        const rows = matrix.num_rows;
+        if (rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
+        const nonzeros = matrix.nnz();
+        if (nonzeros > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
 
-    /// Reuses caller-owned row cursor storage and removes one temporary
-    /// allocation from repeated CSC-to-CSR conversions.
-    pub fn buildWithScratchAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMatrix, source_revision: u64, row_cursor_scratch: []foundation.HUInt) (std.mem.Allocator.Error || csc.MatrixError)!Self {
-        if (matrix.num_rows == std.math.maxInt(usize)) return error.DimensionTooLarge;
-        if (row_cursor_scratch.len < matrix.num_rows) return error.DimensionMismatch;
-        if (matrix.nnz() > std.math.maxInt(foundation.HUInt)) return error.DimensionTooLarge;
-
-        // A single allocation reduces allocator traffic. The streams use
-        // distinct 64-byte page offsets to avoid 4 KiB address-alias stalls.
-        const starts_bytes = std.math.mul(usize, matrix.num_rows + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const indices_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(ColId)) catch return error.DimensionTooLarge;
-        const values_bytes = std.math.mul(usize, matrix.nnz(), @sizeOf(f64)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(3, .{ starts_bytes, indices_bytes, values_bytes }, .{ 0, 64, 128 }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
-        errdefer allocator.free(storage);
-        const row_starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
-        const col_indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
-        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
-        const row_starts = row_starts_ptr[0 .. matrix.num_rows + 1];
-        const col_indices = col_indices_ptr[0..matrix.nnz()];
-        const values = values_ptr[0..matrix.nnz()];
-
-        try fillFromCscAssumeValid(matrix, row_starts, col_indices, values, row_cursor_scratch);
-
-        return .{
-            .source_revision = source_revision,
-            .num_rows = matrix.num_rows,
-            .num_cols = matrix.num_cols,
-            .row_starts = row_starts,
-            .col_indices = col_indices,
-            .values = values,
-            .storage = storage,
-        };
+        try self.ensureCapacity(allocator, rows, nonzeros);
+        try fillFromCscAssumeValid(
+            matrix,
+            self.row_starts[0 .. rows + 1],
+            self.col_indices[0..nonzeros],
+            self.values[0..nonzeros],
+            self.cursor[0..rows],
+        );
+        self.num_rows = rows;
+        self.num_cols = matrix.num_cols;
+        self.nonzeros = nonzeros;
+        self.source_revision = source_revision;
     }
 
     /// Release the cache's packed CSR allocation.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.storage);
-        self.* = undefined;
+        if (self.storage) |storage| allocator.free(storage);
+        self.* = .{};
+    }
+
+    /// Mark the cached contents stale without releasing retained storage.
+    pub inline fn invalidate(self: *Self) void {
+        self.source_revision = null;
     }
 
     /// Return whether this cache was built from `current_revision`.
     pub inline fn isCurrent(self: Self, current_revision: u64) bool {
-        return self.source_revision == current_revision;
+        const revision = self.source_revision orelse return false;
+        return revision == current_revision;
+    }
+
+    /// Grow the packed allocation when the active revision needs more space.
+    fn ensureCapacity(self: *Self, allocator: std.mem.Allocator, rows: usize, nonzeros: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {
+        const has_capacity = self.storage != null and
+            self.row_starts.len >= rows + 1 and
+            self.col_indices.len >= nonzeros and
+            self.values.len >= nonzeros and
+            self.cursor.len >= rows;
+        if (has_capacity) return;
+
+        const starts_capacity = cacheCapacity(self.row_starts.len, rows + 1);
+        const entries_capacity = cacheCapacity(self.col_indices.len, nonzeros);
+        const cursor_capacity = cacheCapacity(self.cursor.len, rows);
+        const starts_bytes = std.math.mul(usize, starts_capacity, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const indices_bytes = std.math.mul(usize, entries_capacity, @sizeOf(ColId)) catch return error.DimensionTooLarge;
+        const values_bytes = std.math.mul(usize, entries_capacity, @sizeOf(f64)) catch return error.DimensionTooLarge;
+        const cursor_bytes = std.math.mul(usize, cursor_capacity, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        if (self.storage) |old| allocator.free(old);
+        self.storage = storage;
+        const starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
+        const indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
+        const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
+        const cursor_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[3]));
+        self.row_starts = starts_ptr[0..starts_capacity];
+        self.col_indices = indices_ptr[0..entries_capacity];
+        self.values = values_ptr[0..entries_capacity];
+        self.cursor = cursor_ptr[0..cursor_capacity];
     }
 
     /// Checked access for component and model boundaries.
@@ -287,7 +316,13 @@ pub const CsrCache = struct {
 
     /// Zero-overhead access for loops whose caller already checked the revision.
     pub inline fn viewAssumeCurrent(self: Self) CsrView {
-        return CsrView.initAssumeValid(self.num_rows, self.num_cols, self.row_starts, self.col_indices, self.values);
+        return CsrView.initAssumeValid(
+            self.num_rows,
+            self.num_cols,
+            self.row_starts[0 .. self.num_rows + 1],
+            self.col_indices[0..self.nonzeros],
+            self.values[0..self.nonzeros],
+        );
     }
 
     /// Combines revision and row-bound checks for occasional row access.
@@ -296,6 +331,12 @@ pub const CsrCache = struct {
         return current_view.row(row_id);
     }
 };
+
+/// Geometric capacity growth that avoids reallocating for small revision deltas.
+fn cacheCapacity(current: usize, required: usize) usize {
+    if (required <= current) return current;
+    return @max(current + current / 2 + 8, required);
+}
 
 /// Allocation-free CSC-to-CSR conversion into exact-size caller buffers.
 pub fn fillFromCsc(matrix: csc.CscMatrix, row_starts: []foundation.HUInt, col_indices: []ColId, values: []f64, row_cursor_scratch: []foundation.HUInt) csc.MatrixError!void {
@@ -441,8 +482,7 @@ test "CSR native products match CSC products and scratch build" {
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
     var values = [_]f64{ 2.0, 3.0, 4.0 };
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
-    var scratch: [2]foundation.HUInt = undefined;
-    var cache = try CsrCache.buildWithScratch(std.testing.allocator, matrix, 0, &scratch);
+    var cache = try CsrCache.build(std.testing.allocator, matrix, 0);
     defer cache.deinit(std.testing.allocator);
     const csr = cache.viewAssumeCurrent();
     var csc_y: [2]f64 = undefined;

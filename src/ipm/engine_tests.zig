@@ -17,8 +17,12 @@ fn solveExpectOptimal(problem: lp.ProblemView) !ipm.Result {
     errdefer result.deinit();
     var dense = try ipm.solve(std.testing.allocator, problem, .{ .dense_normal = true });
     defer dense.deinit();
+    var scaled = try ipm.solve(std.testing.allocator, problem, .{ .equilibrate = true });
+    defer scaled.deinit();
     try std.testing.expectEqual(dense.status, result.status);
+    try std.testing.expectEqual(scaled.status, result.status);
     try std.testing.expectApproxEqAbs(dense.objective_value, result.objective_value, check_tolerance);
+    try std.testing.expectApproxEqAbs(scaled.objective_value, result.objective_value, check_tolerance);
     return result;
 }
 
@@ -93,10 +97,15 @@ test "profile Cholesky matches dense solves with fill and multiple right hand si
     };
     var sf = try ipm.standard_form.build(a, problem);
     defer sf.deinit();
+    const graph_mod = @import("graph.zig");
+    var g = try graph_mod.build(a, sf.num_rows, sf.col_starts, sf.row_indices);
+    defer g.deinit();
+    var order = try graph_mod.Order.init(a, sf.num_rows, null);
+    defer order.deinit();
     const Factor = @import("normal_factor.zig").NormalFactor;
-    var profile = try Factor.init(a, &sf, false);
+    var profile = try Factor.init(a, &sf, false, &g, &order);
     defer profile.deinit();
-    var dense = try Factor.init(a, &sf, true);
+    var dense = try Factor.init(a, &sf, true, null, null);
     defer dense.deinit();
     const profile_values = try a.alloc(f64, profile.storageLen());
     defer a.free(profile_values);
@@ -112,8 +121,8 @@ test "profile Cholesky matches dense solves with fill and multiple right hand si
             }
         }
     }
-    try profile.factor(profile_values);
-    try dense.factor(&full);
+    try profile.factor(profile_values, 0.0);
+    try dense.factor(&full, 0.0);
     for (0..3) |repeat| {
         var rhs: [5]f64 = undefined;
         for (&rhs, 0..) |*v, i| v.* = @floatFromInt(i + repeat);
@@ -128,6 +137,51 @@ test "profile Cholesky matches dense solves with fill and multiple right hand si
             try std.testing.expectApproxEqAbs(original[i], value, 1e-11);
         }
     }
+}
+
+test "ipm certifies primal infeasibility from a stalled residual" {
+    // min x1 + x2 s.t. x1 + x2 = 3 with x1, x2 ∈ [0,1]: the largest
+    // attainable sum is 2, so the primal residual stalls while the dual
+    // stays feasible.
+    const problem = lp.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ 1, 1 },
+        .col_lower = &.{ 0, 0 },
+        .col_upper = &.{ 1, 1 },
+        .row_lower = &.{3},
+        .row_upper = &.{3},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &.{ 0, 1, 2 }, &.{
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(0),
+        }, &.{ 1, 1 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var result = try ipm.solve(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(.infeasible, result.status);
+}
+
+test "ipm certifies unboundedness along an escaping ray" {
+    // min -x1 s.t. x1 - x2 = 0, x >= 0: the ray x1 = x2 -> infinity keeps
+    // the primal feasible while the objective plunges.
+    const problem = lp.ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ -1, 0 },
+        .col_lower = &.{ 0, 0 },
+        .col_upper = &.{ inf, inf },
+        .row_lower = &.{0},
+        .row_upper = &.{0},
+        .matrix = matrix.CscView.initAssumeValid(1, 2, &.{ 0, 1, 2 }, &.{
+            RowId.fromUsizeAssumeValid(0), RowId.fromUsizeAssumeValid(0),
+        }, &.{ 1, -1 }),
+        .objective_sense = .minimize,
+        .objective_offset = 0,
+    };
+    var result = try ipm.solve(std.testing.allocator, problem, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(.unbounded, result.status);
 }
 
 fn allocationProbe(a: std.mem.Allocator) !void {

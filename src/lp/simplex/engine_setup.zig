@@ -38,7 +38,7 @@ pub fn initializeLogicalBasicValues(self: *SimplexEngine, problem: problem_modul
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             const row_index = row.toUsize();
             basis.basic_value[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * initial;
         }
@@ -159,7 +159,7 @@ pub fn installSparseCrashBasis(
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.values[begin..end]) |coefficient| {
-                if (matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) basis_nonzeros += 1;
+                if (foundation.retainsModelCoefficient(coefficient)) basis_nonzeros += 1;
             }
         }
         self.factorizeCurrentBasis(problem) catch continue;
@@ -339,7 +339,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
     }
     @memset(basis.residual_work, 0.0);
     for (problem.matrix.row_indices, problem.matrix.values) |row, value| {
-        if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(value)) continue;
+        if (!foundation.retainsModelCoefficient(value)) continue;
         const row_index = row.toUsize();
         basis.residual_work[row_index] = @max(basis.residual_work[row_index], @abs(value));
     }
@@ -372,7 +372,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
     var scaled_matrix_min = std.math.inf(f64);
     var scaled_matrix_max: f64 = 0.0;
     for (problem.matrix.row_indices, problem.matrix.values) |row, coefficient| {
-        if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+        if (!foundation.retainsModelCoefficient(coefficient)) continue;
         const magnitude = @abs(basis.row_scale[row.toUsize()] * coefficient);
         if (magnitude != 0.0) scaled_matrix_min = @min(scaled_matrix_min, magnitude);
         scaled_matrix_max = @max(scaled_matrix_max, magnitude);
@@ -383,7 +383,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
         const end = problem.matrix.col_starts[column + 1];
         var maximum: f64 = 0.0;
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             maximum = @max(maximum, @abs(basis.row_scale[row.toUsize()] * coefficient));
         }
         const scale = if (use_column_scaling) powerOfTwoScale(maximum, 20) else 1.0;
@@ -457,7 +457,7 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
                 const begin = problem.matrix.col_starts[column];
                 const end = problem.matrix.col_starts[column + 1];
                 for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    if (!foundation.retainsModelCoefficient(coefficient)) continue;
                     const value = @abs(coefficient) * basis.row_scale[row.toUsize()];
                     minimum = @min(minimum, value);
                     maximum = @max(maximum, value);
@@ -465,7 +465,7 @@ fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.P
                 const equilibration = 1.0 / @sqrt(minimum * maximum);
                 basis.column_scale[column] = std.math.clamp(equilibration, minimum_scale, maximum_scale);
                 for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    if (!foundation.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
                     const value = @abs(coefficient) * basis.column_scale[column];
                     basis.basic_lower[row_index] = @min(basis.basic_lower[row_index], value);
@@ -532,7 +532,7 @@ pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_modu
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, value| {
             const row_index = row.toUsize();
-            self.scaled_coefficients[position] = if (matrix.MatrixTargetPolicy.retainsModelCoefficient(value))
+            self.scaled_coefficients[position] = if (foundation.retainsModelCoefficient(value))
                 value * (basis.column_scale[column] * basis.row_scale[row_index])
             else
                 0.0;
@@ -576,7 +576,7 @@ pub fn fillInternalColumn(self: *SimplexEngine, problem: problem_module.ProblemV
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             const row_index = row.toUsize();
             output[row_index] = coefficient * basis.row_scale[row_index] * column_scale;
         }
@@ -606,7 +606,7 @@ pub fn fillInternalColumnSparse(
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             const row_index = row.toUsize();
             output[row_index] = coefficient * basis.row_scale[row_index] * column_scale;
             indices[count] = @intCast(row_index);

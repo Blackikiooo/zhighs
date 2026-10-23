@@ -30,9 +30,11 @@ pub const DenseCholesky = struct {
     }
 
     /// Factor the SPD matrix whose lower triangle is given in row-major
-    /// `matrix` (n×n). Fails without modifying the caller's buffer when a
-    /// non-positive pivot is encountered.
-    pub fn factor(self: *DenseCholesky, matrix: []const f64) FactorError!void {
+    /// `matrix` (n×n). Pivots below `pivot_floor` are lifted to the floor
+    /// (per-pivot regularization); pass 0 to reject non-positive pivots
+    /// instead. Non-finite pivots always fail. Fails without modifying the
+    /// caller's buffer.
+    pub fn factor(self: *DenseCholesky, matrix: []const f64, pivot_floor: f64) FactorError!void {
         const n = self.n;
         std.debug.assert(matrix.len == n * n);
         @memcpy(self.data, matrix);
@@ -42,8 +44,8 @@ pub const DenseCholesky = struct {
             for (0..j) |k| {
                 pivot -= l[j * n + k] * l[j * n + k];
             }
-            if (!std.math.isFinite(pivot) or pivot <= 0.0) return error.NotPositiveDefinite;
-            const diag = @sqrt(pivot);
+            if (!std.math.isFinite(pivot) or (pivot_floor <= 0.0 and pivot <= 0.0)) return error.NotPositiveDefinite;
+            const diag = @sqrt(@max(pivot, pivot_floor));
             l[j * n + j] = diag;
             for (j + 1..n) |i| {
                 var acc = l[i * n + j];
@@ -85,7 +87,7 @@ test "DenseCholesky factors and solves a small SPD system" {
     const matrix = [_]f64{ 4.0, 2.0, 2.0, 3.0 };
     var chol = try DenseCholesky.init(allocator, 2);
     defer chol.deinit();
-    try chol.factor(&matrix);
+    try chol.factor(&matrix, 0.0);
     var rhs = [_]f64{ 6.0, 5.0 };
     chol.solve(&rhs);
     try std.testing.expectApproxEqAbs(1.0, rhs[0], 1e-12);
@@ -97,5 +99,5 @@ test "DenseCholesky rejects indefinite input" {
     const matrix = [_]f64{ 1.0, 2.0, 2.0, 1.0 };
     var chol = try DenseCholesky.init(allocator, 2);
     defer chol.deinit();
-    try std.testing.expectError(error.NotPositiveDefinite, chol.factor(&matrix));
+    try std.testing.expectError(error.NotPositiveDefinite, chol.factor(&matrix, 0.0));
 }

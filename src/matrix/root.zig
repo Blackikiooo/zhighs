@@ -1,4 +1,4 @@
-//! Sparse and dense matrix data structures.
+//! Sparse matrix data structures: CSC storage, CSR views, and transformations.
 //!
 //! Construction uses mutable SoA builders; solver kernels consume canonical,
 //! owning sparse vectors and CSC matrices.
@@ -30,33 +30,13 @@ const dynamic_rows = @import("dynamic_rows.zig");
 const store = @import("store.zig");
 const sparse_sum = @import("sparse_sum.zig");
 const memory = @import("memory.zig");
-const dense_lu = @import("dense_lu.zig");
 const transform_buffers = @import("transform_buffers.zig");
-const sparse_basis = @import("sparse_basis.zig");
 const target_policy = @import("target_policy.zig");
-const sparse_symbolic = @import("sparse_symbolic.zig");
-const sparse_kernel = @import("sparse_kernel.zig");
-const sparse_lu = @import("sparse_lu.zig");
-const sparse_ft = @import("sparse_ft.zig");
 
-pub const DenseLU = dense_lu.DenseLU;
-pub const DenseLuError = dense_lu.DenseLuError;
-pub const SparseBasisError = sparse_basis.SparseBasisError;
-pub const SparseBasisView = sparse_basis.SparseBasisView;
-pub const SparseBasisBuffers = sparse_basis.SparseBasisBuffers;
-pub const MatrixTargetPolicy = target_policy;
-pub const SymbolicError = sparse_symbolic.SymbolicError;
-pub const PivotKind = sparse_symbolic.PivotKind;
-pub const SymbolicPlanView = sparse_symbolic.SymbolicPlanView;
-pub const SymbolicWorkspace = sparse_symbolic.SymbolicWorkspace;
-pub const KernelError = sparse_kernel.KernelError;
-pub const SparsePivotChoice = sparse_kernel.PivotChoice;
-pub const SparsePivotView = sparse_kernel.PivotView;
-pub const MutableSparseKernel = sparse_kernel.MutableSparseKernel;
-pub const SparseLuError = sparse_lu.SparseLuError;
-pub const SparseLU = sparse_lu.SparseLU;
-pub const SparseForrestTomlin = sparse_ft.SparseForrestTomlin;
-pub const MutableUpperView = sparse_ft.MutableUpperView;
+/// Hardware prefetch lead used when a consumer walks CSC columns in order.
+/// Basis assembly shares this value with matrix storage so both layers age the
+/// same compile-time layout policy instead of duplicating architecture switches.
+pub const sparse_column_prefetch_distance = target_policy.sparse_column_prefetch_distance;
 
 pub const SparseVectorError = sparse_vector.SparseVectorError;
 pub const SparseVectorView = sparse_vector.SparseVectorView;

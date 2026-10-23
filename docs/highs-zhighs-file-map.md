@@ -81,7 +81,7 @@
 
 | 功能 | HiGHS C++ 文件 | zhighs Zig 文件 | 状态与说明 |
 |---|---|---|---|
-| Basis factorization 主体 | `util/HFactor.h/.cpp` | `src/lp/simplex/factorization.zig` | ✅ SparseLU（base + hyper kernel）与 Forrest–Tomlin 更新链，`matrix/dense_lu.zig` 提供稠密后端。 |
+| Basis factorization 主体 | `util/HFactor.h/.cpp` | `src/lp/simplex/factorization.zig` | ✅ SparseLU（base + hyper kernel）与 Forrest–Tomlin 更新链；数值内核位于 `src/nla`（`dense_lu` / `sparse_basis` / `sparse_symbolic` / `sparse_kernel` / `sparse_lu` / `sparse_ft*`）。 |
 | Refactor / update | `HFactorRefactor.cpp`, `HFactorExtend.cpp` | `src/lp/simplex/factorization.zig` | ✅ FT 重构与 update 内联于 factorization；独立 `refactor/update` 文件不再规划。 |
 | Factor 辅助与调试 | `HFactorUtils.cpp`, `HFactorDebug.*`, `HFactorConst.h` | `src/lp/simplex/factorization.zig`, `src/diagnostics/factor_check.zig` | 📝 算法内已带调试断言；独立检查入口延后。 |
 | Simplex 总控状态 | `simplex/HEkk.h/.cpp`, `HEkkControl.cpp` | `src/lp/simplex/engine.zig`, `dual_state.zig` | ✅ `SimplexEngine` + `ControlState` 统一 dual phase/rebuild 控制；tasks/multi dual 未实现。 |

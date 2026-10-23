@@ -11,6 +11,7 @@ const foundation = @import("foundation");
 const memory = @import("memory.zig");
 const sparse_vector = @import("sparse_vector.zig");
 const csc = @import("csc.zig");
+const MatrixError = csc.MatrixError;
 
 const RowId = foundation.RowId;
 const ColId = foundation.ColId;
@@ -71,9 +72,9 @@ pub const MatrixBuilder = struct {
     /// Appends one coordinate. Explicit zeros are accepted here because later
     /// duplicate entries may cancel; freeze removes the final numerical zero.
     /// Callers should `reserve` capacity before appending in a hot loop.
-    pub fn append(self: *Self, allocator: std.mem.Allocator, row: RowId, col: ColId, value: f64) (std.mem.Allocator.Error || csc.MatrixError)!void {
+    pub fn append(self: *Self, allocator: std.mem.Allocator, row: RowId, col: ColId, value: f64) (std.mem.Allocator.Error || MatrixError)!void {
         if (row.toUsize() >= self.num_rows or col.toUsize() >= self.num_cols)
-            return error.IndexOutOfBounds;
+            return MatrixError.IndexOutOfBounds;
         if (!std.math.isFinite(value)) return error.NonFiniteValue;
 
         // Inline capacity check: the separate reserve call is measurable overhead
@@ -263,9 +264,10 @@ inline fn sameCoordinate(a_row: RowId, a_col: ColId, b_row: RowId, b_col: ColId)
 const SortContext = struct {
     /// Borrowed SoA streams whose positions are compared.
     fields: TripletList.Slice,
+    const Self = @This();
 
     /// Compare triplet positions by column, row, then append sequence.
-    pub fn lessThan(self: @This(), a: usize, b: usize) bool {
+    pub fn lessThan(self: Self, a: usize, b: usize) bool {
         const cols = self.fields.items(.col);
         const a_col = cols[a].toUsize();
         const b_col = cols[b].toUsize();

@@ -425,7 +425,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
             const end = problem.matrix.col_starts[column + 1];
             var tableau_entry: f64 = 0.0;
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |matrix_row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row_index = matrix_row.toUsize();
                 tableau_entry += basis.residual_work[row_index] * basis.row_scale[row_index] * coefficient * basis.column_scale[column];
             }
@@ -632,7 +632,7 @@ pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.Pr
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row_index = row.toUsize();
                 basis.residual_work[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;
             }
@@ -688,7 +688,7 @@ pub fn subtractBasisProduct(self: *SimplexEngine, problem: problem_module.Proble
             const begin = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row_index = row.toUsize();
                 if (row_index >= residual.len) return error.NumericalFailure;
                 residual[row_index] -= basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;
@@ -722,7 +722,7 @@ pub fn subtractBasisProductWithMagnitude(
             const start = problem.matrix.col_starts[column];
             const end = problem.matrix.col_starts[column + 1];
             for (problem.matrix.row_indices[start..end], problem.matrix.values[start..end]) |row, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row_index = row.toUsize();
                 if (row_index >= residual.len) return error.NumericalFailure;
                 const product = basis.row_scale[row_index] * coefficient * basis.column_scale[column] * value;

@@ -5,7 +5,9 @@
 //! periodic reinversion without changing the simplex engine.
 
 const std = @import("std");
+const foundation = @import("foundation");
 const matrix = @import("matrix");
+const nla = @import("nla");
 
 /// Errors raised by factorization and update operations.
 pub const FactorizationError = error{ DimensionMismatch, NotImplemented, Singular, NumericalFailure, OutOfMemory };
@@ -118,11 +120,11 @@ pub const Factorization = struct {
     update_count: usize = 0,
     //todo:need to retain only one lu backend after the debug, using enum(union).
     /// Dense LU implementation retained for small bases and oracle tests.
-    dense_lu: matrix.DenseLU,
+    dense_lu: nla.DenseLU,
     /// Sparse LU implementation used for production-sized bases.
-    sparse_lu: matrix.SparseLU,
+    sparse_lu: nla.SparseLU,
     /// Reusable CSC buffers used to assemble a basis from global columns.
-    sparse_basis: matrix.SparseBasisBuffers,
+    sparse_basis: nla.SparseBasisBuffers,
     /// Row-major slab containing dense-backend eta vectors.
     eta_values: []f64 = &.{},
     /// Pivot/leaving row associated with each live eta vector.
@@ -156,9 +158,9 @@ pub const Factorization = struct {
     pub fn init(allocator: std.mem.Allocator) Factorization {
         return .{
             .allocator = allocator,
-            .dense_lu = matrix.DenseLU.init(allocator),
-            .sparse_lu = matrix.SparseLU.init(allocator),
-            .sparse_basis = matrix.SparseBasisBuffers.init(allocator),
+            .dense_lu = nla.DenseLU.init(allocator),
+            .sparse_lu = nla.SparseLU.init(allocator),
+            .sparse_basis = nla.SparseBasisBuffers.init(allocator),
         };
     }
 
@@ -245,7 +247,7 @@ pub const Factorization = struct {
                 const begin = problem_matrix.col_starts[global_column];
                 const end = problem_matrix.col_starts[global_column + 1];
                 for (problem_matrix.row_indices[begin..end], problem_matrix.values[begin..end]) |row, coefficient| {
-                    if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    if (!foundation.retainsModelCoefficient(coefficient)) continue;
                     const row_index = row.toUsize();
                     const scaled = coefficient * row_scale[row_index] * column_scale[global_column];
                     if (!std.math.isFinite(scaled)) return error.NumericalFailure;
@@ -931,7 +933,6 @@ test "factorization update rejects non-finite direction entries" {
 }
 
 test "sparse backend factors an assembled simplex basis" {
-    const foundation = @import("foundation");
     const rows = [_]foundation.RowId{
         foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),
         foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(1),

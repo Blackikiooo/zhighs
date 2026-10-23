@@ -42,7 +42,7 @@ fn IndexId(comptime kind_value: IndexKind) type {
         pub inline fn init(value: HUInt) IndexError!Self {
             if (value == none_raw) return IndexError.ReservedIndex;
 
-            if (comptime needs_huint_to_usize_check) {
+            if (needs_huint_to_usize_check) {
                 _ = std.math.cast(usize, value) orelse
                     return IndexError.IndexOverflow;
             }
@@ -149,7 +149,7 @@ fn OptionalId(comptime Id: type) type {
         }
 
         pub inline fn isNone(self: Self) bool {
-            return self == .none;
+            return !self.isSome();
         }
 
         pub inline fn raw(self: Self) HUInt {

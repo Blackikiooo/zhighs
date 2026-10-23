@@ -8,8 +8,9 @@
 
 const std = @import("std");
 const foundation = @import("foundation");
-const csc = @import("csc.zig");
-const target = @import("target_policy.zig");
+// `matrix` owns canonical CSC storage and layout hints; `nla` only consumes
+// its views, while the shared coefficient floor comes from `foundation`.
+const csc = @import("matrix");
 
 const Offset = foundation.HUInt;
 const RowId = foundation.RowId;
@@ -121,7 +122,7 @@ pub const SparseBasisBuffers = struct {
             // Prefetch only structural columns. Logical/artificial columns are
             // synthesized locally and touching arbitrary A storage would add
             // cache pollution rather than hide useful latency.
-            const future = basis_column + target.sparse_column_prefetch_distance;
+            const future = basis_column + csc.sparse_column_prefetch_distance;
             if (future < basic_index.len) {
                 const future_column: usize = basic_index[future];
                 if (future_column < matrix.num_cols) {
@@ -138,7 +139,7 @@ pub const SparseBasisBuffers = struct {
                 const begin = matrix.col_starts[global_column];
                 const end = matrix.col_starts[global_column + 1];
                 for (matrix.row_indices[begin..end], matrix.values[begin..end]) |row, coefficient| {
-                    if (!target.retainsModelCoefficient(coefficient)) continue;
+                    if (!foundation.retainsModelCoefficient(coefficient)) continue;
                     const scaled = coefficient * row_scale[row.toUsize()] * column_scale[global_column];
                     if (!std.math.isFinite(scaled)) return error.NonFiniteValue;
                     // Free rows have a zero normalization scale. Do not publish

@@ -7,6 +7,7 @@
 const foundation = @import("foundation");
 
 pub const matrix = @import("matrix");
+pub const nla = @import("nla");
 pub const HUInt = foundation.HUInt;
 pub const HCD = foundation.HCD;
 pub const RowId = foundation.RowId;

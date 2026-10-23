@@ -130,7 +130,7 @@ const TestHarness = struct {
         const cursor = cursor_storage[48..][0..dimension];
         const csr_buffers = try zhighs.matrix.CsrBuffers.init(allocator, dimension, nnz);
         const transpose_buffers = try zhighs.matrix.TransposeBuffers.init(allocator, dimension, nnz);
-        const csr_cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(allocator, matrix, 0, csr_buffers.cursor);
+        const csr_cache = try zhighs.matrix.CsrCache.buildAssumeValid(allocator, matrix, 0);
         const csr_view = csr_cache.viewAssumeCurrent();
 
         const dense_x = try allocator.alloc(f64, dimension);
@@ -323,7 +323,7 @@ pub fn main(init: std.process.Init) !void {
             const values_copy = try benchmark_allocator.dupe(f64, h.matrix.values);
             defer benchmark_allocator.free(values_copy);
             const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
-            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(benchmark_allocator, matrix_copy, 0, h.csr_buffers.cursor);
+            var cache = try zhighs.matrix.CsrCache.buildAssumeValid(benchmark_allocator, matrix_copy, 0);
             clobberPtr(cache.values.ptr);
             cache.deinit(benchmark_allocator);
         }
@@ -337,7 +337,7 @@ pub fn main(init: std.process.Init) !void {
             const values_copy = try benchmark_allocator.dupe(f64, h.matrix.values);
             defer benchmark_allocator.free(values_copy);
             const matrix_copy = zhighs.matrix.CscMatrix.initBorrowedAssumeValid(h.matrix.num_rows, h.matrix.num_cols, starts_copy, indices_copy, values_copy);
-            var cache = try zhighs.matrix.CsrCache.buildWithScratchAssumeValid(benchmark_allocator, matrix_copy, 0, h.csr_buffers.cursor);
+            var cache = try zhighs.matrix.CsrCache.buildAssumeValid(benchmark_allocator, matrix_copy, 0);
             defer cache.deinit(benchmark_allocator);
             result_struct_hash = structuralHashCsr(cache.row_starts, cache.col_indices, cache.values);
         }

@@ -14,11 +14,12 @@ pub fn nativeVectorLanes(comptime T: type) comptime_int {
 /// Uses comptime-unrolled @Vector(VW, T) stores for aligned hot paths.
 /// The vector width VW and unroll factor UN can be tuned per architecture.
 fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) void {
+
     if (values.len == 0) return;
 
     // Pick vector width from the target SIMD ISA.
     // VW is chosen so that VW × @sizeOf(T) fills a single vector register.
-    const VW = nativeVectorLanes(T);
+    const VW = target.vectorLanes(T);
     // Unroll factor tuned by microarchitecture — see target_policy.unrollFactor().
     const UN = target.unrollFactor();
 
@@ -36,21 +37,13 @@ fn clearGeneric(comptime T: type, values: []T, comptime volatile_stores: bool) v
     const zero: Vec = @splat(0);
 
     if (vn > 0) {
-        if (comptime volatile_stores) {
-            const vptr: [*]volatile Vec = @ptrCast(@alignCast(remaining.ptr));
-            var vi: usize = 0;
-            while (vi + UN <= vn) : (vi += UN) {
-                inline for (0..UN) |u| vptr[vi + u] = zero;
-            }
-            while (vi < vn) : (vi += 1) vptr[vi] = zero;
-        } else {
-            const vptr: [*]Vec = @ptrCast(@alignCast(remaining.ptr));
-            var vi: usize = 0;
-            while (vi + UN <= vn) : (vi += UN) {
-                inline for (0..UN) |u| vptr[vi + u] = zero;
-            }
-            while (vi < vn) : (vi += 1) vptr[vi] = zero;
+        const VPtr = if (comptime volatile_stores) [*]volatile Vec else [*]Vec;
+        const vptr: VPtr = @ptrCast(@alignCast(remaining.ptr));
+        var vi: usize = 0;
+        while (vi + UN <= vn) : (vi += UN) {
+            inline for (0..UN) |u| vptr[vi + u] = zero;
         }
+        while (vi < vn) : (vi += 1) vptr[vi] = zero;
         i += vn * VW;
     }
 

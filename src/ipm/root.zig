@@ -1,6 +1,6 @@
 //! Interior-point LP solver.
 //!
-//! Mehrotra predictor-corrector primal-dual IPM over a reusable profile
+//! Mehrotra predictor-corrector primal-dual IPM over a reusable sparse
 //! normal-equations Cholesky kernel, with a dense reference backend.
 //! `standard_form` rewrites a borrowed
 //! `lp.ProblemView` into min ĉᵀx̂, Âx̂ = b̂, x̂ ≥ 0; `engine` iterates on that
@@ -10,6 +10,7 @@ const std = @import("std");
 
 pub const options = @import("options.zig");
 pub const standard_form = @import("standard_form.zig");
+pub const graph = @import("graph.zig");
 pub const cholesky = @import("cholesky.zig");
 pub const profile_cholesky = @import("profile_cholesky.zig");
 pub const engine = @import("engine.zig");

@@ -6,6 +6,7 @@
 //! numerical factorization before publication.
 
 const std = @import("std");
+const foundation = @import("foundation");
 const matrix = @import("matrix");
 
 /// Output of a crash plan: parallel arrays of (row, column) pairs that the
@@ -99,7 +100,7 @@ pub const CrashWorkspace = struct {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
             for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row = row_id.toUsize();
                 row_starts[row + 1] += 1;
                 column_degree[column] += 1;
@@ -113,7 +114,7 @@ pub const CrashWorkspace = struct {
             const begin = csc.col_starts[column];
             const end = csc.col_starts[column + 1];
             for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
-                if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                if (!foundation.retainsModelCoefficient(coefficient)) continue;
                 const row = row_id.toUsize();
                 self.row_columns[row_cursor[row]] = @intCast(column);
                 row_cursor[row] += 1;
@@ -142,7 +143,7 @@ pub const CrashWorkspace = struct {
                 var pivot_magnitude: f64 = 0.0;
                 for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
                     const row = row_id.toUsize();
-                    if (!row_active[row] or !matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    if (!row_active[row] or !foundation.retainsModelCoefficient(coefficient)) continue;
                     const magnitude = @abs(coefficient * row_scale[row] * column_scale[column]);
                     if (magnitude > pivot_magnitude or (magnitude == pivot_magnitude and
                         (pivot_row == null or row_degree[row] < row_degree[pivot_row.?])))
@@ -181,7 +182,7 @@ pub const CrashWorkspace = struct {
             const end = csc.col_starts[chosen.column + 1];
             for (csc.row_indices[begin..end], csc.values[begin..end]) |row_id, coefficient| {
                 const row = row_id.toUsize();
-                if (row_active[row] and matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient) and row_degree[row] != 0)
+                if (row_active[row] and foundation.retainsModelCoefficient(coefficient) and row_degree[row] != 0)
                     row_degree[row] -= 1;
             }
         }
@@ -273,7 +274,6 @@ pub const CrashWorkspace = struct {
 };
 
 test "crash planner peels a triangular structural basis" {
-    const foundation = @import("foundation");
     const view = matrix.CscView.initAssumeValid(
         3,
         3,
@@ -293,7 +293,6 @@ test "crash planner peels a triangular structural basis" {
 }
 
 test "bixby scoring can prefer pivot quality over a singleton" {
-    const foundation = @import("foundation");
     const view = matrix.CscView.initAssumeValid(
         2,
         2,

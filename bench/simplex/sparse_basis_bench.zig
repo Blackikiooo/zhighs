@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     }
     starts[dimension] = nnz;
     const matrix = zhighs.matrix.CscView.initAssumeValid(dimension, dimension, starts, rows, values);
-    var buffers = zhighs.matrix.SparseBasisBuffers.init(allocator);
+    var buffers = zhighs.nla.SparseBasisBuffers.init(allocator);
     defer buffers.deinit();
     _ = try buffers.assemble(matrix, basic_index, row_scale, column_scale, artificial_sign);
 
@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
         checksum,
     });
 
-    var symbolic = zhighs.matrix.SymbolicWorkspace.init(allocator);
+    var symbolic = zhighs.nla.SymbolicWorkspace.init(allocator);
     defer symbolic.deinit();
     const assembled = buffers.view();
     _ = try symbolic.plan(assembled, 0.1);

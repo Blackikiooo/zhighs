@@ -127,7 +127,10 @@ empty -> problem -> transformed -> presolving -> presolved
 结构完整性以本机 HiGHS `dcc25308d8` 为参照。首版架构必须能容纳以下能力，即使算法
 按里程碑延后实现：
 
-- LP：primal/dual revised simplex、IPM、PDLP、basis 和 crossover；
+- LP：primal/dual revised simplex、IPM（`src/ipm/` 已落地 Mehrotra 预测-校正
+  primal-dual 实现：标准形变换 + 可复用轮廓正规方程 Cholesky（保留稠密对照）+ 解映射；
+  `Method=2` 接入模型 API 和 LP/MPS 命令行求解；crossover、通用稀疏排序及
+  不可行性证书仍待后续里程碑，详见 `docs/ipm.md`）、PDLP、basis 和 crossover；
 - MIP：branch-and-cut、domain、cuts、conflicts、implications 和 heuristics；
 - QP：Hessian 和 convex active-set solver；
 - solve pipeline：模型修改、选项、presolve/postsolve、solver selection 和 callbacks；

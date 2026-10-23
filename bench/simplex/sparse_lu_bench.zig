@@ -46,8 +46,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     starts[n] = @intCast(output);
-    const basis = zhighs.matrix.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
-    var lu = zhighs.matrix.SparseLU.init(factor_allocator);
+    const basis = zhighs.nla.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
+    var lu = zhighs.nla.SparseLU.init(factor_allocator);
     defer lu.deinit();
     try lu.factorizeAssumeValid(basis);
     const samples = try fixture_allocator.alloc(u64, repeats);

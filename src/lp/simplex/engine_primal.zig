@@ -521,7 +521,7 @@ pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_m
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             const magnitude = @abs(coefficient * basis.row_scale[row.toUsize()] * basis.column_scale[column]);
             coefficient_min = @min(coefficient_min, magnitude);
             coefficient_max = @max(coefficient_max, magnitude);

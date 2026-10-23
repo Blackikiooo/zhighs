@@ -53,7 +53,7 @@ fn coefficient(family: Family, row: usize, column: usize, n: usize) f64 {
     return 1.0 + @as(f64, @floatFromInt(off_diagonal)) * 0.125;
 }
 
-fn residual(basis: zhighs.matrix.SparseBasisView, x: []const f64, rhs: []const f64) f64 {
+fn residual(basis: zhighs.nla.SparseBasisView, x: []const f64, rhs: []const f64) f64 {
     var maximum: f64 = 0;
     for (0..basis.dimension) |row| {
         var product: f64 = 0;
@@ -97,8 +97,8 @@ pub fn main(init: std.process.Init) !void {
             };
         }
         starts[n] = @intCast(nnz);
-        const basis = zhighs.matrix.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows[0..nnz], .values = values[0..nnz] };
-        var lu = zhighs.matrix.SparseLU.init(allocator);
+        const basis = zhighs.nla.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows[0..nnz], .values = values[0..nnz] };
+        var lu = zhighs.nla.SparseLU.init(allocator);
         defer lu.deinit();
         const began = nowNs();
         const result = lu.factorizeAssumeValid(basis);

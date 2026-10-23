@@ -12,17 +12,25 @@ const memory = @import("memory.zig");
 const RowId = foundation.RowId;
 const ColId = foundation.ColId;
 
+/// Error set shared by every `matrix` operation.
+///
+/// A single set keeps structural, layout, and conversion code composable
+/// without per-function error unions. Each tag still names one concrete
+/// invariant violation so callers can distinguish recoverable misuse
+/// (`DimensionMismatch`, `BufferTooSmall`) from corrupt storage.
 pub const MatrixError = sparse_vector.SparseVectorError || error{
-    /// The matrix has a nonzero value at a row index outside its number of rows.
+    /// A dimension, offset, or byte size does not fit the index types.
     DimensionTooLarge,
-    /// The matrix has a nonzero value at a column index outside its number of columns.
+    /// CSC column offsets are not nondecreasing and do not end at `nnz`.
     InvalidColumnStarts,
-    /// The matrix has a nonzero value at a row index outside its number of rows.
+    /// Parallel storage arrays disagree on their element count.
     InconsistentStorage,
     /// A cached matrix view was built for an older model revision.
     StaleView,
     /// CSR row offsets do not describe the entry arrays correctly.
     InvalidRowStarts,
+    /// A row, column, or stored coordinate lies outside the matrix dimensions.
+    IndexOutOfBounds,
     /// A row or column scaling factor is non-finite or not strictly positive.
     InvalidScaling,
     /// A numerical transformation produced zero or a non-finite matrix entry.
@@ -504,7 +512,7 @@ noinline fn multiplySkippingZerosKernel(
 }
 
 /// Checks whether dimensions can be represented by the strong ID types.
-pub fn validateDimensions(num_rows: usize, num_cols: usize) MatrixError!void {
+pub fn validateDimensions(num_rows: usize, num_cols: usize) !void {
     // CSC needs num_cols + 1 offsets; reject the sole overflowing usize value.
     if (num_cols == std.math.maxInt(usize)) return MatrixError.DimensionTooLarge;
     if (num_rows != 0) _ = RowId.fromUsize(num_rows - 1) catch return MatrixError.DimensionTooLarge;

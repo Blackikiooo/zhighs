@@ -6,13 +6,8 @@
 const std = @import("std");
 const zhighs = @import("zhighs");
 
-fn nowNs() i128 {
-    var timestamp: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &timestamp))) {
-        .SUCCESS => {},
-        else => unreachable,
-    }
-    return @as(i128, timestamp.sec) * std.time.ns_per_s + timestamp.nsec;
+fn nowNs(io: std.Io) i128 {
+    return std.Io.Clock.awake.now(io).nanoseconds;
 }
 
 fn violation(value: f64, lower: f64, upper: f64) f64 {
@@ -22,7 +17,8 @@ fn violation(value: f64, lower: f64, upper: f64) f64 {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io_context = init.io;
-    var args = std.process.Args.iterate(init.minimal.args);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
     _ = args.next();
     const path = args.next() orelse return error.MissingModelPath;
     const max_iterations = if (args.next()) |text| try std.fmt.parseUnsigned(usize, text, 10) else 1_000_000;
@@ -85,10 +81,10 @@ pub fn main(init: std.process.Init) !void {
         .baseline;
     if (args.next() != null) return error.InvalidArguments;
 
-    const started = nowNs();
+    const started = nowNs(io_context);
     var model = try zhighs.io.readFile(io_context, allocator, path, .{ .keep_names = false });
     defer model.deinit();
-    const parsed_ns: u64 = @intCast(nowNs() - started);
+    const parsed_ns: u64 = @intCast(nowNs(io_context) - started);
     const problem = zhighs.lp.ProblemView{
         .num_rows = model.row_lower.len,
         .num_cols = model.col_cost.len,
@@ -145,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
     else
         &.{};
     defer if (trace_enabled) allocator.free(dual_phase_one_ep);
-    const solve_started = nowNs();
+    const solve_started = nowNs(io_context);
     const status = engine.solveProblem(problem, .{
         .max_iterations = max_iterations,
         .pivot_trace = trace,
@@ -167,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
         .primal_pricing_strategy = primal_pricing_strategy,
         .dual_initialization_strategy = dual_initialization_strategy,
     });
-    const solve_ns: u64 = @intCast(nowNs() - solve_started);
+    const solve_ns: u64 = @intCast(nowNs(io_context) - solve_started);
     if (trace_enabled) for (trace[0..engine.pivot_trace_count]) |event| {
         const trace_line = try std.fmt.allocPrint(allocator, "pivot\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.17}\t{d:.17}\t{d}\t{e:.6}\t{e:.6}\t{d}\t{e:.17}\n", .{
             @tagName(event.phase),  event.iteration,      event.entering_column, event.leaving_column,          event.leaving_row,
@@ -290,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
                 const begin = problem.matrix.col_starts[column];
                 const end = problem.matrix.col_starts[column + 1];
                 for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-                    if (!zhighs.matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+                    if (!zhighs.foundation.retainsModelCoefficient(coefficient)) continue;
                     activity[row.toUsize()] += coefficient * direction;
                 }
             }
@@ -342,7 +338,10 @@ pub fn main(init: std.process.Init) !void {
         @as(f64, @floatFromInt(factor_stats.btran_rhs_nonzeros)) /
             @as(f64, @floatFromInt(factor_stats.btran_rhs_samples * problem.num_rows));
     const requested_bytes = engine.requestedBytes();
-    const peak_rss_kb: u64 = @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
+    const peak_rss_kb: u64 = if (@import("builtin").os.tag == .windows)
+        0
+    else
+        @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
     const stats_line = try std.fmt.allocPrint(
         allocator,
         "stats\t{s}\tphase1_iterations={d}\tdual_phase1_iterations={d}\tdual_phase1_fallbacks={d}\tdual_repair_iterations={d}\tphase2_iterations={d}\tphase1_ns={d}\tdual_phase1_ns={d}\tdual_repair_ns={d}\tphase2_ns={d}\tcleanup_ns={d}\tcrash_attempts={d}\tcrash_fallbacks={d}\tcrash_planned_columns={d}\tcrash_structural_columns={d}\tcrash_basis_nonzeros={d}\tcrash_condition={e:.6}\trebuild_calls={d}\trebuild_ns={d}\tinvert_calls={d}\tinvert_ns={d}\tftran_calls={d}\tftran_ns={d}\tbtran_calls={d}\tbtran_ns={d}\tupdate_calls={d}\tupdate_ns={d}\tpricing_calls={d}\tpricing_ns={d}\tdegenerate_pivots={d}\tanti_cycling_activations={d}\tbound_flips={d}\n",

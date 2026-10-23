@@ -13,6 +13,10 @@ scaling; logical and artificial columns are synthesized as signed unit columns.
 The buffers retain capacity across reinversions and own no model or basis
 indices.
 
+The implementation lives in `src/nla/sparse_basis.zig` and consumes
+`matrix.CscView`; the dependency direction is `nla -> matrix`, so structural
+storage never imports factorization code.
+
 The representation is data-oriented SoA:
 
 ```text

@@ -1720,7 +1720,7 @@ test "Model batches coefficient replacement insertion and deletion into one revi
     try std.testing.expectEqual(old_starts_ptr, model.matrix.csc().col_starts.ptr);
     try std.testing.expectEqual(old_rows_ptr, model.matrix.csc().row_indices.ptr);
     try std.testing.expectEqual(old_values_ptr, model.matrix.csc().values.ptr);
-    try std.testing.expect(model.matrix.csr_cache_revision == null);
+    try std.testing.expect(!model.matrix.csrIsCached());
     try std.testing.expectApproxEqAbs(@as(f64, 4.0), try model.getCoeff(0, 0), 1e-12);
 
     // A structural delta batch is still materialized and committed only once.
@@ -1731,7 +1731,7 @@ test "Model batches coefficient replacement insertion and deletion into one revi
     try model.updateModel();
 
     try std.testing.expectEqual(structural_revision + 1, model.matrix.matrixRevision());
-    try std.testing.expect(model.matrix.csr_cache_revision == null);
+    try std.testing.expect(!model.matrix.csrIsCached());
     try std.testing.expectApproxEqAbs(@as(f64, 5.0), try model.getCoeff(1, 0), 1e-12);
     try std.testing.expectEqual(@as(f64, 0.0), try model.getCoeff(1, 1));
     try std.testing.expectEqual(@as(usize, 2), model.matrix.csc().nnz());

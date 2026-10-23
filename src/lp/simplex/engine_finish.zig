@@ -76,7 +76,7 @@ pub fn validateUnboundedRay(self: *SimplexEngine, problem: problem_module.Proble
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             const row_index = row.toUsize();
             const product = coefficient * direction;
             basis.rhs_work[row_index] += product;
@@ -123,7 +123,7 @@ pub fn validateOptimalSolution(self: *SimplexEngine, problem: problem_module.Pro
         const begin = problem.matrix.col_starts[column];
         const end = problem.matrix.col_starts[column + 1];
         for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row, coefficient| {
-            if (!matrix.MatrixTargetPolicy.retainsModelCoefficient(coefficient)) continue;
+            if (!foundation.retainsModelCoefficient(coefficient)) continue;
             basis.rhs_work[row.toUsize()] += coefficient * value;
         }
     }

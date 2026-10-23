@@ -10,7 +10,7 @@ const matrix = @import("matrix");
 
 /// Optimization direction. Encoded as +1/-1 so flipping the sense is just a
 /// sign change on the objective vector.
-pub const ObjectiveSense = enum(i2) { minimize = 1, maximize = -1 };
+pub const ObjectiveSense = enum(i8) { minimize = 1, maximize = -1 };
 
 /// Non-owning view over a sparse LP in CSC form. All slices are borrowed from
 /// the caller; the view performs no allocation.
@@ -74,14 +74,14 @@ pub const ProblemView = struct {
 
     /// Materialize one borrowed CSC column into caller-owned dense storage.
     /// This hot-path helper performs no allocation.
-    pub fn fillColumn(self: ProblemView, column: usize, output: []f64) ViewError!void {
+    pub fn fillColumn(self: ProblemView, column: usize, output: []f64) void {
         if (column >= self.num_cols or output.len != self.num_rows) return error.DimensionMismatch;
         @memset(output, 0.0);
         const begin = self.matrix.col_starts[column];
         const end = self.matrix.col_starts[column + 1];
         for (self.matrix.row_indices[begin..end], self.matrix.values[begin..end]) |row, value| {
             const index = row.toUsize();
-            if (index >= output.len) return error.InvalidMatrix;
+            std.debug.assert(index < output.len);
             output[index] = value;
         }
     }

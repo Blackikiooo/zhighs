@@ -1,13 +1,15 @@
 //! Transformation of a borrowed `ProblemView` into IPM standard form
-//! min ĉᵀx̂ subject to Â·x̂ = b̂, x̂ ≥ 0.
+//! min ĉᵀx̂ subject to Â·x̂ = b̂, 0 ≤ x̂ ≤ û.
 //!
 //! The conversion shifts finite lower bounds into the right-hand side, splits
 //! free columns into a positive/negative difference, negates upper-only
-//! columns, and turns column upper bounds and row bounds into non-negative
-//! slack columns with unit entries. Fixed columns are folded into the
-//! right-hand side and the objective shift. The engine minimizes with the
-//! objective sense baked into ĉ, so the sense only reappears when the result
-//! is mapped back to model coordinates.
+//! columns, and turns row bounds into slack columns. Column upper bounds and
+//! the upper side of range rows stay native: they become finite entries of û
+//! instead of auxiliary equality rows, keeping the normal-equation dimension
+//! at the original row count. Fixed columns are folded into the right-hand
+//! side and the objective shift. The engine minimizes with the objective
+//! sense baked into ĉ, so the sense only reappears when the result is mapped
+//! back to model coordinates.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -57,8 +59,13 @@ pub const StandardForm = struct {
     values: []f64,
     /// Standard-form objective (minimization, sense already applied).
     cost: []f64,
+    /// Finite upper bounds remain native; `inf` means no upper bound.
+    upper: []f64,
     /// Standard-form right-hand side b̂.
     rhs: []f64,
+    /// Diagonal equilibration: Â = diag(row_scale) A diag(col_scale).
+    row_scale: []f64,
+    col_scale: []f64,
     /// One record per original structural column.
     col_records: []ColRecord,
     /// Original row index for each standard-form equality row.
@@ -74,10 +81,54 @@ pub const StandardForm = struct {
         a.free(self.row_indices);
         a.free(self.values);
         a.free(self.cost);
+        a.free(self.upper);
         a.free(self.rhs);
+        a.free(self.row_scale);
+        a.free(self.col_scale);
         a.free(self.col_records);
         a.free(self.row_origin);
         a.free(self.row_to_std);
+    }
+
+    pub fn equilibrate(self: *StandardForm) void {
+        @memset(self.row_scale, 0.0);
+        for (self.row_indices, self.values) |row, value| self.row_scale[row] = @max(self.row_scale[row], @abs(value));
+        for (self.row_scale) |*scale| scale.* = boundedReciprocal(scale.*);
+        for (self.values, self.row_indices) |*value, row| value.* *= self.row_scale[row];
+        for (self.rhs, self.row_scale) |*value, scale| value.* *= scale;
+
+        for (0..self.num_cols) |j| {
+            var norm: f64 = 0.0;
+            for (self.col_starts[j]..self.col_starts[j + 1]) |k| norm = @max(norm, @abs(self.values[k]));
+            self.col_scale[j] = boundedReciprocal(norm);
+            for (self.col_starts[j]..self.col_starts[j + 1]) |k| self.values[k] *= self.col_scale[j];
+            self.cost[j] *= self.col_scale[j];
+            if (self.upper[j] != inf) self.upper[j] /= self.col_scale[j];
+        }
+    }
+
+    /// Permute the standard-form rows by `permutation` (old index -> new
+    /// index): rhs, row scaling, row origin, and the CSC row indices.
+    pub fn permuteRows(self: *StandardForm, permutation: []const usize) !void {
+        const rhs = try self.allocator.alloc(f64, self.num_rows);
+        defer self.allocator.free(rhs);
+        const row_scale = try self.allocator.alloc(f64, self.num_rows);
+        defer self.allocator.free(row_scale);
+        const row_origin = try self.allocator.alloc(RowOrigin, self.num_rows);
+        defer self.allocator.free(row_origin);
+        for (0..self.num_rows) |old| {
+            const new = permutation[old];
+            rhs[new] = self.rhs[old];
+            row_scale[new] = self.row_scale[old];
+            row_origin[new] = self.row_origin[old];
+        }
+        @memcpy(self.rhs, rhs);
+        @memcpy(self.row_scale, row_scale);
+        @memcpy(self.row_origin, row_origin);
+        for (self.row_indices) |*row| row.* = permutation[row.*];
+        for (self.row_to_std) |*row| {
+            if (row.*) |old| row.* = permutation[old];
+        }
     }
 
     /// Objective value in the original sense and coordinates, including the
@@ -108,18 +159,19 @@ fn senseSign(sense: lp.ObjectiveSense) f64 {
 const ColClass = struct {
     kind: ColKind,
     base: f64,
-    has_bound_row: bool,
+    /// Finite original upper bound on a shifted column: x̂ ≤ u − l.
+    has_upper_bound: bool,
 };
 
 const RowClass = enum { free, equality, lower, upper, range };
 
 fn classifyColumn(lower: f64, upper: f64) ColClass {
-    if (lower == upper) return .{ .kind = .fixed, .base = lower, .has_bound_row = false };
+    if (lower == upper) return .{ .kind = .fixed, .base = lower, .has_upper_bound = false };
     if (lower == -inf) {
-        if (upper == inf) return .{ .kind = .free_split, .base = 0.0, .has_bound_row = false };
-        return .{ .kind = .flipped, .base = upper, .has_bound_row = false };
+        if (upper == inf) return .{ .kind = .free_split, .base = 0.0, .has_upper_bound = false };
+        return .{ .kind = .flipped, .base = upper, .has_upper_bound = false };
     }
-    return .{ .kind = .shifted, .base = lower, .has_bound_row = upper != inf };
+    return .{ .kind = .shifted, .base = lower, .has_upper_bound = upper != inf };
 }
 
 fn classifyRow(lower: f64, upper: f64) RowClass {
@@ -175,14 +227,6 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
             m_std += 1;
         }
     }
-    const bound_row_base = m_std;
-    for (0..n_in) |j| {
-        if (col_class[j].has_bound_row) m_std += 1;
-    }
-    const range_row_base = m_std;
-    for (0..m_in) |i| {
-        if (row_class[i] == .range) m_std += 1;
-    }
 
     // Column counts per original column / slack.
     var n_std: usize = 0;
@@ -196,13 +240,8 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
     for (0..m_in) |i| {
         n_std += switch (row_class[i]) {
             .free, .equality => 0,
-            .lower, .upper => 1,
-            .range => 2,
+            .lower, .upper, .range => 1,
         };
-    }
-    // One slack column per column-bound row (x̂ + t = u − l).
-    for (0..n_in) |j| {
-        if (col_class[j].has_bound_row) n_std += 1;
     }
 
     const col_starts = try allocator.alloc(usize, n_std + 1);
@@ -213,6 +252,8 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
     errdefer allocator.free(row_origin);
     const cost = try allocator.alloc(f64, n_std);
     errdefer allocator.free(cost);
+    const upper = try allocator.alloc(f64, n_std);
+    errdefer allocator.free(upper);
     const rhs = try allocator.alloc(f64, m_std);
     errdefer allocator.free(rhs);
 
@@ -228,26 +269,11 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
             rhs[r] = bound - row_const[i];
         }
     }
-    var bound_cursor = bound_row_base;
-    for (0..n_in) |j| {
-        if (!col_class[j].has_bound_row) continue;
-        row_origin[bound_cursor] = null;
-        rhs[bound_cursor] = problem.col_upper[j] - col_class[j].base;
-        bound_cursor += 1;
-    }
-    var range_cursor = range_row_base;
-    for (0..m_in) |i| {
-        if (row_class[i] != .range) continue;
-        row_origin[range_cursor] = null;
-        rhs[range_cursor] = problem.row_upper[i] - problem.row_lower[i];
-        range_cursor += 1;
-    }
+    @memset(upper, inf);
 
     // Pass 1: column lengths (CSC entries per standard-form column).
     const lengths = col_starts[0..n_std];
     var cursor: usize = 0;
-    bound_cursor = bound_row_base;
-    range_cursor = range_row_base;
     for (0..n_in) |j| {
         const class = col_class[j];
         const entries = blk: {
@@ -261,11 +287,11 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
             .fixed => col_records[j] = .{ .kind = .fixed, .base = class.base, .primary = 0, .negative = null },
             .shifted, .flipped => {
                 col_records[j] = .{ .kind = class.kind, .base = class.base, .primary = cursor, .negative = null };
-                lengths[cursor] = entries + @intFromBool(class.has_bound_row);
+                lengths[cursor] = entries;
                 const dir: f64 = if (class.kind == .flipped) -1.0 else 1.0;
                 cost[cursor] = sense * problem.col_cost[j] * dir;
+                if (class.has_upper_bound) upper[cursor] = problem.col_upper[j] - class.base;
                 cursor += 1;
-                if (class.has_bound_row) bound_cursor += 1;
             },
             .free_split => {
                 col_records[j] = .{ .kind = .free_split, .base = 0.0, .primary = cursor, .negative = cursor + 1 };
@@ -286,22 +312,13 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
                 cursor += 1;
             },
             .range => {
-                lengths[cursor] = 2;
+                // aᵀx + s = u with 0 ≤ s ≤ u − l as a native upper bound.
+                lengths[cursor] = 1;
                 cost[cursor] = 0.0;
-                lengths[cursor + 1] = 1;
-                cost[cursor + 1] = 0.0;
-                cursor += 2;
-                range_cursor += 1;
+                upper[cursor] = problem.row_upper[i] - problem.row_lower[i];
+                cursor += 1;
             },
         }
-    }
-    // Column-bound slacks trail the row slacks, one per bounded column.
-    for (0..n_in) |j| {
-        if (!col_class[j].has_bound_row) continue;
-        lengths[cursor] = 1;
-        cost[cursor] = 0.0;
-        cursor += 1;
-        bound_cursor += 1;
     }
     std.debug.assert(cursor == n_std);
 
@@ -324,8 +341,6 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
     defer allocator.free(next);
     @memcpy(next, col_starts[0..n_std]);
 
-    bound_cursor = bound_row_base;
-    range_cursor = range_row_base;
     for (0..n_in) |j| {
         const class = col_class[j];
         if (class.kind == .fixed) continue;
@@ -342,12 +357,6 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
                 values[next[neg]] = -csc.values[k];
                 next[neg] += 1;
             }
-        }
-        if (class.has_bound_row) {
-            row_indices[next[primary]] = bound_cursor;
-            values[next[primary]] = 1.0;
-            next[primary] += 1;
-            bound_cursor += 1;
         }
     }
     // Slack columns live after all structural parts; recompute their start.
@@ -369,41 +378,23 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
                 next[slack_cursor] += 1;
                 slack_cursor += 1;
             },
-            .upper => {
+            .upper, .range => {
                 row_indices[next[slack_cursor]] = r;
                 values[next[slack_cursor]] = 1.0;
                 next[slack_cursor] += 1;
                 slack_cursor += 1;
-            },
-            .range => {
-                // Ax + s = u with 0 ≤ s ≤ u − l, so s also enters its bound row.
-                row_indices[next[slack_cursor]] = r;
-                values[next[slack_cursor]] = 1.0;
-                next[slack_cursor] += 1;
-                row_indices[next[slack_cursor]] = range_cursor;
-                values[next[slack_cursor]] = 1.0;
-                next[slack_cursor] += 1;
-                slack_cursor += 1;
-                row_indices[next[slack_cursor]] = range_cursor;
-                values[next[slack_cursor]] = 1.0;
-                next[slack_cursor] += 1;
-                slack_cursor += 1;
-                range_cursor += 1;
             },
         }
     }
-    // Column-bound slacks trail the row slacks, matching the pass-1 layout.
-    bound_cursor = bound_row_base;
-    for (0..n_in) |j| {
-        if (!col_class[j].has_bound_row) continue;
-        row_indices[next[slack_cursor]] = bound_cursor;
-        values[next[slack_cursor]] = 1.0;
-        next[slack_cursor] += 1;
-        slack_cursor += 1;
-        bound_cursor += 1;
-    }
     std.debug.assert(slack_cursor == n_std);
     std.debug.assert(std.mem.eql(usize, next, col_starts[1..]));
+
+    const row_scale = try allocator.alloc(f64, m_std);
+    errdefer allocator.free(row_scale);
+    const col_scale = try allocator.alloc(f64, n_std);
+    errdefer allocator.free(col_scale);
+    @memset(row_scale, 1.0);
+    @memset(col_scale, 1.0);
 
     return .{
         .allocator = allocator,
@@ -413,10 +404,18 @@ pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardF
         .row_indices = row_indices,
         .values = values,
         .cost = cost,
+        .upper = upper,
         .rhs = rhs,
+        .row_scale = row_scale,
+        .col_scale = col_scale,
         .col_records = col_records,
         .row_origin = row_origin,
         .row_to_std = row_to_std,
         .objective_shift = objective_shift,
     };
+}
+
+fn boundedReciprocal(value: f64) f64 {
+    if (value == 0.0) return 1.0;
+    return std.math.clamp(1.0 / value, 1e-8, 1e8);
 }

@@ -1,22 +1,14 @@
-//! Compile-time target policy for matrix hot paths.
+//! Compile-time target layout policy for matrix hot paths.
 //!
 //! All decisions are derived from Zig's `builtin` target description.  The
 //! resulting constants disappear during compilation, so sparse kernels do not
 //! pay for architecture checks or runtime dispatch inside their inner loops.
+//!
+//! Model-level numeric policy does not belong here: the shared LP coefficient
+//! floor lives in `foundation.tolerance`.
 
 const std = @import("std");
 const builtin = @import("builtin");
-
-/// Canonical LP coefficient floor shared by model-facing sparse kernels.
-/// Values at or below this magnitude are numerically zero before scaling;
-/// applying the decision in original coordinates keeps assembly, FTRAN,
-/// residual checks, and certificate validation structurally consistent.
-pub const model_coefficient_tolerance: f64 = 1e-9;
-
-/// Return whether a coefficient survives the shared model-dropping threshold.
-pub inline fn retainsModelCoefficient(value: f64) bool {
-    return @abs(value) > model_coefficient_tolerance;
-}
 
 /// Conservative cache-line size used for owning matrix workspaces.
 /// Mainstream x86, AArch64, ARM and RISC-V server cores use 64-byte lines.  A
@@ -68,10 +60,4 @@ pub fn unrollFactor() comptime_int {
 test "target policy exposes power-of-two cache and vector widths" {
     try std.testing.expect(std.math.isPowerOfTwo(cache_line_bytes));
     try std.testing.expect(std.math.isPowerOfTwo(vectorLanes(f64)));
-}
-
-test "model coefficient policy has a deterministic inclusive floor" {
-    try std.testing.expect(!retainsModelCoefficient(model_coefficient_tolerance));
-    try std.testing.expect(!retainsModelCoefficient(-model_coefficient_tolerance));
-    try std.testing.expect(retainsModelCoefficient(2.0 * model_coefficient_tolerance));
 }

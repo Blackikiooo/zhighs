@@ -44,8 +44,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (output != nnz or fields.next() != null) return error.InvalidBasisFile;
     starts[n] = @intCast(nnz);
-    const basis = zhighs.matrix.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
-    var lu = zhighs.matrix.SparseLU.init(allocator);
+    const basis = zhighs.nla.SparseBasisView{ .dimension = n, .starts = starts, .rows = rows, .values = values };
+    var lu = zhighs.nla.SparseLU.init(allocator);
     defer lu.deinit();
     const ordering = init.environ_map.get("ZHIGHS_ORDERING") orelse "auto";
     lu.ordering_strategy = if (std.mem.eql(u8, ordering, "auto"))
