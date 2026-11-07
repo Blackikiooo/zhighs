@@ -156,9 +156,6 @@ fn minimumDegreeImpl(comptime exact: bool, allocator: std.mem.Allocator, g: *con
     const old_to_new = try allocator.alloc(usize, n);
     errdefer allocator.free(old_to_new);
     var current_min: usize = 0;
-    var dbg_clique: usize = 0;
-    var dbg_deg: usize = 0;
-    defer std.debug.print("amd n={} clique_walk={} deg_walk={}\n", .{ n, dbg_clique, dbg_deg });
 
     for (0..n) |step| {
         while (current_min < n and head[current_min] < 0) current_min += 1;
@@ -179,7 +176,6 @@ fn minimumDegreeImpl(comptime exact: bool, allocator: std.mem.Allocator, g: *con
         }
         for (elists[pivot].items) |e| {
             if (element_dead[e]) continue;
-            dbg_clique += elen[e];
             for (pool.items[estart[e]..][0..elen[e]]) |v| {
                 if (alive[v] and mark[v] != tag) {
                     mark[v] = tag;
@@ -268,7 +264,6 @@ fn minimumDegreeImpl(comptime exact: bool, allocator: std.mem.Allocator, g: *con
                     if (alive[u] and mark[u] != tag) outside += 1;
                 }
                 var remainder: usize = 0;
-                dbg_deg += elists[v].items.len;
                 for (elists[v].items) |e| {
                     if (e == pivot) continue;
                     remainder += elen[e] - amd.overlap[e];

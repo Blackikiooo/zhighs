@@ -1,5 +1,11 @@
 //! Row and column scaling for canonical sparse matrices.
 //!
+//! Role: rescale coefficients without changing the sparsity pattern.
+//! Shape: m×n -> m×n (values change, structure does not).
+//! Owns: `apply*` / `remove*` mutate the caller's matrix in place; `compute*`
+//! only returns factors. This is the only module in `matrix/` that mutates
+//! values in place; every other transform returns a new matrix.
+//!
 //! Positive finite factors preserve the sparsity pattern. Checked mutation is
 //! transactional with respect to numerical errors: it preflights every result
 //! before changing the matrix, so failure never leaves partially scaled data.

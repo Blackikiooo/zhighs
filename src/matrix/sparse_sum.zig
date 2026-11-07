@@ -1,5 +1,9 @@
 //! Reusable sparse accumulator for row/column aggregation.
 //!
+//! Role: accumulate `y += alpha * x` on a sparse pattern.
+//! Shape: n -> n (one sparse vector), never a matrix.
+//! Owns: the dense scratch plus the active-index list; results are copied out.
+//!
 //! Dense values provide O(1) updates; negative zero tracks entries that
 //! cancel to exactly zero; active IDs keep extraction proportional to the
 //! touched set. This design matches HiGHS HighsSparseVectorSum.
@@ -77,7 +81,7 @@ pub fn SparseAccumulator(comptime Id: type) type {
             const active_bytes = std.math.mul(usize, touched_capacity, @sizeOf(Id)) catch return error.DimensionTooLarge;
             const active_offset = std.mem.alignForward(usize, dense_bytes, 4096) + 64;
             const storage_len = std.math.add(usize, active_offset, active_bytes) catch return error.DimensionTooLarge;
-            const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+            const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, storage_len);
             const dense_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr));
             const active_ptr: [*]Id = @ptrCast(@alignCast(storage.ptr + active_offset));
             const dense_values = dense_ptr[0..dimension];

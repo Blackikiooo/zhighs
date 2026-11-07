@@ -99,7 +99,7 @@ pub const Env = struct {
 
     /// Get an integer parameter value.  Returns `error.InvalidParameter`
     /// if the parameter does not exist or is not of integer type.
-    pub fn getIntParam(self: Self, name: []const u8) ModelError!i64 {
+    pub fn getIntParam(self: *const Self, name: []const u8) ModelError!i64 {
         const v = self.params.get(name) orelse return error.InvalidParameter;
         return switch (v) {
             .int => |i| i,
@@ -108,7 +108,7 @@ pub const Env = struct {
     }
 
     /// Get a double parameter value.
-    pub fn getDblParam(self: Self, name: []const u8) ModelError!f64 {
+    pub fn getDblParam(self: *const Self, name: []const u8) ModelError!f64 {
         const v = self.params.get(name) orelse return error.InvalidParameter;
         return switch (v) {
             .double => |d| d,
@@ -117,7 +117,7 @@ pub const Env = struct {
     }
 
     /// Get a string parameter value.
-    pub fn getStrParam(self: Self, name: []const u8) ModelError![]const u8 {
+    pub fn getStrParam(self: *const Self, name: []const u8) ModelError![]const u8 {
         const v = self.params.get(name) orelse return error.InvalidParameter;
         return switch (v) {
             .string => |s| s,
@@ -127,7 +127,7 @@ pub const Env = struct {
 
     // ── Logging helper ─────────────────────────────────────────────────
 
-    pub fn log(self: Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn log(self: *const Self, comptime fmt: []const u8, args: anytype) void {
         _ = self;
         std.debug.print(fmt ++ "\n", args);
     }
@@ -143,7 +143,7 @@ pub const Env = struct {
 
     /// Retrieve the last error message. Returns an empty string when no
     /// error has been recorded.
-    pub fn getErrorMessage(self: Self) []const u8 {
+    pub fn getErrorMessage(self: *const Self) []const u8 {
         return if (self.last_error) |e| e else "";
     }
 
@@ -151,7 +151,7 @@ pub const Env = struct {
 
     /// Write all current parameters to a file.
     /// Format: one `param_name value` per line.
-    pub fn writeParams(self: Self, filename: []const u8) ModelError!void {
+    pub fn writeParams(self: *const Self, filename: []const u8) ModelError!void {
         const file = std.fs.cwd().createFile(filename, .{}) catch return error.IoError;
         defer file.close();
         var it = self.params.iterator();

@@ -38,7 +38,7 @@ const Parser = struct {
         builder.configureLimits(options);
         builder.enableColumnTermStorage();
         builder.name = name;
-        return .{ .builder = builder, .variables = std.StringHashMap(usize).init(allocator), .control = types.ParseControl.init(options) };
+        return .{ .builder = builder, .variables = std.StringHashMap(usize).init(allocator), .control = types.ParseControl.init(&options) };
     }
 
     /// Release name indexes and all unfinished semantic state.
@@ -627,7 +627,8 @@ test "single lexer streams comments blank lines and compound section headers" {
 }
 
 test "LP name index releases all hash capacity before finalization" {
-    var parser = Parser.init(std.testing.allocator, "names", .{});
+    const test_options: types.ReadOptions = .{};
+    var parser = Parser.init(std.testing.allocator, "names", test_options);
     defer parser.deinit();
     _ = try parser.variable("alpha");
     _ = try parser.variable("beta");

@@ -33,7 +33,7 @@ const SimplexStats = @import("engine.zig").SimplexStats;
 /// Check interruption, deterministic work and wall-clock limits.
 ///
 /// Returns null when the solve may continue; this function does not charge work.
-pub fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus {
+pub fn controlledStop(self: *SimplexEngine, control: *const SolveControl) ?SolveStatus {
     if (control.interrupt_flag) |flag| {
         if (flag.load(.acquire)) return .interrupted;
     }
@@ -52,7 +52,7 @@ pub fn controlledStop(self: *SimplexEngine, control: SolveControl) ?SolveStatus 
 }
 
 /// Publish due callbacks/log events, then charge one attempted work unit.
-pub fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, phase: SolvePhase) ?SolveStatus {
+pub fn beginIteration(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl, phase: SolvePhase) ?SolveStatus {
     self.current_phase = phase;
     if (self.controlledStop(control)) |status| return status;
     const callback_due = control.iteration_callback != null and
@@ -76,7 +76,7 @@ pub fn beginIteration(self: *SimplexEngine, problem: problem_module.ProblemView,
 }
 
 /// Build an allocation-free scalar progress snapshot from current engine state.
-pub fn progressEvent(self: *const SimplexEngine, problem: problem_module.ProblemView, phase: SolvePhase) ProgressEventView {
+pub fn progressEvent(self: *const SimplexEngine, problem: *const problem_module.ProblemView, phase: SolvePhase) ProgressEventView {
     var primal_infeasibility: f64 = 0.0;
     var dual_infeasibility: f64 = 0.0;
     var current_objective = problem.objective_offset;
@@ -108,7 +108,7 @@ pub fn progressEvent(self: *const SimplexEngine, problem: problem_module.Problem
 }
 
 /// Bind caller trace buffers and initialize the optional wall-clock deadline.
-pub fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
+pub fn startSolveClock(self: *SimplexEngine, control: *const SolveControl) void {
     self.active_pivot_trace = control.pivot_trace;
     self.pivot_trace_count = 0;
     self.active_degeneracy_trace = control.degeneracy_trace;
@@ -132,7 +132,7 @@ pub fn startSolveClock(self: *SimplexEngine, control: SolveControl) void {
 }
 
 /// Reset per-solve statistics while preserving counters across recursive restarts.
-pub fn resetStatistics(self: *SimplexEngine, control: SolveControl) void {
+pub fn resetStatistics(self: *SimplexEngine, control: *const SolveControl) void {
     const saved_cold_restarts = .{
         self.stats.cold_restart_solves,
         self.stats.cold_restart_phase_one,

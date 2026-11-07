@@ -219,7 +219,7 @@ pub fn updatePrimalDevexFramework(
 /// reinversion required before an apparent optimum can be certified.
 /// Terminal statuses therefore refer to the original objective and a
 /// numerically checked basis, not merely an incrementally updated work state.
-pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solvePrimal(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     const saved_pricing_rule = self.pricing.rule;
@@ -276,11 +276,11 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
                 // well-tested legacy pricing with a clean cold start.
                 if (self.active_devex_strategy == .framework) {
                     self.stats.cold_restart_solves += 1;
-                    var legacy_control = control;
+                    var legacy_control = control.*;
                     legacy_control.initial_basis = null;
                     legacy_control.degeneracy_strategy = .baseline;
                     legacy_control.devex_strategy = .legacy;
-                    return self.solveProblem(problem, legacy_control);
+                    return self.solveProblem(problem, &legacy_control);
                 }
                 self.failure_site = .optimality_check;
             }
@@ -395,7 +395,7 @@ pub fn solvePrimal(self: *SimplexEngine, problem: problem_module.ProblemView, co
 /// Reduced costs include objective and column scaling, so pricing must use the
 /// smallest structural column scale to avoid rejecting a violation that would
 /// exceed tolerance after unscaling. Machine epsilon is the absolute floor.
-pub fn scaledDualTolerance(self: *const SimplexEngine, problem: problem_module.ProblemView) f64 {
+pub fn scaledDualTolerance(self: *const SimplexEngine, problem: *const problem_module.ProblemView) f64 {
     const basis = if (self.basis) |*value| value else return self.numerical.dual_tolerance;
     var minimum_column_scale: f64 = 1.0;
     for (basis.column_scale[0..problem.num_cols]) |scale| minimum_column_scale = @min(minimum_column_scale, scale);
@@ -487,7 +487,7 @@ pub fn choosePrimalEnteringWeightedTimed(
 
 /// Deterministic cold-start selector. Automatic mode remains opt-in until
 /// corpus timing establishes a benefit over the frozen primal baseline.
-pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_module.ProblemView) PhaseOneStrategy {
+pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: *const problem_module.ProblemView) PhaseOneStrategy {
     const basis = if (self.basis) |*value| value else return .primal;
     var primal_count: usize = 0;
     var primal_sum: f64 = 0.0;
@@ -560,17 +560,17 @@ pub fn chooseColdPhaseOneStrategy(self: *const SimplexEngine, problem: problem_m
 /// published directly: the logical starting epoch is restored and rerun with
 /// the baseline policy first. Success leaves artificials fixed at zero and
 /// prepares the surviving original/logical basis for Phase II.
-pub fn solvePhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solvePhaseOne(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     return solvePhaseOneGeneric(self, problem, control, false);
 }
 
 /// Cost-based Phase I from the retained basis (no artificial columns),
 /// mirroring HiGHS' warm primal Phase I after a dual exit.
-pub fn solveWarmPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solveWarmPhaseOne(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     return solvePhaseOneGeneric(self, problem, control, true);
 }
 
-fn solvePhaseOneGeneric(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl, comptime warm: bool) SolveStatus {
+fn solvePhaseOneGeneric(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl, comptime warm: bool) SolveStatus {
     self.reduced_costs_original = false;
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
@@ -799,8 +799,8 @@ fn solvePhaseOneGeneric(self: *SimplexEngine, problem: problem_module.ProblemVie
 /// no perturbed ordering state or reduced cost can escape to publication.
 pub fn restartPhaseOneWithoutPerturbation(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
-    control: SolveControl,
+    problem: *const problem_module.ProblemView,
+    control: *const SolveControl,
 ) SolveStatus {
     self.degeneracy.resetSolve();
     self.active_degeneracy_strategy = .baseline;
@@ -823,7 +823,7 @@ pub fn restartPhaseOneWithoutPerturbation(
 /// logical column is available. An artificial that remains basic denotes
 /// a rank-redundant row and is fixed at zero until presolve can remove that
 /// row explicitly.
-pub fn cleanupArtificialBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn cleanupArtificialBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const cleanup_started = self.statisticsTimestamp();
     defer {
         const elapsed = self.elapsedSince(cleanup_started);
@@ -864,7 +864,7 @@ pub fn cleanupArtificialBasis(self: *SimplexEngine, problem: problem_module.Prob
 /// the selected row- or column-oriented sparse representation. Logical and
 /// artificial reduced costs are written from their known singleton columns.
 /// A successful call resets the incremental reduced-cost update counter.
-pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputePhaseOneReducedCosts(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     self.reduced_costs_original = false;
     const artificial_begin = problem.num_cols + problem.num_rows;
@@ -926,7 +926,7 @@ fn deterministicUnit(index: usize, epoch: u64) f64 {
 /// `HEkkPrimal::phase1ComputeDual`: infeasible basics receive costs of
 /// +/-1 along their violation direction, a BTRAN forms the row duals, and
 /// the reduced costs are `-A^T y` with no artificial columns involved.
-pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     self.reduced_costs_original = false;
     @memset(basis.dual, 0.0);
@@ -991,7 +991,7 @@ pub fn recomputeWarmPhaseOneReducedCosts(self: *SimplexEngine, problem: problem_
 /// recomputation. Their maximum relative discrepancy is accumulated for
 /// diagnostics; large drift shortens the refresh period, while consistently
 /// small drift may relax it only up to the validated eight-pivot ceiling.
-pub fn recomputePhaseOneReducedCostsWithDrift(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputePhaseOneReducedCostsWithDrift(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = basis.reduced_cost.len;
     if (self.degeneracy.reduced_cost_snapshot.len < count) return .numerical_failure;

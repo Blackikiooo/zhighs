@@ -17,7 +17,7 @@ const ModelError = types.ModelError;
 const CallbackFunc = types.CallbackFunc;
 const Version = types.Version;
 
-pub fn version(self: Model) Version {
+pub fn version(self: *const Model) Version {
     _ = self;
     return Env.version();
 }
@@ -27,13 +27,13 @@ pub fn tuneModel(self: *Model) ModelError!void {
     return error.FeatureNotAvailable;
 }
 
-pub fn getTuneResult(self: Model, n: usize) ModelError!void {
+pub fn getTuneResult(self: *const Model, n: usize) ModelError!void {
     _ = self;
     _ = n;
     return error.FeatureNotAvailable;
 }
 
-pub fn getDblParamInfo(self: Model, name: []const u8, min_val: *f64, max_val: *f64, default_val: *f64) ModelError!void {
+pub fn getDblParamInfo(self: *const Model, name: []const u8, min_val: *f64, max_val: *f64, default_val: *f64) ModelError!void {
     _ = self;
     _ = name;
     _ = min_val;
@@ -42,7 +42,7 @@ pub fn getDblParamInfo(self: Model, name: []const u8, min_val: *f64, max_val: *f
     return error.FeatureNotAvailable;
 }
 
-pub fn getIntParamInfo(self: Model, name: []const u8, min_val: *i32, max_val: *i32, default_val: *i32) ModelError!void {
+pub fn getIntParamInfo(self: *const Model, name: []const u8, min_val: *i32, max_val: *i32, default_val: *i32) ModelError!void {
     _ = self;
     _ = name;
     _ = min_val;
@@ -51,7 +51,7 @@ pub fn getIntParamInfo(self: Model, name: []const u8, min_val: *i32, max_val: *i
     return error.FeatureNotAvailable;
 }
 
-pub fn getStrParamInfo(self: Model, name: []const u8) ModelError!struct { default: []const u8 } {
+pub fn getStrParamInfo(self: *const Model, name: []const u8) ModelError!struct { default: []const u8 } {
     _ = self;
     _ = name;
     return error.FeatureNotAvailable;
@@ -61,7 +61,7 @@ pub fn setIntParam(self: *Model, name: []const u8, value: i64) ModelError!void {
     try self.env.setIntParam(name, value);
 }
 
-pub fn getIntParam(self: Model, name: []const u8) ModelError!i64 {
+pub fn getIntParam(self: *const Model, name: []const u8) ModelError!i64 {
     return self.env.getIntParam(name);
 }
 
@@ -69,7 +69,7 @@ pub fn setDblParam(self: *Model, name: []const u8, value: f64) ModelError!void {
     try self.env.setDblParam(name, value);
 }
 
-pub fn getDblParam(self: Model, name: []const u8) ModelError!f64 {
+pub fn getDblParam(self: *const Model, name: []const u8) ModelError!f64 {
     return self.env.getDblParam(name);
 }
 
@@ -77,7 +77,7 @@ pub fn setStrParam(self: *Model, name: []const u8, value: []const u8) ModelError
     try self.env.setStrParam(name, value);
 }
 
-pub fn getStrParam(self: Model, name: []const u8) ModelError![]const u8 {
+pub fn getStrParam(self: *const Model, name: []const u8) ModelError![]const u8 {
     return self.env.getStrParam(name);
 }
 
@@ -97,15 +97,15 @@ pub fn resetParams(self: *Model) ModelError!void {
     try self.env.resetParams();
 }
 
-pub fn getErrormsg(self: Model) []const u8 {
+pub fn getErrormsg(self: *const Model) []const u8 {
     return self.env.getErrorMessage();
 }
 
-pub fn getEnv(self: Model) *Env {
+pub fn getEnv(self: *const Model) *Env {
     return self.env;
 }
 
-pub fn getAttrInfo(self: Model, name: []const u8) ?AttributeInfo {
+pub fn getAttrInfo(self: *const Model, name: []const u8) ?AttributeInfo {
     _ = self;
     return @import("attrs.zig").lookup(name);
 }
@@ -118,7 +118,7 @@ pub fn setLogCallbackFunc(self: *Model, callback: CallbackFunc, usrstate: ?*anyo
     self.env.setLogCallbackFunc(callback, usrstate);
 }
 
-pub fn getLogCallbackFunc(self: Model, usrstate: *?*anyopaque) ?CallbackFunc {
+pub fn getLogCallbackFunc(self: *const Model, usrstate: *?*anyopaque) ?CallbackFunc {
     usrstate.* = self.env.log_usrstate;
     return self.env.log_callback;
 }

@@ -12,7 +12,7 @@ const RowId = foundation.RowId;
 
 const check_tolerance = 1e-5;
 
-fn solveExpectOptimal(problem: lp.ProblemView) !ipm.Result {
+fn solveExpectOptimal(problem: *const lp.ProblemView) !ipm.Result {
     var result = try ipm.solve(std.testing.allocator, problem, .{});
     errdefer result.deinit();
     var dense = try ipm.solve(std.testing.allocator, problem, .{ .dense_normal = true });
@@ -44,13 +44,15 @@ fn oneColumnProblem(lower: f64, upper: f64, cost: f64, rhs: f64, storage: *[5]f6
 
 test "ipm handles all-fixed models and contradictory constant rows" {
     var storage: [5]f64 = undefined;
-    var result = try ipm.solve(std.testing.allocator, oneColumnProblem(2, 2, 3, 2, &storage), .{});
+    var fixed_problem = oneColumnProblem(2, 2, 3, 2, &storage);
+    var result = try ipm.solve(std.testing.allocator, &fixed_problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(10.0, result.objective_value, 1e-12);
     try std.testing.expectEqual(@as(f64, 2), result.primal[0]);
     try std.testing.expectEqual(@as(f64, 0), result.dual[0]);
-    var infeasible = try ipm.solve(std.testing.allocator, oneColumnProblem(2, 2, 3, 3, &storage), .{});
+    var infeasible_problem = oneColumnProblem(2, 2, 3, 3, &storage);
+    var infeasible = try ipm.solve(std.testing.allocator, &infeasible_problem, .{});
     defer infeasible.deinit();
     try std.testing.expectEqual(.infeasible, infeasible.status);
 }
@@ -59,18 +61,19 @@ test "ipm validates controls and obeys interruption time and work limits" {
     var storage: [5]f64 = undefined;
     const problem = oneColumnProblem(0, inf, 1, 2, &storage);
     const a = std.testing.allocator;
-    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, problem, .{ .step_fraction = 1 }));
-    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, problem, .{ .tolerances = .{ .regularization_growth = 1 } }));
-    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, problem, .{ .start_margin = std.math.nan(f64) }));
-    try std.testing.expectError(error.ClockRequired, ipm.solve(a, problem, .{ .time_limit_ns = 0 }));
+    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, &problem, .{ .step_fraction = 1 }));
+    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, &problem, .{ .tolerances = .{ .regularization_growth = 1 } }));
+    try std.testing.expectError(error.InvalidOptions, ipm.solve(a, &problem, .{ .start_margin = std.math.nan(f64) }));
+    try std.testing.expectError(error.ClockRequired, ipm.solve(a, &problem, .{ .time_limit_ns = 0 }));
     var flag = std.atomic.Value(bool).init(true);
-    var stopped = try ipm.solve(a, problem, .{ .interrupt_flag = &flag });
+    var stopped = try ipm.solve(a, &problem, .{ .interrupt_flag = &flag });
     defer stopped.deinit();
     try std.testing.expectEqual(.interrupted, stopped.status);
-    var work = try ipm.solve(a, problem, .{ .work_limit = 0 });
+    var work = try ipm.solve(a, &problem, .{ .work_limit = 0 });
     defer work.deinit();
     try std.testing.expectEqual(.work_limit, work.status);
-    var timed = try ipm.engine.solveWithStats(a, problem, .{ .time_limit_ns = 0 }, std.testing.io, null);
+    const timed_options: ipm.Options = .{ .time_limit_ns = 0 };
+    var timed = try ipm.engine.solveWithStats(a, &problem, &timed_options, std.testing.io, null);
     defer timed.deinit();
     try std.testing.expectEqual(.time_limit, timed.status);
 }
@@ -95,7 +98,7 @@ test "profile Cholesky matches dense solves with fill and multiple right hand si
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
-    var sf = try ipm.standard_form.build(a, problem);
+    var sf = try ipm.standard_form.build(a, &problem);
     defer sf.deinit();
     const graph_mod = @import("graph.zig");
     var g = try graph_mod.build(a, sf.num_rows, sf.col_starts, sf.row_indices);
@@ -157,7 +160,7 @@ test "ipm certifies primal infeasibility from a stalled residual" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
-    var result = try ipm.solve(std.testing.allocator, problem, .{});
+    var result = try ipm.solve(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(.infeasible, result.status);
 }
@@ -179,14 +182,15 @@ test "ipm certifies unboundedness along an escaping ray" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
-    var result = try ipm.solve(std.testing.allocator, problem, .{});
+    var result = try ipm.solve(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(.unbounded, result.status);
 }
 
 fn allocationProbe(a: std.mem.Allocator) !void {
     var storage: [5]f64 = undefined;
-    var result = try ipm.solve(a, oneColumnProblem(0, 5, 2, 1, &storage), .{});
+    var work_problem = oneColumnProblem(0, 5, 2, 1, &storage);
+    var result = try ipm.solve(a, &work_problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
 }
@@ -218,7 +222,7 @@ test "ipm solves a bounded max LP to its vertex optimum" {
         .objective_sense = .maximize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(10.0 / 3.0, result.objective_value, check_tolerance);
@@ -248,7 +252,7 @@ test "ipm solves an equality-constrained min LP" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(3.0, result.objective_value, check_tolerance);
@@ -278,7 +282,7 @@ test "ipm handles column upper bounds through bound rows" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(1.0, result.objective_value, check_tolerance);
@@ -307,7 +311,7 @@ test "ipm handles range rows" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(1.0, result.objective_value, check_tolerance);
@@ -337,7 +341,7 @@ test "ipm handles a free variable and objective offset" {
         .objective_sense = .minimize,
         .objective_offset = 10.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(15.0, result.objective_value, check_tolerance);
@@ -366,7 +370,7 @@ test "ipm substitutes fixed columns" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     try std.testing.expectApproxEqAbs(7.0, result.objective_value, check_tolerance);
@@ -397,7 +401,7 @@ test "ipm duals and reduced costs satisfy stationarity" {
         .objective_sense = .maximize,
         .objective_offset = 0.0,
     };
-    var result = try solveExpectOptimal(view);
+    var result = try solveExpectOptimal(&view);
     defer result.deinit();
     try std.testing.expectEqual(.optimal, result.status);
     // Both rows bind at the optimum, so max-convention row duals are ≥ 0.
@@ -431,7 +435,7 @@ test "ipm reports invalid_model for inconsistent bounds" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try ipm.solve(std.testing.allocator, view, .{});
+    var result = try ipm.solve(std.testing.allocator, &view, .{});
     defer result.deinit();
     try std.testing.expectEqual(.invalid_model, result.status);
 }
@@ -457,7 +461,7 @@ test "ipm reports iteration_limit when the budget is zero" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try ipm.solve(std.testing.allocator, view, .{ .max_iterations = 0 });
+    var result = try ipm.solve(std.testing.allocator, &view, .{ .max_iterations = 0 });
     defer result.deinit();
     try std.testing.expectEqual(.iteration_limit, result.status);
 }

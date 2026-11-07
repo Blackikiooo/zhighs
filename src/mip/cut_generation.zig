@@ -20,7 +20,7 @@ pub const CutGeneration = struct {
     relaxation: CutRelaxation,
     separator: CoverSeparator,
 
-    pub fn init(allocator: std.mem.Allocator, problem: solver.LpProblemView) std.mem.Allocator.Error!CutGeneration {
+    pub fn init(allocator: std.mem.Allocator, problem: *const solver.LpProblemView) std.mem.Allocator.Error!CutGeneration {
         var pool = CutPool.init(allocator, problem.num_cols) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable,
@@ -105,7 +105,7 @@ test "cut generation synchronizes a separated cover into the LP view" {
         .objective_sense = .maximize,
         .objective_offset = 0.0,
     };
-    var generation = try CutGeneration.init(std.testing.allocator, problem);
+    var generation = try CutGeneration.init(std.testing.allocator, &problem);
     defer generation.deinit();
     const round = try generation.separateRoot(&.{ .binary, .binary }, &.{ 1.0, 2.0 / 3.0 }, 1e-6, 8);
     try std.testing.expectEqual(@as(usize, 1), round.cuts_added);

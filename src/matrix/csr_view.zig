@@ -1,5 +1,11 @@
 //! Rebuildable compressed sparse row (CSR) cache and borrowed views.
 //!
+//! Role: derive a row-major view of the authoritative CSC.
+//! Shape: m×n CSC -> m×n CSR (same matrix, transposed storage order).
+//! Owns: `CsrCache` owns one packed block; `CsrView` / `CsrBuffers` borrow.
+//! This is not a shape change (see `transpose.zig` for m×n -> n×m); the
+//! authoritative matrix and its revision live in `store.zig`.
+//!
 //! CSC remains the only authoritative matrix representation. CSR exists solely
 //! to accelerate row-oriented algorithms and may be discarded whenever the
 //! model revision changes. Keeping this ownership direction explicit prevents
@@ -48,7 +54,7 @@ pub const CsrView = struct {
     }
 
     /// Full structural validation for parser, conversion, and test boundaries.
-    pub fn validate(self: Self) MatrixError!void {
+    pub fn validate(self: *const Self) MatrixError!void {
         try csc.validateDimensions(self.num_rows, self.num_cols);
         if (self.num_rows == std.math.maxInt(usize)) return MatrixError.DimensionTooLarge;
         if (self.row_starts.len != self.num_rows + 1) return MatrixError.InvalidRowStarts;
@@ -77,7 +83,7 @@ pub const CsrView = struct {
     }
 
     /// Returns one checked row as the common canonical sparse-vector view.
-    pub fn row(self: Self, row_id: RowId) csc.MatrixError!sparse_vector.SparseVectorView(ColId) {
+    pub fn row(self: *const Self, row_id: RowId) csc.MatrixError!sparse_vector.SparseVectorView(ColId) {
         const row_index = row_id.toUsize();
         if (row_index >= self.num_rows) return error.IndexOutOfBounds;
         return self.rowAssumeValid(row_index);
@@ -92,14 +98,14 @@ pub const CsrView = struct {
 
     /// CSR-native y = A*x. Each output row is an independent contiguous dot
     /// product, avoiding the random output scatter required by CSC.
-    pub fn multiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn multiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplyAssumeValid(x, y);
     }
 
     /// Trusted CSR `y = A*x` kernel. Each output is a contiguous row dot
     /// product, and `y` is overwritten rather than accumulated.
-    pub noinline fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub noinline fn multiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
         const ci = self.col_indices;
@@ -117,13 +123,13 @@ pub const CsrView = struct {
 
     /// CSR-native y = transpose(A)*x. CSC is normally faster for this direction;
     /// this API avoids a format conversion when only CSR is available.
-    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) csc.MatrixError!void {
+    pub fn transposeMultiply(self: *const Self, x: []const f64, y: []f64) csc.MatrixError!void {
         if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
         self.transposeMultiplyAssumeValid(x, y);
     }
 
     /// Trusted `y = A^T*x` scatter kernel. Clears `y` before accumulating rows.
-    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub fn transposeMultiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         const nrow = self.num_rows;
         const rs = self.row_starts;
         const ci = self.col_indices;
@@ -162,8 +168,8 @@ pub const CsrBuffers = struct {
         const indices_bytes = std.math.mul(usize, nnz, @sizeOf(ColId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const cursor_bytes = std.math.mul(usize, num_rows, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, memory.lineOffsets(4)) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
         const starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
         const indices_ptr: [*]ColId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
         const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
@@ -294,8 +300,8 @@ pub const CsrCache = struct {
         const indices_bytes = std.math.mul(usize, entries_capacity, @sizeOf(ColId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, entries_capacity, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const cursor_bytes = std.math.mul(usize, cursor_capacity, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, indices_bytes, values_bytes, cursor_bytes }, memory.lineOffsets(4)) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
         if (self.storage) |old| allocator.free(old);
         self.storage = storage;
         const starts_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
@@ -309,7 +315,7 @@ pub const CsrCache = struct {
     }
 
     /// Checked access for component and model boundaries.
-    pub fn view(self: Self, current_revision: u64) csc.MatrixError!CsrView {
+    pub fn view(self: *const Self, current_revision: u64) csc.MatrixError!CsrView {
         if (!self.isCurrent(current_revision)) return error.StaleView;
         return self.viewAssumeCurrent();
     }
@@ -326,7 +332,7 @@ pub const CsrCache = struct {
     }
 
     /// Combines revision and row-bound checks for occasional row access.
-    pub fn row(self: Self, current_revision: u64, row_id: RowId) csc.MatrixError!sparse_vector.SparseVectorView(ColId) {
+    pub fn row(self: *const Self, current_revision: u64, row_id: RowId) csc.MatrixError!sparse_vector.SparseVectorView(ColId) {
         const current_view = try self.view(current_revision);
         return current_view.row(row_id);
     }
@@ -359,7 +365,7 @@ pub fn fillFromCscAssumeValid(matrix: csc.CscMatrix, row_starts: []foundation.HU
     for (0..matrix.num_rows) |row_index| row_starts[row_index + 1] += row_starts[row_index];
     const next = row_cursor_scratch[0..matrix.num_rows];
     @memcpy(next, row_starts[0..matrix.num_rows]);
-    if (matrix.compact_col_starts) |starts|
+    if (matrix.compactColStarts()) |starts|
         return fillEntries(foundation.HUInt, matrix.num_cols, starts, matrix.row_indices, matrix.values, next, col_indices, values);
     return fillEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, col_indices, values);
 }

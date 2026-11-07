@@ -44,7 +44,7 @@ const PriceDensityCounts = struct {
 
 fn priceStructuralColumns(
     comptime filter_small_coefficients: bool,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     dual: []const f64,
     scaled_coefficients: []const f64,
     row_ap: *simplex_nla_module.Vector,
@@ -86,7 +86,7 @@ fn priceStructuralColumns(
 /// dual-control state machine, and then delegates all iteration decisions to
 /// `solveDualLoop`. Unlike `solveDualWithCostShifts`, it never constructs a
 /// perturbed auxiliary objective.
-pub fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solveDual(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     _ = self.dual_work.bindPhaseTwo(basis, problem.num_cols + problem.num_rows) catch return .numerical_failure;
     self.dual_control.enterPhase(.phase_two);
@@ -96,7 +96,7 @@ pub fn solveDual(self: *SimplexEngine, problem: problem_module.ProblemView, cont
 /// Build a dual-feasible cold start using the same high-level mechanism as
 /// HiGHS: flip avoidable boxed infeasibilities and shift one-sided costs.
 /// Free-variable infeasibilities remain the responsibility of dual Phase I.
-pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     self.reduced_costs_original = false;
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = problem.num_cols + problem.num_rows;
@@ -131,7 +131,7 @@ pub fn solveDualWithCostShifts(self: *SimplexEngine, problem: problem_module.Pro
 /// HiGHS also rebuilds from a still-valid inverse for phase decisions.
 fn rebuildDualState(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     use_work_costs: bool,
     refactor_reason: ?RebuildReason,
     correct_dual: bool,
@@ -180,7 +180,7 @@ fn rebuildDualState(
 /// same tiny squared-dual-error case as an effectively feasible basis, while
 /// `near_optimal` identifies starts for which cleanup should be inexpensive.
 /// Returns `false` only when no basis is installed.
-fn assessInitialDualState(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+fn assessInitialDualState(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     const count = problem.num_cols + problem.num_rows;
     const dual_stats = self.dual_work.dualInfeasibilityStats(
@@ -223,8 +223,8 @@ fn assessInitialDualState(self: *SimplexEngine, problem: problem_module.ProblemV
 /// only reports a terminal status after classifying that original problem.
 fn solveDualLoop(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
-    control: SolveControl,
+    problem: *const problem_module.ProblemView,
+    control: *const SolveControl,
     initial_use_work_costs: bool,
 ) SolveStatus {
     var use_work_costs = initial_use_work_costs;
@@ -647,7 +647,7 @@ fn solveDualLoop(
 /// original bounds, not of the shifted objective.
 pub fn buildAndValidateInfeasibilityRay(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     leaving: pricing_module.DualLeavingChoice,
 ) bool {
     self.infeasibility_certificate_failure = .none;
@@ -702,7 +702,7 @@ fn normalizeInfeasibilityRay(ray: []f64, zero_tolerance: f64) bool {
 /// orientation.
 pub fn buildAndValidateFullDualInfeasibilityRay(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
 ) bool {
     const basis = if (self.basis) |*value| value else {
         self.infeasibility_certificate_failure = .invalid_workspace;
@@ -728,7 +728,7 @@ pub fn buildAndValidateFullDualInfeasibilityRay(
 /// Validate a filled infeasibility ray against the original bounds, rows,
 /// columns and objective-free gap. The ray lives in `basis.infeasibility_ray`
 /// in original coordinates.
-pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.ProblemView, apply_coefficient_floor: bool) bool {
+pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: *const problem_module.ProblemView, apply_coefficient_floor: bool) bool {
     const basis = if (self.basis) |*value| value else {
         self.infeasibility_certificate_failure = .invalid_workspace;
         return false;
@@ -864,7 +864,7 @@ pub fn validateInfeasibilityRay(self: *SimplexEngine, problem: problem_module.Pr
 /// infeasibility objective, while deterministic perturbed costs remove
 /// ratio ties. The borrowed matrix is never copied and every iteration
 /// uses engine-owned work arrays.
-pub fn solveDualPhaseOne(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn solveDualPhaseOne(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     self.reduced_costs_original = false;
     self.dual_control.enterPhase(.phase_one);
     const phase_started = self.statisticsTimestamp();
@@ -1379,7 +1379,7 @@ pub fn recordDualPhaseOneNoEntering(
 /// Logical columns receive only a tiny perturbation. Original costs and bounds
 /// remain available in `DualPhaseOneWorkspace`, so cleanup can restore the
 /// exact LP objective without reallocating or reconstructing the basis.
-pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
+pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: *const problem_module.ProblemView) void {
     const basis = if (self.basis) |*value| value else return;
     const workspace = &self.dual_work;
     const original_count = problem.num_cols + problem.num_rows;
@@ -1448,7 +1448,7 @@ pub fn buildDualPhaseOneCosts(self: *SimplexEngine, problem: problem_module.Prob
 /// This materializes the original scaled objective in the persistent work
 /// arrays before the unperturbed dual/feasibility assessment. Logical costs
 /// are zero in the original LP.
-fn initializeUnperturbedDualCosts(self: *SimplexEngine, problem: problem_module.ProblemView) void {
+fn initializeUnperturbedDualCosts(self: *SimplexEngine, problem: *const problem_module.ProblemView) void {
     const basis = if (self.basis) |*value| value else return;
     const workspace = &self.dual_work;
     const original_count = problem.num_cols + problem.num_rows;
@@ -1482,7 +1482,7 @@ fn deterministicUnit(column: usize, epoch: u64) f64 {
 /// so dual pivots can restore primal feasibility without discarding the
 /// imported basis or factorization. The original objective is restored by
 /// the caller before entering Phase II.
-pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
     const phase_started = self.statisticsTimestamp();
     const iteration_started = self.iterations;
     defer self.recordPhaseElapsed(.dual_feasibility_repair, phase_started);
@@ -1576,7 +1576,7 @@ pub fn repairWarmBasisWithDual(self: *SimplexEngine, problem: problem_module.Pro
 /// for sufficiently sparse BTRAN results; otherwise the column representation
 /// is scanned. On success the iteration workspace's `row_ep`, `row_ap`, pack,
 /// and `dual_row_index` describe the same leaving row.
-pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.ProblemView, leaving_row: u32) SolveStatus {
+pub fn computeDualTableauRow(self: *SimplexEngine, problem: *const problem_module.ProblemView, leaving_row: u32) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     const row: usize = @intCast(leaving_row);
@@ -1717,7 +1717,7 @@ pub fn computeDualTableauRow(self: *SimplexEngine, problem: problem_module.Probl
 /// value was below one quarter of the exact value. Overestimates are accepted.
 fn chooseDualLeavingWithExactDseValidation(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     leaving_choice: *?pricing_module.DualLeavingChoice,
 ) SolveStatus {
     leaving_choice.* = null;
@@ -1817,7 +1817,7 @@ test "HiGHS CHUZR rejects an underestimated DSE weight and reprices" {
 /// ratio test; the read-only pivotal-row pack remains intact. The entering-column FTRAN immediately following BFRT owns the
 /// iteration's residual/reinversion guard; repeating a full basis product here
 /// made every accepted flip batch pay for a second validation absent in HiGHS.
-pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView, flip_count: usize) SolveStatus {
+pub fn applyBoundFlips(self: *SimplexEngine, problem: *const problem_module.ProblemView, flip_count: usize) SolveStatus {
     if (flip_count == 0) return .optimal;
     self.stats.bound_flips += flip_count;
     self.stats.bound_flip_batches += 1;
@@ -1864,7 +1864,7 @@ pub fn applyBoundFlips(self: *SimplexEngine, problem: problem_module.ProblemView
 /// Check the aggregate solve against the current basis before any flip is
 /// committed. The same normwise backward-error scale used by entering
 /// FTRAN protects long FT chains without adding another solve.
-pub fn boundFlipResidualAcceptable(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+pub fn boundFlipResidualAcceptable(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     @memcpy(basis.pivot_direction, basis.residual_work);
     for (basis.basic_margin, basis.residual_work) |*magnitude, rhs| magnitude.* = @abs(rhs);
@@ -1888,7 +1888,7 @@ pub fn boundFlipResidualAcceptable(self: *SimplexEngine, problem: problem_module
 /// iteration-owned BFRT vector, retaining unique producer support.
 pub fn accumulateBoundFlipRhs(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     flip_count: usize,
 ) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
@@ -1944,7 +1944,7 @@ pub fn accumulateBoundFlipRhs(
 /// dual step produced by the ratio test, not a recomputed `rc/alpha` ratio.
 pub fn updateReducedCostsAfterDualPivot(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     entering_col: usize,
     leaving_row: u32,
     zero_dual_step: bool,

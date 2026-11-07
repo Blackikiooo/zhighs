@@ -1,5 +1,10 @@
 //! Canonical row and column extraction from CSC matrices.
 //!
+//! Role: select a submatrix (shrink only).
+//! Shape: m×n -> m×k (columns), k×n (rows), or m×(to-from) (column range).
+//! Owns: `extract*` allocates; `...Into` reuses `CscTransformBuffers`.
+//! Use `edit.zig` to grow the matrix; use `permutation.zig` to reorder it.
+//!
 //! Selected IDs must be strictly increasing. This contract makes the output
 //! ordering deterministic and lets extraction preserve canonical order without
 //! sorting or hash tables.

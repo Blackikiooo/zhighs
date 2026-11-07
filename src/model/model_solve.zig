@@ -172,7 +172,7 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
             .integer, .semiint => .discrete,
         };
         presolve_blk: {
-            var pipe = presolve.PresolvePipeline.initMip(self.allocator, relaxation, nature) catch break :presolve_blk;
+            var pipe = presolve.PresolvePipeline.initMip(self.allocator, &relaxation, nature) catch break :presolve_blk;
             if (!pipe.wasApplied()) {
                 pipe.deinit();
                 break :presolve_blk;
@@ -204,7 +204,8 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
     const time_limit_seconds = self.env.getDblParam("TimeLimit") catch std.math.inf(f64);
     const work_limit_value = self.env.getDblParam("WorkLimit") catch std.math.inf(f64);
     var callback_bridge = SimplexCallbackBridge{ .model = self };
-    var result = mip.solve(self.allocator, .{ .relaxation = solve_problem, .integrality = solve_integrality }, .{
+    const mip_problem: mip.ProblemView = .{ .relaxation = solve_problem, .integrality = solve_integrality };
+    const mip_control: mip.SolveControl = .{
         .node_limit = nonnegativeLimit(node_limit_value),
         .solution_limit = nonnegativeLimit(solution_limit_value),
         .integer_tolerance = self.env.getDblParam("FeasibilityTol") catch 1e-6,
@@ -219,7 +220,8 @@ fn solveMixedIntegerLinear(self: *Model, linear: *const @import("linear_model.zi
             .iteration_callback = if (self.env.callback != null) SimplexCallbackBridge.iteration else null,
             .callback_user_data = if (self.env.callback != null) &callback_bridge else null,
         },
-    }) catch return error.OutOfMemory;
+    };
+    var result = mip.solve(self.allocator, &mip_problem, mip_control) catch return error.OutOfMemory;
     defer result.deinit();
 
     if (pipeline) |*pipe| {
@@ -392,7 +394,7 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
     if ((self.env.getIntParam("Method") catch -1) == 2) {
         const requested_bar_limit = self.env.getIntParam("BarIterLimit") catch std.math.maxInt(i64);
         const bar_limit = if (requested_bar_limit == std.math.maxInt(i64)) 100 else nonnegativeLimit(requested_bar_limit);
-        return solveInteriorPoint(self, problem, .{
+        return solveInteriorPoint(self, &problem, .{
             .max_iterations = @min(max_iterations, bar_limit),
             .time_limit_ns = time_limit_ns,
             .work_limit = work_limit,
@@ -439,7 +441,7 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
         .log_user_data = if (output_enabled and self.env.log_callback != null) &callback_bridge else null,
         .log_interval_work = log_interval,
     };
-    const solve_status = self.lp_session.solve(problem, control, .{
+    const solve_status = self.lp_session.solve(&problem, control, .{
         .structure = self.revisions.structure,
         .matrix_values = self.revisions.matrix_values,
         .bounds = self.revisions.bounds,
@@ -451,7 +453,7 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
     self.iter_count = std.math.cast(i64, self.lp_session.engine.iterations) orelse std.math.maxInt(i64);
     switch (solve_status) {
         .optimal => {
-            const result_view = self.lp_session.resultView(problem, solve_status) orelse {
+            const result_view = self.lp_session.resultView(&problem, solve_status) orelse {
                 self.status = .numeric;
                 self.clearPublishedResult();
                 return;
@@ -461,13 +463,13 @@ fn solveLinearView(self: *Model, linear: compiled_model_view_module.CompiledLine
                 self.clearPublishedResult();
                 return;
             }
-            publishLpSolution(self, problem, result_view) catch |err| {
+            publishLpSolution(self, &problem, result_view) catch |err| {
                 self.status = .numeric;
                 return err;
             };
         },
         .infeasible, .unbounded => {
-            const result_view = self.lp_session.resultView(problem, solve_status) orelse {
+            const result_view = self.lp_session.resultView(&problem, solve_status) orelse {
                 self.status = .numeric;
                 self.clearPublishedResult();
                 return;
@@ -499,8 +501,8 @@ fn barrierIteration(iteration: usize, context: ?*anyopaque) bool {
     return self.interrupted.load(.acquire);
 }
 
-fn solveInteriorPoint(self: *Model, problem: solver.LpProblemView, options: ipm.Options) ModelError!void {
-    var result = ipm.engine.solveWithStats(self.allocator, problem, options, std.Io.Threaded.global_single_threaded.io(), null) catch |err| {
+fn solveInteriorPoint(self: *Model, problem: *const solver.LpProblemView, options: ipm.Options) ModelError!void {
+    var result = ipm.engine.solveWithStats(self.allocator, problem, &options, std.Io.Threaded.global_single_threaded.io(), null) catch |err| {
         self.clearPublishedResult();
         self.status = .numeric;
         return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidArgument;
@@ -589,7 +591,7 @@ fn publishLpCertificate(
 /// Copy the transient engine result exactly once into stable public model
 /// attributes. All allocations complete before the previous solution is
 /// released, so an allocation failure cannot partially publish a solve.
-fn publishLpSolution(self: *Model, problem: solver.LpProblemView, result: solver.LpSolveResultView) ModelError!void {
+fn publishLpSolution(self: *Model, problem: *const solver.LpProblemView, result: solver.LpSolveResultView) ModelError!void {
     const allocator = self.allocator;
     const primal = allocator.alloc(f64, problem.num_cols) catch return error.OutOfMemory;
     errdefer allocator.free(primal);
@@ -722,7 +724,7 @@ pub fn copy(self: *Model, new_name: []const u8) ModelError!Model {
 }
 
 /// Return whether the model contains any non-continuous variable.
-pub fn isMip(self: Model) bool {
+pub fn isMip(self: *const Model) bool {
     for (self.var_type) |vt| {
         if (vt != .continuous) return true;
     }

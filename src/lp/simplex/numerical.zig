@@ -75,7 +75,7 @@ pub const NumericalState = struct {
     }
 
     /// True when the factorization must be rebuilt before the next FTran/BTran.
-    pub fn needsRefactor(self: NumericalState) bool {
+    pub fn needsRefactor(self: *const NumericalState) bool {
         return self.numerical_warning or self.update_count >= self.max_update_count;
     }
 
@@ -94,12 +94,12 @@ pub const NumericalState = struct {
     }
 
     /// Check primal feasibility of a violation.
-    pub fn isPrimalFeasible(self: NumericalState, violation: f64) bool {
+    pub fn isPrimalFeasible(self: *const NumericalState, violation: f64) bool {
         return violation <= self.primal_tolerance;
     }
 
     /// Check dual feasibility of a violation.
-    pub fn isDualFeasible(self: NumericalState, violation: f64) bool {
+    pub fn isDualFeasible(self: *const NumericalState, violation: f64) bool {
         return violation <= self.dual_tolerance;
     }
 

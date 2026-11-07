@@ -1,5 +1,11 @@
 //! Explicit CSC transpose construction.
 //!
+//! Role: change the matrix shape.
+//! Shape: m×n -> n×m (entry (i, j) becomes (j, i)).
+//! Owns: `transpose*` returns an owning `CscMatrix`; `...Into` writes
+//! `TransposeBuffers` and returns a borrowed `CscView`.
+//! Distinct from `permutation.zig`, which keeps m×n and only relabels indices.
+//!
 //! The conversion uses counting plus prefix sums. It is O(rows + nnz), and the
 //! output is canonical without sorting because source columns are visited in
 //! increasing order.
@@ -31,8 +37,8 @@ pub const TransposeBuffers = struct {
         const rows_bytes = std.math.mul(usize, nnz, @sizeOf(foundation.RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const cursor_bytes = std.math.mul(usize, num_cols, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(5, .{ starts_bytes, compact_bytes, rows_bytes, values_bytes, cursor_bytes }, .{ 0, 64, 128, 192, 256 }) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const layout = memory.computePageColoredLayout(5, .{ starts_bytes, compact_bytes, rows_bytes, values_bytes, cursor_bytes }, memory.lineOffsets(5)) catch return error.DimensionTooLarge;
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
         const starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
         const compact_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
         const rows_ptr: [*]foundation.RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
@@ -85,7 +91,7 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
     const rows_offset = layout.offsets[1];
     const values_offset = layout.offsets[2];
     const storage_len = layout.total;
-    const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+    const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, storage_len);
     errdefer allocator.free(storage);
     const starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. new_num_cols + 1];
     const rows = @as([*]foundation.RowId, @ptrCast(@alignCast(storage.ptr + rows_offset)))[0..nnz];
@@ -100,7 +106,7 @@ pub fn transposeLeanAssumeValid(allocator: std.mem.Allocator, matrix: csc.CscMat
     for (matrix.row_indices) |row_id| starts[row_id.toUsize() + 1] += 1;
     for (0..new_num_cols) |row| starts[row + 1] += starts[row];
     for (cursor, starts[0..new_num_cols]) |*dest, s| dest.* = @intCast(s);
-    if (matrix.compact_col_starts) |source_starts| {
+    if (matrix.compactColStarts()) |source_starts| {
         fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, cursor, rows, out_values);
     } else {
         fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, cursor, rows, out_values);
@@ -163,7 +169,7 @@ pub fn transposeLeanAssumeValidCompact(
         },
     ) catch return error.DimensionTooLarge;
 
-    const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+    const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
     errdefer allocator.free(storage);
 
     const starts = @as(
@@ -208,7 +214,7 @@ pub fn transposeLeanAssumeValidCompact(
     }
     starts[new_num_cols] = @intCast(running);
 
-    if (matrix.compact_col_starts) |source_starts| {
+    if (matrix.compactColStarts()) |source_starts| {
         fillTransposeEntries(
             foundation.HUInt,
             matrix.num_cols,
@@ -254,7 +260,7 @@ pub fn transposeIntoAssumeValid(matrix: csc.CscMatrix, starts: []usize, rows: []
     for (0..matrix.num_rows) |row| starts[row + 1] += starts[row];
     const next = cursor_scratch[0..matrix.num_rows];
     for (next, starts[0..matrix.num_rows]) |*destination, start| destination.* = @intCast(start);
-    if (matrix.compact_col_starts) |source_starts|
+    if (matrix.compactColStarts()) |source_starts|
         return fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, next, rows, values);
     return fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, rows, values);
 }
@@ -285,7 +291,7 @@ pub fn transposeIntoAssumeValidCompact(matrix: csc.CscMatrix, starts_compact: []
     // Convert HUInt → usize for output
     for (starts_out[0 .. matrix.num_rows + 1], starts_compact[0 .. matrix.num_rows + 1]) |*dest, src| dest.* = @intCast(src);
 
-    if (matrix.compact_col_starts) |source_starts|
+    if (matrix.compactColStarts()) |source_starts|
         return fillTransposeEntries(foundation.HUInt, matrix.num_cols, source_starts, matrix.row_indices, matrix.values, next, rows, values);
     return fillTransposeEntries(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, next, rows, values);
 }
@@ -345,7 +351,7 @@ test "transposing twice reproduces canonical CSC exactly" {
     defer original.deinit(std.testing.allocator);
     var once = try transposeAssumeValid(std.testing.allocator, original);
     defer once.deinit(std.testing.allocator);
-    try std.testing.expect(once.compact_col_starts != null);
+    try std.testing.expect(once.compactColStarts() != null);
     var twice = try transposeAssumeValid(std.testing.allocator, once);
     defer twice.deinit(std.testing.allocator);
 
@@ -364,7 +370,7 @@ test "transposeLean handles odd nnz" {
     defer result.deinit(std.testing.allocator);
     try result.validate();
     try std.testing.expectEqual(@as(usize, 4), result.nnz());
-    try std.testing.expect(result.compact_col_starts == null);
+    try std.testing.expect(result.compactColStarts() == null);
     // Verify values survived: (1,0)=3→(0,1)=3, (0,1)=4→(1,0)=4, (2,1)=5→(1,2)=5, (1,2)=6→(2,1)=6
     var expected_starts = [_]usize{ 0, 1, 3, 4 };
     try std.testing.expectEqualSlices(usize, &expected_starts, result.col_starts);
@@ -380,7 +386,7 @@ test "transposeLean handles empty matrix (zero nnz)" {
     defer result.deinit(std.testing.allocator);
     try result.validate();
     try std.testing.expectEqual(@as(usize, 0), result.nnz());
-    try std.testing.expect(result.compact_col_starts == null);
+    try std.testing.expect(result.compactColStarts() == null);
     // Transposed empty 2×3 → 3×2, all col_starts are zero
     try std.testing.expectEqualSlices(usize, &.{ 0, 0, 0 }, result.col_starts);
 }
@@ -395,5 +401,5 @@ test "transposeLean handles single-column odd-nnz matrix" {
     defer result.deinit(std.testing.allocator);
     try result.validate();
     try std.testing.expectEqual(@as(usize, 3), result.nnz());
-    try std.testing.expect(result.compact_col_starts == null);
+    try std.testing.expect(result.compactColStarts() == null);
 }

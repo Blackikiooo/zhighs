@@ -32,7 +32,7 @@ const Activity = struct {
         }
     }
 
-    fn excluding(self: Activity, value: f64) ?f64 {
+    fn excluding(self: *const Activity, value: f64) ?f64 {
         if (!self.reliable) return null;
         var negative = self.negative_infinite;
         var positive = self.positive_infinite;

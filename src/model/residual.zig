@@ -99,7 +99,7 @@ pub fn computePrimalResidual(
         if (num_rows > 0 and ax.len >= num_rows) {
             @memset(ax[0..num_rows], 0.0);
             if (num_cols > 0 and sol.primal.len > 0) {
-                matrix.addProduct(csc.*, 1.0, sol.primal, ax[0..num_rows]) catch {};
+                matrix.addProduct(csc, 1.0, sol.primal, ax[0..num_rows]) catch {};
             }
             for (0..num_rows) |i| {
                 const val = ax[i];
@@ -147,7 +147,7 @@ pub fn computeDualResidual(
             // rc = c − Aᵀπ
             @memcpy(rc[0..num_cols], model.col_cost);
             if (num_rows > 0 and num_cols > 0 and sol.dual.len > 0) {
-                matrix.addTransposeProduct(csc.*, -1.0, sol.dual, rc[0..num_cols]) catch {};
+                matrix.addTransposeProduct(csc, -1.0, sol.dual, rc[0..num_cols]) catch {};
             }
 
             // Dual infeasibility: max |c − Aᵀπ − rc|

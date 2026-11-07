@@ -45,7 +45,7 @@ const Parser = struct {
             .builder = builder,
             .row_by_name = std.StringHashMap(usize).init(allocator),
             .col_by_name = std.StringHashMap(usize).init(allocator),
-            .control = types.ParseControl.init(options),
+            .control = types.ParseControl.init(&options),
         };
     }
 
@@ -434,7 +434,8 @@ fn setRangePair(parser: *Parser, row_name: []const u8, number: []const u8) types
 }
 
 test "MPS name indexes release all hash capacity before finalization" {
-    var parser = Parser.init(std.testing.allocator, "names", .{});
+    const test_options: types.ReadOptions = .{};
+    var parser = Parser.init(std.testing.allocator, "names", test_options);
     defer parser.deinit();
     parser.row_by_name.put("row", 0) catch return error.OutOfMemory;
     _ = try parser.column("column");

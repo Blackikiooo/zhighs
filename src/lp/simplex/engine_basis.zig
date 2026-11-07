@@ -27,7 +27,7 @@ const BasisImportError = @import("engine.zig").BasisImportError;
 
 /// Restore a validated borrowed basis and rebuild factorization/basic
 /// values without retaining any caller memory.
-pub fn importBasis(self: *SimplexEngine, problem: problem_module.ProblemView, view: basis_snapshot_module.BasisView) BasisImportError!void {
+pub fn importBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView, view: basis_snapshot_module.BasisView) BasisImportError!void {
     try view.validate(problem.num_cols, problem.num_rows);
     const basis = if (self.basis) |*value| value else return error.NumericalFailure;
     @memcpy(basis.col_status[0..problem.num_cols], view.structural_status);
@@ -74,7 +74,7 @@ pub fn importBasis(self: *SimplexEngine, problem: problem_module.ProblemView, vi
 }
 
 /// Borrow the current structural/logical basis if no artificial column is basic.
-pub fn exportBasisView(self: *const SimplexEngine, problem: problem_module.ProblemView) ?basis_snapshot_module.BasisView {
+pub fn exportBasisView(self: *const SimplexEngine, problem: *const problem_module.ProblemView) ?basis_snapshot_module.BasisView {
     const basis = if (self.basis) |*value| value else return null;
     const artificial_begin = problem.num_cols + problem.num_rows;
     for (basis.basic_index) |column| if (column >= artificial_begin) return null;
@@ -86,7 +86,7 @@ pub fn exportBasisView(self: *const SimplexEngine, problem: problem_module.Probl
 }
 
 /// Deep-copy the exportable current basis into caller-owned storage.
-pub fn exportBasisSnapshot(self: *const SimplexEngine, allocator: std.mem.Allocator, problem: problem_module.ProblemView) BasisImportError!basis_snapshot_module.BasisSnapshot {
+pub fn exportBasisSnapshot(self: *const SimplexEngine, allocator: std.mem.Allocator, problem: *const problem_module.ProblemView) BasisImportError!basis_snapshot_module.BasisSnapshot {
     const basis_view = self.exportBasisView(problem) orelse return error.NumericalFailure;
     return basis_snapshot_module.BasisSnapshot.initFromView(allocator, basis_view);
 }
@@ -94,7 +94,7 @@ pub fn exportBasisSnapshot(self: *const SimplexEngine, allocator: std.mem.Alloca
 /// Test primal and dual feasibility of the current working solution.
 ///
 /// This is a classification only; it does not reprice or recompute basic values.
-pub fn classifyFeasibility(self: *const SimplexEngine, problem: problem_module.ProblemView) struct { primal: bool, dual: bool } {
+pub fn classifyFeasibility(self: *const SimplexEngine, problem: *const problem_module.ProblemView) struct { primal: bool, dual: bool } {
     const basis = if (self.basis) |*value| value else return .{ .primal = false, .dual = false };
     var primal = true;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper) |value, lower, upper| {
@@ -123,7 +123,7 @@ pub fn classifyFeasibility(self: *const SimplexEngine, problem: problem_module.P
 /// basics with currently nonbasic logical columns. Unique logical columns
 /// form an identity basis, so this deterministic process must recover a
 /// nonsingular basis unless factorization fails for a non-rank reason.
-pub fn repairRankDeficientBasis(self: *SimplexEngine, problem: problem_module.ProblemView) BasisImportError!void {
+pub fn repairRankDeficientBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView) BasisImportError!void {
     const basis = if (self.basis) |*value| value else return error.NumericalFailure;
     const logical_begin = problem.num_cols;
     const logical_end = logical_begin + problem.num_rows;

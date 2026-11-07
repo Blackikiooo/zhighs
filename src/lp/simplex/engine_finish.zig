@@ -24,7 +24,7 @@ const SimplexEngine = @import("engine.zig").SimplexEngine;
 const SolveStatus = @import("engine.zig").SolveStatus;
 
 /// Recompute, validate and publish an optimal terminal state.
-pub fn finishOptimal(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn finishOptimal(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     if (self.recomputeBasicValues(problem) != .optimal) return .numerical_failure;
     if (self.recomputeReducedCosts(problem) != .optimal) return .numerical_failure;
     if (self.validateOptimalSolution(problem) != .optimal) return .numerical_failure;
@@ -40,7 +40,7 @@ pub fn finishOptimal(self: *SimplexEngine, problem: problem_module.ProblemView) 
 /// signed entering direction and current FTRAN column. No finite iterate
 /// is published as evidence: unboundedness is accepted only when variable
 /// bounds, row recession directions, and objective improvement all hold.
-pub fn finishUnbounded(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64) SolveStatus {
+pub fn finishUnbounded(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize, entering_direction: f64) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memset(basis.unbounded_ray, 0.0);
     if (entering_col < problem.num_cols)
@@ -56,7 +56,7 @@ pub fn finishUnbounded(self: *SimplexEngine, problem: problem_module.ProblemView
 }
 
 /// Validate a structural recession direction against bounds, rows and objective.
-pub fn validateUnboundedRay(self: *SimplexEngine, problem: problem_module.ProblemView, ray: []const f64) bool {
+pub fn validateUnboundedRay(self: *SimplexEngine, problem: *const problem_module.ProblemView, ray: []const f64) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (ray.len != problem.num_cols) return false;
     var ray_max: f64 = 0.0;
@@ -105,7 +105,7 @@ pub fn validateUnboundedRay(self: *SimplexEngine, problem: problem_module.Proble
 /// Allocation-free KKT feasibility check used before publishing an
 /// optimal result. This catches accumulated update drift and incorrect
 /// bound/status transitions at the solver boundary.
-pub fn validateOptimalSolution(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn validateOptimalSolution(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const primal_tolerance = self.numerical.primal_tolerance;
     const dual_tolerance = self.numerical.dual_tolerance;
@@ -155,7 +155,7 @@ pub fn validateOptimalSolution(self: *SimplexEngine, problem: problem_module.Pro
 }
 
 /// Borrow the current engine-owned solution arrays without copying.
-pub fn solutionView(self: *const SimplexEngine, problem: problem_module.ProblemView, status: SolveStatus) ?solution_module.SolutionView {
+pub fn solutionView(self: *const SimplexEngine, problem: *const problem_module.ProblemView, status: SolveStatus) ?solution_module.SolutionView {
     if (status == .invalid_model) return null;
     const basis = if (self.basis) |*value| value else return null;
     for (basis.published_primal, basis.primal[0..problem.num_cols], basis.column_scale[0..problem.num_cols]) |*published, internal, scale|

@@ -133,14 +133,14 @@ pub const StandardForm = struct {
 
     /// Objective value in the original sense and coordinates, including the
     /// model offset, from the standard-form objective `costᵀx̂`.
-    pub fn originalObjective(self: *const StandardForm, problem: lp.ProblemView, std_objective: f64) f64 {
+    pub fn originalObjective(self: *const StandardForm, problem: *const lp.ProblemView, std_objective: f64) f64 {
         const sense = senseSign(problem.objective_sense);
         return sense * (std_objective + self.objective_shift) + problem.objective_offset;
     }
 
     /// Min-convention reduced cost of original column j from min-convention
     /// row multipliers `row_dual`: c̃_j − a_jᵀy.
-    pub fn columnReducedCostMin(self: *const StandardForm, problem: lp.ProblemView, column: usize, row_dual: []const f64) f64 {
+    pub fn columnReducedCostMin(self: *const StandardForm, problem: *const lp.ProblemView, column: usize, row_dual: []const f64) f64 {
         _ = self;
         const sense = senseSign(problem.objective_sense);
         var rc = sense * problem.col_cost[column];
@@ -183,7 +183,7 @@ fn classifyRow(lower: f64, upper: f64) RowClass {
 }
 
 /// Build the owning standard-form model from a validated borrowed view.
-pub fn build(allocator: Allocator, problem: lp.ProblemView) BuildError!StandardForm {
+pub fn build(allocator: Allocator, problem: *const lp.ProblemView) BuildError!StandardForm {
     problem.validate() catch return error.InvalidModel;
 
     const m_in = problem.num_rows;

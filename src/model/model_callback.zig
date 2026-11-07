@@ -18,7 +18,7 @@ pub fn setCallbackFunc(self: *Model, callback: CallbackFunc, usrstate: ?*anyopaq
     self.env.setCallbackFunc(callback, usrstate);
 }
 
-pub fn getCallbackFunc(self: Model, usrstate: *?*anyopaque) ?CallbackFunc {
+pub fn getCallbackFunc(self: *const Model, usrstate: *?*anyopaque) ?CallbackFunc {
     usrstate.* = self.env.usrstate;
     return self.env.callback;
 }
@@ -27,7 +27,7 @@ pub fn terminate(self: *Model) void {
     self.interrupted.store(true, .release);
 }
 
-pub fn cbGet(self: Model, what: i32, result: *anyopaque) ModelError!void {
+pub fn cbGet(self: *const Model, what: i32, result: *anyopaque) ModelError!void {
     _ = self;
     _ = what;
     _ = result;

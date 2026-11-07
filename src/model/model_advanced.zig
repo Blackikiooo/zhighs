@@ -74,7 +74,7 @@ pub fn feasRelax(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Return the solution as a JSON string (caller must free with `allocator.free`).
-pub fn getJSonSolution(self: Model) ModelError![]const u8 {
+pub fn getJSonSolution(self: *const Model) ModelError![]const u8 {
     if (self.status != .optimal) return error.NotOptimized;
     const alloc = self.allocator;
     // Build a simple JSON document.
@@ -129,7 +129,7 @@ pub fn fixModel(self: *Model) ModelError!void {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Retrieve the basis head
-pub fn getBasisHead(self: Model, head: []usize) ModelError!void {
+pub fn getBasisHead(self: *const Model, head: []usize) ModelError!void {
     if (head.len < self.num_constrs) return error.InvalidArgument;
     if (!self.basis_available or self.basis_head.len != self.num_constrs) return error.NotOptimized;
     for (self.basis_head, head[0..self.num_constrs]) |column, *output| output.* = column;
@@ -137,7 +137,7 @@ pub fn getBasisHead(self: Model, head: []usize) ModelError!void {
 
 /// Export an owning basis snapshot. The returned snapshot is independent of
 /// the model and must be deinitialized by the caller.
-pub fn exportBasisSnapshot(self: Model, allocator: std.mem.Allocator) ModelError!solver.LpBasisSnapshot {
+pub fn exportBasisSnapshot(self: *const Model, allocator: std.mem.Allocator) ModelError!solver.LpBasisSnapshot {
     if (self.has_pending or !self.basis_available or self.vbasis.len != self.num_vars or self.cbasis.len != self.num_constrs or
         self.basis_head.len != self.num_constrs)
         return error.NotOptimized;

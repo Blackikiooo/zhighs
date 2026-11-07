@@ -136,7 +136,7 @@ pub const ReadOptions = struct {
     ///
     /// This method performs no allocation and leaves all parser state intact
     /// when it returns `error.Cancelled`.
-    pub inline fn checkCancelled(self: ReadOptions) IoError!void {
+    pub inline fn checkCancelled(self: *const ReadOptions) IoError!void {
         if (self.interrupt_flag) |flag| if (flag.load(.acquire)) return error.Cancelled;
     }
 };
@@ -151,7 +151,7 @@ pub const ParseControl = struct {
     remaining: usize,
 
     /// Construct a poller from public read options and normalize zero interval.
-    pub fn init(options: ReadOptions) ParseControl {
+    pub fn init(options: *const ReadOptions) ParseControl {
         const interval = @max(options.interrupt_check_interval, 1);
         return .{ .flag = options.interrupt_flag, .interval = interval, .remaining = interval };
     }
@@ -226,7 +226,8 @@ test {
 
 test "parse control observes atomic cancellation at configured interval" {
     var interrupted = std.atomic.Value(bool).init(false);
-    var control = ParseControl.init(.{ .interrupt_flag = &interrupted, .interrupt_check_interval = 2 });
+    const options: ReadOptions = .{ .interrupt_flag = &interrupted, .interrupt_check_interval = 2 };
+    var control = ParseControl.init(&options);
     try control.tick();
     interrupted.store(true, .release);
     try std.testing.expectError(error.Cancelled, control.tick());

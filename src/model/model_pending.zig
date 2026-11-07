@@ -88,7 +88,7 @@ pub fn discardPending(self: *Model) void {
 }
 
 /// Count how many `add_var` entries are queued.
-pub fn countPendingAddVar(self: Model) usize {
+pub fn countPendingAddVar(self: *const Model) usize {
     var count: usize = 0;
     for (self.pending.items) |chg| {
         switch (chg) {
@@ -100,7 +100,7 @@ pub fn countPendingAddVar(self: Model) usize {
 }
 
 /// Count how many `add_constr` entries are queued.
-pub fn countPendingAddConstr(self: Model) usize {
+pub fn countPendingAddConstr(self: *const Model) usize {
     var count: usize = 0;
     for (self.pending.items) |chg| {
         switch (chg) {

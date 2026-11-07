@@ -1,5 +1,11 @@
 //! Append-only dynamic sparse rows with cheap checkpoint and rollback.
 //!
+//! Role: buffer rows before a single batch merge.
+//! Shape: 0×n -> k×n while buffering; `appendToCsc` produces (m+k)×n.
+//! Owns: the buffer; the merged matrix is a new owning `CscMatrix`.
+//! Use this instead of `edit.appendRows` when rows arrive one at a time (MIP
+//! cuts, presolve rows): one merge instead of one rebuild per row.
+//!
 //! MIP cuts and presolve-generated rows should not repeatedly rebuild the base
 //! CSC matrix. This store keeps canonical rows in CSR-like contiguous streams;
 //! a batch merge creates a new CSC only at an explicit synchronization point.
@@ -79,7 +85,7 @@ pub const DynamicRowMatrix = struct {
     }
 
     /// Appends one canonical row and returns its local RowId.
-    pub fn appendRow(self: *Self, allocator: std.mem.Allocator, row_view: sparse_vector.SparseVectorView(foundation.ColId)) (std.mem.Allocator.Error || csc.MatrixError)!foundation.RowId {
+    pub fn appendRow(self: *Self, allocator: std.mem.Allocator, row_view: *const sparse_vector.SparseVectorView(foundation.ColId)) (std.mem.Allocator.Error || csc.MatrixError)!foundation.RowId {
         if (row_view.dimension != self.num_cols) return error.DimensionMismatch;
         try row_view.validate();
 
@@ -90,7 +96,7 @@ pub const DynamicRowMatrix = struct {
     /// Trusted append for validated rows after a sufficient `reserve` call.
     /// The row view must be canonical, dimension-compatible, and its storage
     /// must not alias this matrix's entry allocation.
-    pub fn appendRowPreReserved(self: *Self, row_view: sparse_vector.SparseVectorView(foundation.ColId)) foundation.RowId {
+    pub fn appendRowPreReserved(self: *Self, row_view: *const sparse_vector.SparseVectorView(foundation.ColId)) foundation.RowId {
         std.debug.assert(row_view.dimension == self.num_cols);
         std.debug.assert(self.entries.capacity - self.entries.len >= row_view.nnz());
         std.debug.assert(self.row_starts.capacity - self.row_starts.items.len >= 1);
@@ -103,7 +109,7 @@ pub const DynamicRowMatrix = struct {
     }
 
     /// Return a checked borrowed canonical view of one dynamic row.
-    pub fn row(self: Self, row_id: foundation.RowId) csc.MatrixError!sparse_vector.SparseVectorView(foundation.ColId) {
+    pub fn row(self: *const Self, row_id: foundation.RowId) csc.MatrixError!sparse_vector.SparseVectorView(foundation.ColId) {
         const index = row_id.toUsize();
         if (index >= self.numRows()) return error.IndexOutOfBounds;
         return self.rowAssumeValid(index);
@@ -133,7 +139,7 @@ pub const DynamicRowMatrix = struct {
     }
 
     /// Batch-merges dynamic rows beneath a base CSC matrix.
-    pub fn appendToCsc(self: Self, allocator: std.mem.Allocator, base: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
+    pub fn appendToCsc(self: *const Self, allocator: std.mem.Allocator, base: csc.CscMatrix) (std.mem.Allocator.Error || csc.MatrixError)!csc.CscMatrix {
         if (base.num_cols != self.num_cols) return error.DimensionMismatch;
         try base.validate();
         const fields = self.entries.slice();

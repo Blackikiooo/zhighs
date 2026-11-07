@@ -42,7 +42,7 @@ pub const ProblemView = struct {
     /// Validate borrowed dimensions, numerical values, and canonical CSC
     /// storage without taking ownership or allocating. Intended for the
     /// compile/dispatch boundary, not for repeated simplex iterations.
-    pub fn validate(self: ProblemView) ViewError!void {
+    pub fn validate(self: *const ProblemView) ViewError!void {
         try self.validateExceptMatrix();
         self.matrix.validate() catch return error.InvalidMatrix;
     }
@@ -50,7 +50,7 @@ pub const ProblemView = struct {
     /// Validate everything except the O(nnz) CSC scan. Callers that reuse the
     /// exact matrix slices validated previously (bound-only reoptimizations)
     /// can skip that scan through slice-identity caching.
-    pub fn validateExceptMatrix(self: ProblemView) ViewError!void {
+    pub fn validateExceptMatrix(self: *const ProblemView) ViewError!void {
         if (self.col_cost.len != self.num_cols or self.col_lower.len != self.num_cols or self.col_upper.len != self.num_cols or
             self.row_lower.len != self.num_rows or self.row_upper.len != self.num_rows)
             return error.DimensionMismatch;
@@ -74,7 +74,7 @@ pub const ProblemView = struct {
 
     /// Materialize one borrowed CSC column into caller-owned dense storage.
     /// This hot-path helper performs no allocation.
-    pub fn fillColumn(self: ProblemView, column: usize, output: []f64) void {
+    pub fn fillColumn(self: *const ProblemView, column: usize, output: []f64) void {
         if (column >= self.num_cols or output.len != self.num_rows) return error.DimensionMismatch;
         @memset(output, 0.0);
         const begin = self.matrix.col_starts[column];

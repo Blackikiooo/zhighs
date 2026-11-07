@@ -72,7 +72,7 @@ pub const Options = struct {
     /// Minimal positive coordinate enforced when lifting the starting point.
     start_margin: f64 = 1e-4,
 
-    pub fn valid(self: Options) bool {
+    pub fn valid(self: *const Options) bool {
         const std = @import("std");
         inline for (@typeInfo(Tolerances).@"struct".fields) |field| {
             const value = @field(self.tolerances, field.name);

@@ -32,7 +32,7 @@ pub const BasisView = struct {
     basic_index: []const u32,
 
     /// Cross-check slice lengths, basic count, head range, and status consistency.
-    pub fn validate(self: BasisView, num_cols: usize, num_rows: usize) BasisViewError!void {
+    pub fn validate(self: *const BasisView, num_cols: usize, num_rows: usize) BasisViewError!void {
         if (self.structural_status.len != num_cols or self.logical_status.len != num_rows or self.basic_index.len != num_rows)
             return error.DimensionMismatch;
         const total_cols = num_cols + num_rows;

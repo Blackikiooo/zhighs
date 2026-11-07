@@ -37,7 +37,7 @@ inline fn committedLeavingStatus(
     return if (lower == upper) .fixed else requested;
 }
 
-fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
+fn solveEnteringDirection(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     if (self.nla.factorization.supportsSparseUpdateRhs()) {
         const count = self.fillInternalColumnSparse(
@@ -60,7 +60,7 @@ fn solveEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemV
 
 /// Collect and FTRAN the dual entering column in the same vector later
 /// consumed by the Forrest--Tomlin update.
-fn solveDualEnteringDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
+fn solveDualEnteringDirection(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize) SolveStatus {
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     iteration.col_aq.clear();
     const count = self.fillInternalColumnSparse(
@@ -80,7 +80,7 @@ fn solveDualEnteringDirection(self: *SimplexEngine, problem: problem_module.Prob
 
 /// Compute the revised-simplex entering direction `B^-1 A_j` into the
 /// engine-owned SoA workspace without allocating or copying model data.
-pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize) SolveStatus {
+pub fn computeDirection(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     if (solveEnteringDirection(self, problem, entering_col) != .optimal) {
         self.failure_site = .direction_column;
@@ -104,7 +104,7 @@ pub fn computeDirection(self: *SimplexEngine, problem: problem_module.ProblemVie
 /// simplex retains `computeDirection` and its stronger whole-column residual.
 pub fn computeDualDirection(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     entering_col: usize,
     leaving_row: usize,
 ) DualDirectionStatus {
@@ -151,7 +151,7 @@ pub fn computeDualDirection(
 }
 
 /// Commit a primal pivot using the primal-owned direction vector.
-pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
+pub fn performPivot(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     return performPivotWithDirection(
         self,
@@ -167,7 +167,7 @@ pub fn performPivot(self: *SimplexEngine, problem: problem_module.ProblemView, e
 }
 
 /// Commit a dual pivot from the same captured `col_aq` produced by NLA.
-pub fn performDualPivot(self: *SimplexEngine, problem: problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
+pub fn performDualPivot(self: *SimplexEngine, problem: *const problem_module.ProblemView, entering_col: usize, entering_direction: f64, leaving_row: usize, leaving_bound: basis_module.BasisStatus, step: f64) SolveStatus {
     const iteration = if (self.dual_iteration) |*value| value else return .numerical_failure;
     return performPivotWithDirection(
         self,
@@ -186,7 +186,7 @@ pub fn performDualPivot(self: *SimplexEngine, problem: problem_module.ProblemVie
 /// caller has bound the authoritative direction and factor-update capture.
 fn performPivotWithDirection(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     entering_col: usize,
     entering_direction: f64,
     leaving_row: usize,
@@ -328,7 +328,7 @@ fn performPivotWithDirection(
 ///
 /// This is the exact reprice used by dual Phase I/II rebuilds; it overwrites
 /// the complete internal reduced-cost vector.
-pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const costs = self.dual_work.work_cost;
     const shifts = self.dual_work.work_shift;
@@ -357,7 +357,7 @@ pub fn recomputeReducedCostsFromWork(self: *SimplexEngine, problem: problem_modu
 /// Exact original-objective reprice with drift observation. This is the
 /// safety boundary for dual rank-1 updates: exact values replace the
 /// incrementally maintained vector before feasibility is revalidated.
-pub fn recomputeReducedCostsWithDrift(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeReducedCostsWithDrift(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     const count = basis.reduced_cost.len;
     if (self.degeneracy.reduced_cost_snapshot.len < count) return .numerical_failure;
@@ -386,7 +386,7 @@ pub fn recomputeReducedCostsWithDrift(self: *SimplexEngine, problem: problem_mod
 /// bounds accumulated roundoff while keeping the hot path allocation-free.
 pub fn updateReducedCostsAfterPrimalPivot(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     entering_col: usize,
     entering_direction: f64,
     leaving_row: u32,
@@ -461,7 +461,7 @@ pub fn updateReducedCostsAfterPrimalPivot(
 }
 
 /// Recompute reduced costs exactly from the original scaled objective.
-pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeReducedCosts(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     self.reduced_costs_original = true;
     const maximize = problem.objective_sense == .maximize;
@@ -509,7 +509,7 @@ pub fn recomputeReducedCosts(self: *SimplexEngine, problem: problem_module.Probl
 ///
 /// On success this also completes all factor-dependent state refresh performed
 /// by `finishRefactorization`.
-pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemView, reason: RebuildReason) SolveStatus {
+pub fn refactorizeBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView, reason: RebuildReason) SolveStatus {
     _ = self.dual_control.beginRebuild();
     const rebuild_started = self.statisticsTimestamp();
     defer {
@@ -540,10 +540,10 @@ pub fn refactorizeBasis(self: *SimplexEngine, problem: problem_module.ProblemVie
 }
 
 /// Assemble and factorize the matrix columns named by the current basis head.
-pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: problem_module.ProblemView) factorization_module.FactorizationError!void {
+pub fn factorizeCurrentBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView) factorization_module.FactorizationError!void {
     const basis = if (self.basis) |*value| value else return error.DimensionMismatch;
     return self.nla.factorization.factorizeBasis(
-        problem.matrix,
+        &problem.matrix,
         basis.basic_index,
         basis.row_scale,
         basis.column_scale[0..problem.num_cols],
@@ -613,17 +613,17 @@ pub fn observeFactorizationStability(self: *SimplexEngine) void {
 /// Recompute the primal basic solution from the immutable problem and
 /// current nonbasic values. Uses engine-owned workspace and performs no
 /// allocation; this limits drift from long Eta update chains.
-pub fn recomputeBasicValues(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeBasicValues(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     return self.recomputeBasicValuesImpl(problem, true);
 }
 
 /// Recompute basic values without rejecting primal bound violations.
-pub fn recomputeBasicValuesUnchecked(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn recomputeBasicValuesUnchecked(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     return self.recomputeBasicValuesImpl(problem, false);
 }
 
 /// Reconstruct `B^-1 rhs`, optionally rejecting basic values outside bounds.
-pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.ProblemView, enforce_bounds: bool) SolveStatus {
+pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: *const problem_module.ProblemView, enforce_bounds: bool) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memcpy(basis.residual_work, basis.row_rhs);
     for (basis.col_status, basis.primal, 0..) |status, value, column| {
@@ -678,7 +678,7 @@ pub fn recomputeBasicValuesImpl(self: *SimplexEngine, problem: problem_module.Pr
 
 /// Compute `residual -= B * x` directly from the borrowed CSC model and
 /// basis membership. No dense basis copy or temporary column is required.
-pub fn subtractBasisProduct(self: *SimplexEngine, problem: problem_module.ProblemView, x: []const f64, residual: []f64) !void {
+pub fn subtractBasisProduct(self: *SimplexEngine, problem: *const problem_module.ProblemView, x: []const f64, residual: []f64) !void {
     const basis = if (self.basis) |*value| value else return error.NumericalFailure;
     if (x.len != problem.num_rows or residual.len != problem.num_rows) return error.NumericalFailure;
     for (basis.basic_index, x) |global_col, value| {
@@ -707,7 +707,7 @@ pub fn subtractBasisProduct(self: *SimplexEngine, problem: problem_module.Proble
 /// without constructing a dense basis or making another matrix pass.
 pub fn subtractBasisProductWithMagnitude(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     x: []const f64,
     residual: []f64,
     magnitude: []f64,

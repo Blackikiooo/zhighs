@@ -56,12 +56,12 @@ pub const QuadExpr = struct {
     }
 
     /// Return the number of quadratic terms.
-    pub fn numQTerms(self: Self) usize {
+    pub fn numQTerms(self: *const Self) usize {
         return self.q_terms.items.len;
     }
 
     /// Resolve stable variable handles for the current dense model layout.
-    pub fn resolveQTerms(self: Self, allocator: std.mem.Allocator, model: Model) ModelError![]ResolvedQTerm {
+    pub fn resolveQTerms(self: *const Self, allocator: std.mem.Allocator, model: *const Model) ModelError![]ResolvedQTerm {
         const resolved = allocator.alloc(ResolvedQTerm, self.q_terms.items.len) catch return error.OutOfMemory;
         errdefer allocator.free(resolved);
         for (self.q_terms.items, 0..) |term, i| {

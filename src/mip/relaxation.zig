@@ -56,7 +56,7 @@ pub const Relaxation = struct {
 
     pub fn solve(
         self: *Relaxation,
-        problem: solver.LpProblemView,
+        problem: *const solver.LpProblemView,
         control: solver.LpSolveControl,
         node_number: usize,
         revision: solver.LpRevisionStamp,
@@ -67,7 +67,7 @@ pub const Relaxation = struct {
             self.session.solveRelaxation(problem, control, revision);
     }
 
-    pub fn resultView(self: *const Relaxation, problem: solver.LpProblemView, status: solver.LpSolveStatus) ?solver.LpSolveResultView {
+    pub fn resultView(self: *const Relaxation, problem: *const solver.LpProblemView, status: solver.LpSolveStatus) ?solver.LpSolveResultView {
         return self.session.resultView(problem, status);
     }
 
@@ -162,14 +162,14 @@ test "tree relaxations leave root presolve once then reoptimize stable coordinat
     var relaxation = Relaxation.init(std.testing.allocator);
     defer relaxation.deinit();
 
-    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(problem, .{}, 1, .{ .structure = 0, .matrix_values = 0, .bounds = 1, .objective = 0 }));
+    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(&problem, .{}, 1, .{ .structure = 0, .matrix_values = 0, .bounds = 1, .objective = 0 }));
     try std.testing.expect(relaxation.session.presolved_problem != null);
 
     upper[0] = 1.0;
-    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(problem, .{}, 2, .{ .structure = 0, .matrix_values = 0, .bounds = 2, .objective = 0 }));
+    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(&problem, .{}, 2, .{ .structure = 0, .matrix_values = 0, .bounds = 2, .objective = 0 }));
     try std.testing.expect(relaxation.session.presolved_problem == null);
     upper[0] = 2.0;
-    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(problem, .{}, 3, .{ .structure = 0, .matrix_values = 0, .bounds = 3, .objective = 0 }));
+    try std.testing.expectEqual(solver.LpSolveStatus.optimal, relaxation.solve(&problem, .{}, 3, .{ .structure = 0, .matrix_values = 0, .bounds = 3, .objective = 0 }));
 
     const stats = relaxation.statistics();
     try std.testing.expectEqual(@as(usize, 2), stats.cold_solves);

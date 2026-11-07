@@ -29,7 +29,7 @@ const engine_basis_module = @import("engine_basis.zig");
 /// Materialize the logical crash solution from current nonbasic structural
 /// values. The basis remains the identity; values may violate logical
 /// bounds so the caller can choose primal, dual, or artificial Phase I.
-pub fn initializeLogicalBasicValues(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn initializeLogicalBasicValues(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memcpy(basis.basic_value, basis.row_rhs);
     for (0..problem.num_cols) |column| {
@@ -56,7 +56,7 @@ pub fn initializeLogicalBasicValues(self: *SimplexEngine, problem: problem_modul
 /// column. Initial Phase I and every transactional restart must use this
 /// exact state transition; rebuilding only the logical identity would
 /// leave Phase-I costs disconnected from the violated rows.
-pub fn installArtificialPhaseOneBasis(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn installArtificialPhaseOneBasis(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     self.phase1_needed = false;
     for (basis.basic_value, basis.basic_lower, basis.basic_upper, 0..) |*value, lower, upper, row| {
@@ -109,7 +109,7 @@ pub fn installArtificialPhaseOneBasis(self: *SimplexEngine, problem: problem_mod
 /// can escape numerical validation.
 pub fn installSparseCrashBasis(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     maximum_columns: ?usize,
     scoring: crash_module.CrashScoring,
 ) bool {
@@ -121,7 +121,7 @@ pub fn installSparseCrashBasis(
     const average_column_degree = if (problem.num_cols == 0) 0 else (problem.matrix.values.len + problem.num_cols - 1) / problem.num_cols;
     const near_singleton_limit: u32 = @intCast(@min(@max(average_column_degree * 2, 4), 32));
     const plan_view = self.crash.plan(
-        problem.matrix,
+        &problem.matrix,
         problem.col_cost,
         basis.col_lower[0..problem.num_cols],
         basis.col_upper[0..problem.num_cols],
@@ -185,7 +185,7 @@ pub fn installSparseCrashBasis(
 /// an iteration/work/time limit before `cleanupArtificialBasis` ran), or a
 /// retained nonbasic status is incompatible with the new bounds, in which
 /// case the caller must cold-start.
-pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+pub fn refreshProblemStorage(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (basis.num_rows != problem.num_rows or basis.num_structural_cols != problem.num_cols) return false;
     const original_count = problem.num_cols + problem.num_rows;
@@ -253,7 +253,7 @@ pub fn refreshProblemStorage(self: *SimplexEngine, problem: problem_module.Probl
 }
 
 /// Initialize bounds, scaling and the logical basis using the selected policy.
-pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+pub fn initializeProblemStorage(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     // Cold initialization recomputes scaling; previously materialized scaled
     // coefficients no longer necessarily apply to the incoming model.
     self.model_cache = null;
@@ -270,7 +270,7 @@ pub fn initializeProblemStorage(self: *SimplexEngine, problem: problem_module.Pr
 ///
 /// The structural scan depends only on the matrix; when the cached matrix has
 /// no structurally empty row, warm reoptimizations skip the O(nnz) pass.
-pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (basis.infeasibility_ray.len != problem.num_rows or basis.residual_work.len != problem.num_rows) return false;
     if (self.model_cache) |cache| {
@@ -314,7 +314,7 @@ pub fn publishEmptyRowInfeasibilityRay(self: *SimplexEngine, problem: problem_mo
 }
 
 /// Baseline initialization with row normalization and conditional column scaling.
-fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     basis.initializeSlackBasis();
     @memset(basis.primal, 0.0);
@@ -398,7 +398,7 @@ fn initializeProblemStorageBaseline(self: *SimplexEngine, problem: problem_modul
 }
 
 /// HiGHS-compatible six-pass power-of-two equilibration and logical bounds.
-fn initializeProblemStorageHighs(self: *SimplexEngine, problem: problem_module.ProblemView) SolveStatus {
+fn initializeProblemStorageHighs(self: *SimplexEngine, problem: *const problem_module.ProblemView) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     basis.initializeSlackBasis();
     @memset(basis.primal, 0.0);
@@ -516,7 +516,7 @@ fn powerOfTwoScale(maximum: f64, exponent_limit: comptime_int) f64 {
 /// Warm reoptimizations reuse the retained scaling, so when the matrix
 /// slices match those recorded in `model_cache` the existing coefficients are
 /// still exact and the O(nnz) pass is skipped.
-pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const basis = if (self.basis) |*value| value else return false;
     if (self.model_cache) |cache| {
         if (cache.matrixMatches(problem)) return true;
@@ -555,7 +555,7 @@ pub fn materializeScaledCoefficients(self: *SimplexEngine, problem: problem_modu
 /// Whether the retained reduced-cost vector is valid for `problem`: the
 /// matrix and objective slices match those it was last computed against and
 /// it reflects the original objective rather than Phase-I working costs.
-pub fn retainedReducedCostsValid(self: *SimplexEngine, problem: problem_module.ProblemView) bool {
+pub fn retainedReducedCostsValid(self: *SimplexEngine, problem: *const problem_module.ProblemView) bool {
     const cache = self.model_cache orelse return false;
     return self.reduced_costs_original and cache.matrixMatches(problem) and cache.objectiveMatches(problem);
 }
@@ -568,7 +568,7 @@ fn objectiveScale(cost: []const f64) f64 {
 }
 
 /// Materialize a structural, logical or artificial internal column in scaled row space.
-pub fn fillInternalColumn(self: *SimplexEngine, problem: problem_module.ProblemView, column: usize, output: []f64) SolveStatus {
+pub fn fillInternalColumn(self: *SimplexEngine, problem: *const problem_module.ProblemView, column: usize, output: []f64) SolveStatus {
     const basis = if (self.basis) |*value| value else return .numerical_failure;
     @memset(output, 0.0);
     if (column < problem.num_cols) {
@@ -593,7 +593,7 @@ pub fn fillInternalColumn(self: *SimplexEngine, problem: problem_module.ProblemV
 /// output complement. Intended for indexed SparseLU FTRAN only.
 pub fn fillInternalColumnSparse(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
+    problem: *const problem_module.ProblemView,
     column: usize,
     output: []f64,
     indices: []u32,

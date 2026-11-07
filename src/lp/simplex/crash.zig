@@ -68,7 +68,7 @@ pub const CrashWorkspace = struct {
     /// scoring policy. No allocation occurs after workspace capacity growth.
     pub fn plan(
         self: *CrashWorkspace,
-        csc: matrix.CscView,
+        csc: *const matrix.CscView,
         cost: []const f64,
         lower: []const f64,
         upper: []const f64,

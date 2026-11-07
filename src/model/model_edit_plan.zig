@@ -223,7 +223,7 @@ pub const ModelEditPlan = struct {
         self.* = undefined;
     }
 
-    fn classify(self: ModelEditPlan) PlanKind {
+    fn classify(self: *const ModelEditPlan) PlanKind {
         if (self.has_structure) return .structural;
         const has_coefficients = self.coefficients.len != 0;
         const has_scalars = self.bounds.len != 0 or self.objective.len != 0 or self.rhs.len != 0 or self.senses.len != 0 or self.types.len != 0;

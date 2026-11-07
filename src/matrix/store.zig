@@ -1,5 +1,11 @@
 //! Owning authoritative CSC matrix with a rebuildable CSR cache.
 //!
+//! Role: lifetime, revision, and cache coherence for the matrix a model solves.
+//! Shape: m×n unchanged; `csr()` derives an m×n row view on demand.
+//! Owns: the authoritative `CscMatrix` and its `CsrCache`.
+//! Read through `csc()` / `csr()`; write only through this struct's mutators so
+//! revisions and derived views stay consistent.
+//!
 //! Structural mutations must go through MatrixStore methods so revision and
 //! derived caches remain coherent. Solver algorithms receive borrowed views;
 //! they do not own or mutate the authoritative CSC storage.

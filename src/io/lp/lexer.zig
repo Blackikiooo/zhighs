@@ -94,7 +94,7 @@ pub const Lexer = struct {
     }
 
     /// Materialize the absolute source location at the current cursor.
-    fn location(self: Lexer) Location {
+    fn location(self: *const Lexer) Location {
         return .{ .byte_offset = self.base_offset + self.index, .line = self.line, .column = self.column };
     }
 

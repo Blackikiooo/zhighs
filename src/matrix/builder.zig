@@ -1,5 +1,12 @@
 //! Mutable sparse matrix construction in Structure of Arrays (SoA) form.
 //!
+//! Role: turn coordinates into a canonical matrix.
+//! Shape: unordered triplets (row, col, value) -> m×n.
+//! Owns: returns an owning `CscMatrix`; the builder keeps its triplet storage.
+//! This is the only module that accepts arbitrary order. For already sorted
+//! arrays use `freezeFromSortedArrays*`; for row-at-a-time growth use
+//! `dynamic_rows.zig`; for edits to an existing matrix use `edit.zig`.
+//!
 //! Construction and computation have different optimal layouts. This builder
 //! accepts coordinates in arbitrary order, then freeze sorts, merges duplicates,
 //! removes numerical zeros, and emits canonical CSC storage. MultiArrayList
@@ -99,7 +106,7 @@ pub const MatrixBuilder = struct {
     }
 
     /// Appends a canonical sparse column in one reserved batch.
-    pub fn appendColumn(self: *Self, allocator: std.mem.Allocator, col: ColId, vector: sparse_vector.SparseVectorView(RowId)) (std.mem.Allocator.Error || csc.MatrixError)!void {
+    pub fn appendColumn(self: *Self, allocator: std.mem.Allocator, col: ColId, vector: *const sparse_vector.SparseVectorView(RowId)) (std.mem.Allocator.Error || csc.MatrixError)!void {
         if (col.toUsize() >= self.num_cols) return error.IndexOutOfBounds;
         if (vector.dimension != self.num_rows) return error.DimensionMismatch;
         try vector.validate();
@@ -111,7 +118,7 @@ pub const MatrixBuilder = struct {
     }
 
     /// Appends a canonical sparse row in one reserved batch.
-    pub fn appendRow(self: *Self, allocator: std.mem.Allocator, row: RowId, vector: sparse_vector.SparseVectorView(ColId)) (std.mem.Allocator.Error || csc.MatrixError)!void {
+    pub fn appendRow(self: *Self, allocator: std.mem.Allocator, row: RowId, vector: *const sparse_vector.SparseVectorView(ColId)) (std.mem.Allocator.Error || csc.MatrixError)!void {
         if (row.toUsize() >= self.num_rows) return error.IndexOutOfBounds;
         if (vector.dimension != self.num_cols) return error.DimensionMismatch;
         try vector.validate();
@@ -205,12 +212,12 @@ pub const MatrixBuilder = struct {
         const rows_bytes = std.math.mul(usize, write, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, write, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const compact_starts_bytes = std.math.mul(usize, self.num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computeLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, .{ 64, 64, 64, 64 }) catch return error.DimensionTooLarge;
+        const layout = memory.computeLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, memory.lineAligns(4)) catch return error.DimensionTooLarge;
         const compact_starts_offset = layout.offsets[1];
         const rows_offset = layout.offsets[2];
         const values_offset = layout.offsets[3];
         const storage_len = layout.total;
-        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, storage_len);
         errdefer allocator.free(storage);
         const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. self.num_cols + 1];
         const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + rows_offset)))[0..write];
@@ -240,7 +247,7 @@ pub const MatrixBuilder = struct {
     }
 
     /// Check nondecreasing `(column,row)` order of pending triplets.
-    fn isSorted(self: Self) bool {
+    fn isSorted(self: *const Self) bool {
         const fields = self.entries.slice();
         const rows = fields.items(.row);
         const cols = fields.items(.col);
@@ -413,7 +420,7 @@ test "lean sorted freeze preserves canonical data without compact offsets" {
     var matrix = try builder.freezeSortedLeanAssumeValid(std.testing.allocator, 0.0);
     defer matrix.deinit(std.testing.allocator);
     try matrix.validate();
-    try std.testing.expect(matrix.compact_col_starts == null);
+    try std.testing.expect(matrix.compactColStarts() == null);
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, matrix.col_starts);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 5.0 }, matrix.values);
 }
@@ -462,9 +469,9 @@ pub fn freezeFromSortedArraysAssumeValid(allocator: std.mem.Allocator, num_rows:
         const rows_bytes = std.math.mul(usize, final_nnz, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, final_nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const compact_starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, memory.lineOffsets(4)) catch return error.DimensionTooLarge;
         const storage_len = layout.total;
-        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, storage_len);
         errdefer allocator.free(storage);
         const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
         const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..final_nnz];
@@ -536,9 +543,9 @@ pub fn freezeFromCanonicalArraysAssumeValid(allocator: std.mem.Allocator, num_ro
         const rows_bytes = std.math.mul(usize, nnz, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, nnz, @sizeOf(f64)) catch return error.DimensionTooLarge;
         const compact_starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
-        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, .{ 0, 64, 128, 192 }) catch return error.DimensionTooLarge;
+        const layout = memory.computePageColoredLayout(4, .{ starts_bytes, compact_starts_bytes, rows_bytes, values_bytes }, memory.lineOffsets(4)) catch return error.DimensionTooLarge;
         const storage_len = layout.total;
-        const storage = try allocator.alignedAlloc(u8, .@"64", storage_len);
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, storage_len);
         errdefer allocator.free(storage);
         const output_starts = @as([*]usize, @ptrCast(@alignCast(storage.ptr)))[0 .. num_cols + 1];
         const output_rows = @as([*]RowId, @ptrCast(@alignCast(storage.ptr + layout.offsets[2])))[0..nnz];
@@ -584,9 +591,9 @@ test "freezeFromCanonical handles tridiagonal with no duplicates" {
     var compact = try freezeFromCanonicalArraysAssumeValid(std.testing.allocator, 3, 3, &rows, &cols, &values, 0.0, true);
     defer compact.deinit(std.testing.allocator);
     try compact.validate();
-    try std.testing.expect(compact.storage != null);
-    try std.testing.expect(compact.compact_col_starts != null);
-    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 2, 3 }, compact.compact_col_starts.?);
+    try std.testing.expect(compact.packedBlock() != null);
+    try std.testing.expect(compact.compactColStarts() != null);
+    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 2, 3 }, compact.compactColStarts().?);
 }
 
 /// Stable API: caller-owned reusable buffers for CSC construction.
@@ -796,8 +803,8 @@ test "freezeFromSortedArrays merges duplicates" {
     var compact = try freezeFromSortedArraysAssumeValid(std.testing.allocator, 3, 2, &rows, &cols, &values, 0.0, true);
     defer compact.deinit(std.testing.allocator);
     try compact.validate();
-    try std.testing.expect(compact.compact_col_starts != null);
-    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 1 }, compact.compact_col_starts.?);
+    try std.testing.expect(compact.compactColStarts() != null);
+    try std.testing.expectEqualSlices(foundation.HUInt, &.{ 0, 1, 1 }, compact.compactColStarts().?);
 }
 
 test "freezeFromSortedArrays handles odd nnz" {

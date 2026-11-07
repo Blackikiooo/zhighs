@@ -85,7 +85,7 @@ pub fn setPWLObj(self: *Model, var_idx: usize, num_pts: usize, x: []const f64, y
 
 /// Retrieve piecewise-linear objective data for a variable.
 /// Returns the number of points actually available for this variable.
-pub fn getPWLObj(self: Model, var_idx: usize, num_pts: *usize, x: []f64, y: []f64) ModelError!usize {
+pub fn getPWLObj(self: *const Model, var_idx: usize, num_pts: *usize, x: []f64, y: []f64) ModelError!usize {
     for (self.pwlobj_var, 0..) |v, i| {
         if (v == var_idx) {
             const np = self.pwlobj_npts[i];

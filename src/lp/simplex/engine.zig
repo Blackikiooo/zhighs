@@ -525,7 +525,7 @@ pub const SimplexStats = struct {
     first_update_failure_leaving_row: u32 = 0,
 
     /// Sum rebuild counters classified by reason.
-    pub fn classifiedRebuilds(self: SimplexStats) usize {
+    pub fn classifiedRebuilds(self: *const SimplexStats) usize {
         return self.rebuild_phase_one_setup + self.rebuild_possibly_optimal +
             self.rebuild_solve_residual + self.rebuild_small_pivot +
             self.rebuild_update_limit + self.rebuild_update_growth + self.rebuild_direction_refinement +
@@ -534,7 +534,7 @@ pub const SimplexStats = struct {
     }
 
     /// Sum degeneracy counters classified by mutually exclusive reason.
-    pub fn classifiedDegeneratePivots(self: SimplexStats) usize {
+    pub fn classifiedDegeneratePivots(self: *const SimplexStats) usize {
         return self.degeneracy_bound_ties + self.degeneracy_ratio_ties +
             self.degeneracy_zero_primal_steps + self.degeneracy_phase_one_objective_stalls +
             self.degeneracy_repeated_bases + self.degeneracy_small_pivot_retries +
@@ -569,7 +569,7 @@ pub const IterationCounters = struct {
     cleanup_pivots: usize = 0,
 
     /// Sum pivots assigned to a concrete phase; should equal `committed_pivots`.
-    pub fn classifiedPivots(self: IterationCounters) usize {
+    pub fn classifiedPivots(self: *const IterationCounters) usize {
         return self.shifted_dual_pivots + self.dual_phase_one_pivots +
             self.dual_phase_two_pivots + self.primal_phase_one_pivots +
             self.primal_phase_two_pivots + self.dual_repair_pivots +
@@ -636,13 +636,13 @@ pub const ModelCache = struct {
     /// empty-row Farkas scan must keep running after bound changes.
     empty_rows_possible: bool = false,
 
-    pub fn matrixMatches(self: ModelCache, problem: problem_module.ProblemView) bool {
+    pub fn matrixMatches(self: *const ModelCache, problem: *const problem_module.ProblemView) bool {
         return self.col_starts.ptr == problem.matrix.col_starts.ptr and self.col_starts.len == problem.matrix.col_starts.len and
             self.row_indices.ptr == problem.matrix.row_indices.ptr and self.row_indices.len == problem.matrix.row_indices.len and
             self.values.ptr == problem.matrix.values.ptr and self.values.len == problem.matrix.values.len;
     }
 
-    pub fn objectiveMatches(self: ModelCache, problem: problem_module.ProblemView) bool {
+    pub fn objectiveMatches(self: *const ModelCache, problem: *const problem_module.ProblemView) bool {
         return self.col_cost.ptr == problem.col_cost.ptr and self.col_cost.len == problem.col_cost.len;
     }
 };
@@ -891,7 +891,7 @@ pub const SimplexEngine = struct {
     }
     /// Legacy dimension-only entry point retained for API compatibility.
     /// Use `solveProblem` for an actual LP.
-    pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: SolveControl) SolveStatus {
+    pub fn solve(_: *SimplexEngine, _: usize, _: usize, _: *const SolveControl) SolveStatus {
         return .not_implemented;
     }
 
@@ -899,7 +899,7 @@ pub const SimplexEngine = struct {
     ///
     /// The view must outlive this call; the engine never takes ownership of
     /// model arrays. Basis storage is owned by the engine instance.
-    pub fn solveProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    pub fn solveProblem(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
         const root_solve = self.solve_depth == 0;
         self.solve_depth += 1;
         defer self.solve_depth -= 1;
@@ -964,7 +964,7 @@ pub const SimplexEngine = struct {
         if (self.active_degeneracy_strategy == .automatic)
             self.active_degeneracy_strategy = if (has_dropped_model_coefficient) .baseline else .perturbation;
         if (self.active_pricing_kernel != .column)
-            self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
+            self.pricing_row_view.build(&problem.matrix) catch return .numerical_failure;
         if (self.basis) |*old| old.deinit();
         self.basis = basis_module.BasisState.init(self.allocator, problem.num_rows, problem.num_cols) catch return .numerical_failure;
         self.degeneracy.ensureCapacity(problem.num_rows, self.basis.?.col_status.len) catch return .numerical_failure;
@@ -1207,7 +1207,7 @@ pub const SimplexEngine = struct {
     /// Reoptimize with the existing basis and factorization. The caller must
     /// guarantee unchanged matrix structure and values. No model view is
     /// retained after this call.
-    pub fn reoptimizeProblem(self: *SimplexEngine, problem: problem_module.ProblemView, control: SolveControl) SolveStatus {
+    pub fn reoptimizeProblem(self: *SimplexEngine, problem: *const problem_module.ProblemView, control: *const SolveControl) SolveStatus {
         const root_solve = self.solve_depth == 0;
         self.solve_depth += 1;
         defer self.solve_depth -= 1;
@@ -1244,11 +1244,11 @@ pub const SimplexEngine = struct {
         if (self.controlledStop(control)) |status| return status;
         self.ensureDualIterationWorkspace(problem.num_rows, problem.num_cols) catch return .numerical_failure;
         if (self.active_pricing_kernel != .column)
-            self.pricing_row_view.build(problem.matrix) catch return .numerical_failure;
+            self.pricing_row_view.build(&problem.matrix) catch return .numerical_failure;
         if (!self.refreshProblemStorage(problem)) {
-            var cold_control = control;
+            var cold_control = control.*;
             cold_control.initial_basis = null;
-            return self.solveProblem(problem, cold_control);
+            return self.solveProblem(problem, &cold_control);
         }
         self.iterations = 0;
         if (self.publishEmptyRowInfeasibilityRay(problem)) return .infeasible;
@@ -1280,9 +1280,9 @@ pub const SimplexEngine = struct {
         {
             return repair_status;
         }
-        var cold_control = control;
+        var cold_control = control.*;
         cold_control.initial_basis = null;
-        return self.solveProblem(problem, cold_control);
+        return self.solveProblem(problem, &cold_control);
     }
 
     // Method re-exports from the engine_*.zig implementation files.

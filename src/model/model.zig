@@ -330,20 +330,20 @@ pub const Model = struct {
 
     // ── Model size queries ─────────────────────────────────────────────
 
-    pub fn numVars(self: Self) usize {
+    pub fn numVars(self: *const Self) usize {
         return self.num_vars + if (self.has_pending) self.countPendingAddVar() else 0;
     }
 
-    pub fn numConstrs(self: Self) usize {
+    pub fn numConstrs(self: *const Self) usize {
         return self.num_constrs + if (self.has_pending) self.countPendingAddConstr() else 0;
     }
 
-    pub fn numNz(self: Self) usize {
+    pub fn numNz(self: *const Self) usize {
         return self.matrix.csc().nnz();
     }
 
     /// Resolve a stable variable identity to its current dense position.
-    pub fn resolveVarId(self: Self, id: VarId) ModelError!usize {
+    pub fn resolveVarId(self: *const Self, id: VarId) ModelError!usize {
         const dense = self.var_handles.resolve(id) catch |err| return switch (err) {
             error.InvalidHandle => error.NotInModel,
             error.HandleExhausted => error.OutOfMemory,
@@ -362,7 +362,7 @@ pub const Model = struct {
         return self.var_handles.idAtDense(index) catch return error.NotInModel;
     }
 
-    pub fn resolveConstrId(self: Self, id: ConstrId) ModelError!usize {
+    pub fn resolveConstrId(self: *const Self, id: ConstrId) ModelError!usize {
         const dense = self.constr_handles.resolve(id) catch |err| return switch (err) {
             error.InvalidHandle => error.NotInModel,
             error.HandleExhausted => error.OutOfMemory,
@@ -380,7 +380,7 @@ pub const Model = struct {
         return self.constr_handles.idAtDense(index) catch return error.NotInModel;
     }
 
-    pub fn resolveQConstrId(self: Self, id: QConstrId) ModelError!usize {
+    pub fn resolveQConstrId(self: *const Self, id: QConstrId) ModelError!usize {
         return @intCast(self.qconstr_handles.resolve(id) catch return error.NotInModel);
     }
 
@@ -393,7 +393,7 @@ pub const Model = struct {
         return self.qconstr_handles.idAtDense(index) catch return error.NotInModel;
     }
 
-    pub fn resolveSosId(self: Self, id: SosId) ModelError!usize {
+    pub fn resolveSosId(self: *const Self, id: SosId) ModelError!usize {
         return @intCast(self.sos_handles.resolve(id) catch return error.NotInModel);
     }
 
@@ -406,7 +406,7 @@ pub const Model = struct {
         return self.sos_handles.idAtDense(index) catch return error.NotInModel;
     }
 
-    pub fn resolveGenConstrId(self: Self, id: GenConstrId) ModelError!usize {
+    pub fn resolveGenConstrId(self: *const Self, id: GenConstrId) ModelError!usize {
         return @intCast(self.genconstr_handles.resolve(id) catch return error.NotInModel);
     }
 
@@ -1361,7 +1361,7 @@ test "linear deletion rebuilds canonical matrix in packed storage" {
 
     const rebuilt = model.matrix.csc();
     try rebuilt.validate();
-    try std.testing.expect(rebuilt.storage != null);
+    try std.testing.expect(rebuilt.packedBlock() != null);
     try std.testing.expectEqual(@as(usize, 2), rebuilt.num_rows);
     try std.testing.expectEqual(@as(usize, 2), rebuilt.num_cols);
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, rebuilt.col_starts);

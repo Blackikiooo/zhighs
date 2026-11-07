@@ -133,18 +133,18 @@ pub const SymbolicWorkspace = struct {
     /// largest active entry in each candidate column and must be in `(0, 1]`.
     /// The numerical factorizer must apply that kernel pivot and its fill-in
     /// before asking for another choice.
-    pub fn plan(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, pivot_threshold: f64) SymbolicError!SymbolicPlanView {
+    pub fn plan(self: *SymbolicWorkspace, basis: *const sparse_basis.SparseBasisView, pivot_threshold: f64) SymbolicError!SymbolicPlanView {
         return self.planImpl(basis, pivot_threshold, false);
     }
 
     /// Return only the fill-free singleton prefix. The active masks and row
     /// companion describe the reduced kernel without materializing it.
-    pub fn planSingletonPrefix(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView) SymbolicError!SymbolicPlanView {
+    pub fn planSingletonPrefix(self: *SymbolicWorkspace, basis: *const sparse_basis.SparseBasisView) SymbolicError!SymbolicPlanView {
         return self.planImpl(basis, 0.1, true);
     }
 
     /// Shared planner implementing singleton-only and one-Markowitz modes.
-    fn planImpl(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, pivot_threshold: f64, comptime singleton_only: bool) SymbolicError!SymbolicPlanView {
+    fn planImpl(self: *SymbolicWorkspace, basis: *const sparse_basis.SparseBasisView, pivot_threshold: f64, comptime singleton_only: bool) SymbolicError!SymbolicPlanView {
         const n = basis.dimension;
         if (basis.starts.len != n + 1 or basis.rows.len != basis.values.len or
             !std.math.isFinite(pivot_threshold) or pivot_threshold <= 0.0 or pivot_threshold > 1.0 or
@@ -234,7 +234,7 @@ pub const SymbolicWorkspace = struct {
     }
 
     /// Build the row companion, counts, masks, and column-count buckets.
-    fn initialize(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView) SymbolicError!void {
+    fn initialize(self: *SymbolicWorkspace, basis: *const sparse_basis.SparseBasisView) SymbolicError!void {
         const n = basis.dimension;
         @memset(self.row_counts[0..n], 0);
         @memset(self.column_counts[0..n], 0);
@@ -290,7 +290,7 @@ pub const SymbolicWorkspace = struct {
     };
 
     /// Select the earliest minimum-merit threshold-eligible active pivot.
-    fn chooseMarkowitz(self: *SymbolicWorkspace, basis: sparse_basis.SparseBasisView, threshold: f64) ?Choice {
+    fn chooseMarkowitz(self: *SymbolicWorkspace, basis: *const sparse_basis.SparseBasisView, threshold: f64) ?Choice {
         const n = basis.dimension;
         var best: ?Choice = null;
         var best_merit: u64 = std.math.maxInt(u64);

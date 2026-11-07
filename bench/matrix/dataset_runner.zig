@@ -201,7 +201,7 @@ fn benchmarkOne(io: std.Io, allocator: std.mem.Allocator, dataset_dir: []const u
     try permuted.validate();
     var restored = try zhighs.matrix.permuteAssumeValid(allocator, permuted, row_map, col_map);
     defer restored.deinit(allocator);
-    if (!zhighs.matrix.eql(sample, restored)) return error.PermutationRoundTripMismatch;
+    if (!zhighs.matrix.eql(&sample, &restored)) return error.PermutationRoundTripMismatch;
 
     const total_ns: u64 = @intCast(nowNs() - total_started);
     const rss = peakRssKb();
@@ -229,7 +229,7 @@ fn rssOne(io: std.Io, allocator: std.mem.Allocator, dataset_dir: []const u8, nam
     var parsed = try parseMatrixMarket(io, allocator, path);
     defer parsed.matrix.deinit(allocator);
     try parsed.matrix.validate();
-    const requested = if (parsed.matrix.storage) |storage| storage.len else parsed.matrix.col_starts.len * @sizeOf(usize) +
+    const requested = if (parsed.matrix.storage.block()) |block| block.len else parsed.matrix.col_starts.len * @sizeOf(usize) +
         parsed.matrix.row_indices.len * @sizeOf(zhighs.RowId) +
         parsed.matrix.values.len * @sizeOf(f64);
     try writeLine(io, report, allocator, "{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{

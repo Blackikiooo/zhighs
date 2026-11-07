@@ -97,7 +97,7 @@ pub const SolveResult = struct {
     }
 };
 
-pub fn validControl(control: SolveControl) bool {
+pub fn validControl(control: *const SolveControl) bool {
     return std.math.isFinite(control.integer_tolerance) and control.integer_tolerance >= 0 and
         std.math.isFinite(control.absolute_gap) and control.absolute_gap >= 0 and
         std.math.isFinite(control.relative_gap) and control.relative_gap >= 0;

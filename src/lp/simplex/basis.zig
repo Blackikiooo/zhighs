@@ -7,7 +7,7 @@ const std = @import("std");
 
 /// Public-compatible values keep zero-copy status views possible at the model
 /// adapter boundary. `free` and `fixed` remain solver-internal extensions.
-pub const BasisStatus = enum(i8) { basic = 0, at_lower = -1, at_upper = 1, superbasic = 2, free = 3, fixed = 4 };
+pub const BasisStatus = enum(i8) { at_lower = -1, basic = 0, at_upper = 1, superbasic = 2, free = 3, fixed = 4 };
 
 /// Errors raised by basis mutation operations.
 pub const BasisError = error{ RowOutOfRange, ColumnOutOfRange, ColumnAlreadyBasic };

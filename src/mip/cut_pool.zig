@@ -81,7 +81,7 @@ pub const CutPool = struct {
         try self.rows.reserve(allocator, 1, cut.nnz());
         try self.metadata.ensureUnusedCapacity(allocator, 1);
         const id: CutId = @enumFromInt(self.metadata.len);
-        _ = self.rows.appendRowPreReserved(cut);
+        _ = self.rows.appendRowPreReserved(&cut);
         self.metadata.appendAssumeCapacity(.{ .rhs = rhs_value, .hash = hash, .efficacy = efficacy, .age = 0, .active = true });
         self.revision +%= 1;
         return .{ .added = id };
@@ -136,7 +136,10 @@ pub const CutPool = struct {
         defer active_rows.deinit(allocator);
         try active_rows.reserve(allocator, self.activeCount(), self.rows.nnz());
         for (0..self.len()) |index| {
-            if (self.metadata.items(.active)[index]) _ = active_rows.appendRowPreReserved(self.rows.rowAssumeValid(index));
+            if (self.metadata.items(.active)[index]) {
+                const row_view = self.rows.rowAssumeValid(index);
+                _ = active_rows.appendRowPreReserved(&row_view);
+            }
         }
         return active_rows.appendToCsc(allocator, base);
     }

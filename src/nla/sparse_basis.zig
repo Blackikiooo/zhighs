@@ -88,7 +88,7 @@ pub const SparseBasisBuffers = struct {
     /// afterwards, then one signed artificial identity column per row.
     pub fn assemble(
         self: *SparseBasisBuffers,
-        matrix: csc.CscView,
+        matrix: *const csc.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
         column_scale: []const f64,

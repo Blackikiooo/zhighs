@@ -224,7 +224,7 @@ pub fn main() !void {
     @memset(y, 0.0);
     start = nowNs();
     for (0..product_repeats) |_| {
-        zhighs.matrix.addProductAssumeValid(matrix, 1.0, dense_x, y);
+        zhighs.matrix.addProductAssumeValid(&matrix, 1.0, dense_x, y);
         clobber(y);
     }
     result_checksum = checksum(y);
@@ -232,7 +232,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..quad_repeats) |_| {
-        zhighs.matrix.multiplyHighPrecisionAssumeValid(matrix, dense_x, y, hcd_scratch);
+        zhighs.matrix.multiplyHighPrecisionAssumeValid(&matrix, dense_x, y, hcd_scratch);
         clobber(y);
     }
     result_checksum = checksum(y);
@@ -240,7 +240,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..quad_repeats) |_| {
-        zhighs.matrix.multiplyHighPrecisionFastAssumeValid(matrix, dense_x, y, hcd_scratch);
+        zhighs.matrix.multiplyHighPrecisionFastAssumeValid(&matrix, dense_x, y, hcd_scratch);
         clobber(y);
     }
     result_checksum = checksum(y);
@@ -248,7 +248,7 @@ pub fn main() !void {
 
     start = nowNs();
     for (0..quad_repeats) |_| {
-        zhighs.matrix.multiplyCompensatedAssumeValid(matrix, dense_x, y, hcd_scratch);
+        zhighs.matrix.multiplyCompensatedAssumeValid(&matrix, dense_x, y, hcd_scratch);
         clobber(y);
     }
     result_checksum = checksum(y);

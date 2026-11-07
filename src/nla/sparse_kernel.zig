@@ -258,18 +258,18 @@ pub const MutableSparseKernel = struct {
     }
 
     /// Validate and load a complete compact CSC basis into intrusive row/column lists.
-    pub fn load(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
+    pub fn load(self: *MutableSparseKernel, basis: *const sparse_basis.SparseBasisView) KernelError!void {
         return self.loadImpl(basis, true, null, null, false, &.{}, &.{});
     }
 
     /// Trusted hot-path load for basis views emitted by `SparseBasisBuffers`.
     /// Dimensions, sorted rows and finite nonzero values are not rescanned.
-    pub fn loadAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView) KernelError!void {
+    pub fn loadAssumeValid(self: *MutableSparseKernel, basis: *const sparse_basis.SparseBasisView) KernelError!void {
         return self.loadImpl(basis, false, null, null, false, &.{}, &.{});
     }
 
     /// Load only the active reduced kernel after symbolic singleton peeling.
-    pub fn loadReducedAssumeValid(self: *MutableSparseKernel, basis: sparse_basis.SparseBasisView, active_rows: []const bool, active_columns: []const bool) KernelError!void {
+    pub fn loadReducedAssumeValid(self: *MutableSparseKernel, basis: *const sparse_basis.SparseBasisView, active_rows: []const bool, active_columns: []const bool) KernelError!void {
         if (active_rows.len != basis.dimension or active_columns.len != basis.dimension) return error.InvalidBasis;
         return self.loadImpl(basis, false, active_rows, active_columns, false, &.{}, &.{});
     }
@@ -279,7 +279,7 @@ pub const MutableSparseKernel = struct {
     /// column-local, but avoids two count writes per retained entry.
     pub fn loadReducedSymbolicAssumeValid(
         self: *MutableSparseKernel,
-        basis: sparse_basis.SparseBasisView,
+        basis: *const sparse_basis.SparseBasisView,
         active_rows: []const bool,
         active_columns: []const bool,
         row_counts: []const u32,
@@ -294,7 +294,7 @@ pub const MutableSparseKernel = struct {
     /// Shared loader for validated, reduced, and symbolic-count input modes.
     fn loadImpl(
         self: *MutableSparseKernel,
-        basis: sparse_basis.SparseBasisView,
+        basis: *const sparse_basis.SparseBasisView,
         comptime validate: bool,
         reduced_rows: ?[]const bool,
         reduced_columns: ?[]const bool,

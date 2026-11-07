@@ -1,5 +1,15 @@
 //! Read-only sparse matrix statistics and norms.
 //!
+//! Role: read-only statistics and products; never changes the matrix.
+//! Shape: m×n -> scalar, m-vector, or n-vector.
+//!
+//! Every entry point takes `*const CscMatrix` rather than a by-value copy:
+//! `CscMatrix` is a 104-byte header, so passing it by value makes each call
+//! site spill and reload the whole header even though the underlying streams
+//! are shared. The pointer also pins the header, but note that it does not make
+//! the coefficients immutable (`values` is still `[]f64`); callers that need a
+//! type-level read-only guarantee should pass `CscView` instead.
+//!
 //! Kernels accept caller-owned work buffers where necessary. This keeps memory
 //! allocation out of iterative solver loops and makes scratch lifetime explicit.
 
@@ -28,7 +38,7 @@ pub const ValueAssessment = struct {
 
 /// Exact canonical-storage equality. Canonical CSC has a unique ordering, so
 /// storage equality is also mathematical equality under exact f64 semantics.
-pub fn eql(lhs: csc.CscMatrix, rhs: csc.CscMatrix) bool {
+pub fn eql(lhs: *const csc.CscMatrix, rhs: *const csc.CscMatrix) bool {
     return lhs.num_rows == rhs.num_rows and lhs.num_cols == rhs.num_cols and
         std.mem.eql(usize, lhs.col_starts, rhs.col_starts) and
         std.mem.eql(foundation.RowId, lhs.row_indices, rhs.row_indices) and
@@ -36,7 +46,7 @@ pub fn eql(lhs: csc.CscMatrix, rhs: csc.CscMatrix) bool {
 }
 
 /// Minimum and maximum absolute nonzero value, or null for an empty matrix.
-pub fn absoluteRange(matrix: csc.CscMatrix) ?AbsoluteRange {
+pub fn absoluteRange(matrix: *const csc.CscMatrix) ?AbsoluteRange {
     if (matrix.values.len == 0) return null;
     const lanes = memory.nativeVectorLanes(f64);
     const Vec = @Vector(lanes, f64);
@@ -60,7 +70,7 @@ pub fn absoluteRange(matrix: csc.CscMatrix) ?AbsoluteRange {
 }
 
 /// Counts values at or below small_limit and at or above large_limit.
-pub fn assessValues(matrix: csc.CscMatrix, small_limit: f64, large_limit: f64) csc.MatrixError!ValueAssessment {
+pub fn assessValues(matrix: *const csc.CscMatrix, small_limit: f64, large_limit: f64) csc.MatrixError!ValueAssessment {
     if (!std.math.isFinite(small_limit) or !std.math.isFinite(large_limit) or
         small_limit < 0.0 or large_limit < small_limit) return error.InvalidTolerance;
     var small_count: usize = 0;
@@ -74,25 +84,25 @@ pub fn assessValues(matrix: csc.CscMatrix, small_limit: f64, large_limit: f64) c
 }
 
 /// Return whether any coefficient magnitude exceeds a validated finite limit.
-pub fn hasLargeValue(matrix: csc.CscMatrix, large_limit: f64) csc.MatrixError!bool {
+pub fn hasLargeValue(matrix: *const csc.CscMatrix, large_limit: f64) csc.MatrixError!bool {
     if (!std.math.isFinite(large_limit) or large_limit < 0.0) return error.InvalidTolerance;
     for (matrix.values) |value| if (@abs(value) >= large_limit) return true;
     return false;
 }
 
 /// Largest absolute matrix entry. Returns zero for an empty matrix.
-pub fn maxAbs(matrix: csc.CscMatrix) f64 {
+pub fn maxAbs(matrix: *const csc.CscMatrix) f64 {
     return if (absoluteRange(matrix)) |range| range.max else 0.0;
 }
 
 /// Writes the absolute sum of every column.
-pub fn columnOneNorms(matrix: csc.CscMatrix, output: []f64) csc.MatrixError!void {
+pub fn columnOneNorms(matrix: *const csc.CscMatrix, output: []f64) csc.MatrixError!void {
     if (output.len != matrix.num_cols) return error.DimensionMismatch;
     columnOneNormsAssumeValid(matrix, output);
 }
 
 /// Trusted computation of each column's sum of absolute coefficients.
-pub fn columnOneNormsAssumeValid(matrix: csc.CscMatrix, output: []f64) void {
+pub fn columnOneNormsAssumeValid(matrix: *const csc.CscMatrix, output: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum: f64 = 0.0;
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position|
@@ -102,7 +112,7 @@ pub fn columnOneNormsAssumeValid(matrix: csc.CscMatrix, output: []f64) void {
 }
 
 /// Matrix one-norm: maximum absolute column sum.
-pub fn oneNorm(matrix: csc.CscMatrix) f64 {
+pub fn oneNorm(matrix: *const csc.CscMatrix) f64 {
     var result: f64 = 0.0;
     for (0..matrix.num_cols) |col| {
         var sum: f64 = 0.0;
@@ -114,20 +124,20 @@ pub fn oneNorm(matrix: csc.CscMatrix) f64 {
 }
 
 /// Writes absolute row sums into caller-provided scratch/output storage.
-pub fn rowOneNorms(matrix: csc.CscMatrix, output: []f64) csc.MatrixError!void {
+pub fn rowOneNorms(matrix: *const csc.CscMatrix, output: []f64) csc.MatrixError!void {
     if (output.len != matrix.num_rows) return error.DimensionMismatch;
+    @memset(output, 0.0);
     rowOneNormsAssumeValid(matrix, output);
 }
 
 /// Trusted computation of each row's sum of absolute coefficients.
-pub fn rowOneNormsAssumeValid(matrix: csc.CscMatrix, output: []f64) void {
-    @memset(output, 0.0);
+pub fn rowOneNormsAssumeValid(matrix: *const csc.CscMatrix, output: []f64) void {
     for (matrix.row_indices, matrix.values) |row, value|
         output[row.toUsize()] += @abs(value);
 }
 
 /// Matrix infinity-norm using caller-owned row scratch.
-pub fn infinityNorm(matrix: csc.CscMatrix, row_scratch: []f64) csc.MatrixError!f64 {
+pub fn infinityNorm(matrix: *const csc.CscMatrix, row_scratch: []f64) csc.MatrixError!f64 {
     try rowOneNorms(matrix, row_scratch);
     var result: f64 = 0.0;
     for (row_scratch) |sum| result = @max(result, sum);
@@ -138,7 +148,7 @@ pub fn infinityNorm(matrix: csc.CscMatrix, row_scratch: []f64) csc.MatrixError!f
 ///
 /// The scaled sum-of-squares algorithm avoids overflow from value*value and
 /// underflow when entries have very different magnitudes.
-pub fn frobeniusNorm(matrix: csc.CscMatrix) f64 {
+pub fn frobeniusNorm(matrix: *const csc.CscMatrix) f64 {
     var scale: f64 = 0.0;
     var scaled_squares: f64 = 1.0;
     for (matrix.values) |value| {
@@ -157,16 +167,16 @@ pub fn frobeniusNorm(matrix: csc.CscMatrix) f64 {
 }
 
 /// Computes y += alpha * A * x without clearing y.
-pub fn addProduct(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
+pub fn addProduct(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_cols or y.len != matrix.num_rows) return error.DimensionMismatch;
     if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
     addProductAssumeValid(matrix, alpha, x, y);
 }
 
 /// Trusted leaf kernel for `y += alpha*A*x` with dense `x`.
-pub noinline fn addProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
+pub noinline fn addProductAssumeValid(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
-    if (matrix.compact_col_starts) |starts|
+    if (matrix.compactColStarts()) |starts|
         return addProductKernel(foundation.HUInt, matrix.num_cols, starts, matrix.row_indices, matrix.values, alpha, x, y);
     return addProductKernel(usize, matrix.num_cols, matrix.col_starts, matrix.row_indices, matrix.values, alpha, x, y);
 }
@@ -187,14 +197,14 @@ noinline fn addProductKernel(comptime Offset: type, num_cols: usize, starts: []c
 }
 
 /// Checked `y += alpha*A*x` that skips exactly zero input multipliers.
-pub fn addProductSkippingZeros(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
+pub fn addProductSkippingZeros(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_cols or y.len != matrix.num_rows) return error.DimensionMismatch;
     if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
     addProductSkippingZerosAssumeValid(matrix, alpha, x, y);
 }
 
 /// Trusted zero-skipping accumulation kernel.
-pub fn addProductSkippingZerosAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
+pub fn addProductSkippingZerosAssumeValid(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
     for (0..matrix.num_cols) |col| {
         const multiplier = alpha * x[col];
@@ -207,14 +217,14 @@ pub fn addProductSkippingZerosAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: 
 }
 
 /// Computes y += alpha * transpose(A) * x without clearing y.
-pub fn addTransposeProduct(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
+pub fn addTransposeProduct(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_rows or y.len != matrix.num_cols) return error.DimensionMismatch;
     if (!std.math.isFinite(alpha)) return error.NonFiniteValue;
     addTransposeProductAssumeValid(matrix, alpha, x, y);
 }
 
 /// Trusted accumulation `y += alpha*A^T*x`.
-pub fn addTransposeProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
+pub fn addTransposeProductAssumeValid(matrix: *const csc.CscMatrix, alpha: f64, x: []const f64, y: []f64) void {
     if (alpha == 0.0) return;
     for (0..matrix.num_cols) |col| {
         var sum: f64 = 0.0;
@@ -225,14 +235,14 @@ pub fn addTransposeProductAssumeValid(matrix: csc.CscMatrix, alpha: f64, x: []co
 }
 
 /// High-precision y = A*x using caller-owned HCD row scratch.
-pub fn multiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) csc.MatrixError!void {
+pub fn multiplyHighPrecision(matrix: *const csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) csc.MatrixError!void {
     if (x.len != matrix.num_cols or y.len != matrix.num_rows or scratch.len != matrix.num_rows)
         return error.DimensionMismatch;
     multiplyHighPrecisionAssumeValid(matrix, x, y, scratch);
 }
 
 /// Trusted `A*x` using higher-precision accumulators supplied by the caller.
-pub fn multiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
+pub fn multiplyHighPrecisionAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
     for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
     for (0..matrix.num_cols) |col| {
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -246,7 +256,7 @@ pub fn multiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y
 /// HiGHS-compatible fast HCD accumulation: residuals are accumulated without
 /// per-entry renormalization. Faster, but the robust variant above is preferred
 /// when a row may contain very many terms or extreme dynamic range.
-pub fn multiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
+pub fn multiplyHighPrecisionFastAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
     for (scratch) |*sum| sum.* = foundation.HCD.initWithHD(0.0);
     for (0..matrix.num_cols) |col| {
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -260,7 +270,7 @@ pub fn multiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f6
 /// Matches the FMA-contracted code emitted for HiGHS productQuad by the
 /// benchmark's GCC `-O3 -march=native -flto` configuration. Exact-product
 /// callers must use one of the `multiplyHighPrecision*` APIs instead.
-pub fn multiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
+pub fn multiplyCompensatedAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64, scratch: []foundation.HCD) void {
     const ncol = matrix.num_cols;
     const starts = matrix.col_starts;
     const ri = matrix.row_indices;
@@ -295,13 +305,13 @@ pub fn multiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: 
 }
 
 /// High-precision y = transpose(A)*x; CSC needs only one HCD accumulator.
-pub fn transposeMultiplyHighPrecision(matrix: csc.CscMatrix, x: []const f64, y: []f64) csc.MatrixError!void {
+pub fn transposeMultiplyHighPrecision(matrix: *const csc.CscMatrix, x: []const f64, y: []f64) csc.MatrixError!void {
     if (x.len != matrix.num_rows or y.len != matrix.num_cols) return error.DimensionMismatch;
     transposeMultiplyHighPrecisionAssumeValid(matrix, x, y);
 }
 
 /// Trusted `A^T*x` with high-precision per-column accumulation.
-pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
+pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -313,7 +323,7 @@ pub fn transposeMultiplyHighPrecisionAssumeValid(matrix: csc.CscMatrix, x: []con
 }
 
 /// Fast trusted high-precision transpose multiply using the target accumulator.
-pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
+pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -325,7 +335,7 @@ pub fn transposeMultiplyHighPrecisionFastAssumeValid(matrix: csc.CscMatrix, x: [
 }
 
 /// Trusted `A^T*x` using compensated f64 summation per column.
-pub fn transposeMultiplyCompensatedAssumeValid(matrix: csc.CscMatrix, x: []const f64, y: []f64) void {
+pub fn transposeMultiplyCompensatedAssumeValid(matrix: *const csc.CscMatrix, x: []const f64, y: []f64) void {
     for (0..matrix.num_cols) |col| {
         var sum = foundation.HCD.initWithHD(0.0);
         for (matrix.col_starts[col]..matrix.col_starts[col + 1]) |position| {
@@ -342,15 +352,15 @@ test "matrix norms and absolute statistics" {
     var values = [_]f64{ -3.0, 4.0, -12.0 };
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
 
-    try std.testing.expectEqual(@as(f64, 12.0), maxAbs(matrix));
-    try std.testing.expectEqual(@as(f64, 12.0), oneNorm(matrix));
+    try std.testing.expectEqual(@as(f64, 12.0), maxAbs(&matrix));
+    try std.testing.expectEqual(@as(f64, 12.0), oneNorm(&matrix));
     var columns: [2]f64 = undefined;
-    try columnOneNorms(matrix, &columns);
+    try columnOneNorms(&matrix, &columns);
     try std.testing.expectEqualSlices(f64, &.{ 7.0, 12.0 }, &columns);
     var rows_scratch: [2]f64 = undefined;
-    try std.testing.expectEqual(@as(f64, 16.0), try infinityNorm(matrix, &rows_scratch));
+    try std.testing.expectEqual(@as(f64, 16.0), try infinityNorm(&matrix, &rows_scratch));
     try std.testing.expectEqualSlices(f64, &.{ 3.0, 16.0 }, &rows_scratch);
-    try std.testing.expectEqual(@as(f64, 13.0), frobeniusNorm(matrix));
+    try std.testing.expectEqual(@as(f64, 13.0), frobeniusNorm(&matrix));
 }
 
 test "stable Frobenius norm avoids intermediate overflow" {
@@ -358,7 +368,7 @@ test "stable Frobenius norm avoids intermediate overflow" {
     var rows = [_]foundation.RowId{ try foundation.RowId.init(0), try foundation.RowId.init(1) };
     var values = [_]f64{ 1e200, 1e200 };
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 1, &starts, &rows, &values);
-    const norm = frobeniusNorm(matrix);
+    const norm = frobeniusNorm(&matrix);
     try std.testing.expect(std.math.isFinite(norm));
     try std.testing.expectApproxEqRel(@sqrt(2.0) * 1e200, norm, 1e-15);
 }
@@ -367,9 +377,9 @@ test "norm output dimensions are checked" {
     var matrix = try csc.CscMatrix.initZero(std.testing.allocator, 2, 3);
     defer matrix.deinit(std.testing.allocator);
     var wrong: [1]f64 = undefined;
-    try std.testing.expectError(error.DimensionMismatch, columnOneNorms(matrix, &wrong));
-    try std.testing.expectError(error.DimensionMismatch, rowOneNorms(matrix, &wrong));
-    try std.testing.expectError(error.DimensionMismatch, infinityNorm(matrix, &wrong));
+    try std.testing.expectError(error.DimensionMismatch, columnOneNorms(&matrix, &wrong));
+    try std.testing.expectError(error.DimensionMismatch, rowOneNorms(&matrix, &wrong));
+    try std.testing.expectError(error.DimensionMismatch, infinityNorm(&matrix, &wrong));
 }
 
 test "range assessment equality and alpha products" {
@@ -378,20 +388,20 @@ test "range assessment equality and alpha products" {
     var rows = [_]RowId{ try RowId.init(0), try RowId.init(1), try RowId.init(1) };
     var values = [_]f64{ -0.25, 4.0, 20.0 };
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(2, 2, &starts, &rows, &values);
-    try std.testing.expect(eql(matrix, matrix));
-    const range = absoluteRange(matrix).?;
+    try std.testing.expect(eql(&matrix, &matrix));
+    const range = absoluteRange(&matrix).?;
     try std.testing.expectEqual(@as(f64, 0.25), range.min);
     try std.testing.expectEqual(@as(f64, 20.0), range.max);
-    const assessment = try assessValues(matrix, 0.5, 10.0);
+    const assessment = try assessValues(&matrix, 0.5, 10.0);
     try std.testing.expectEqual(@as(usize, 1), assessment.small_count);
     try std.testing.expectEqual(@as(usize, 1), assessment.large_count);
-    try std.testing.expect(try hasLargeValue(matrix, 20.0));
+    try std.testing.expect(try hasLargeValue(&matrix, 20.0));
 
     var y = [_]f64{ 1.0, 2.0 };
-    try addProduct(matrix, 2.0, &.{ 2.0, 1.0 }, &y);
+    try addProduct(&matrix, 2.0, &.{ 2.0, 1.0 }, &y);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 58.0 }, &y);
     var yt = [_]f64{ 1.0, 2.0 };
-    try addTransposeProduct(matrix, 0.5, &.{ 2.0, 3.0 }, &yt);
+    try addTransposeProduct(&matrix, 0.5, &.{ 2.0, 3.0 }, &yt);
     try std.testing.expectEqualSlices(f64, &.{ 6.75, 32.0 }, &yt);
 }
 
@@ -405,11 +415,11 @@ test "absolute range SIMD bulk and scalar tail handle unaligned finite values" {
     };
     var storage = [_]f64{ 123.0, -0.0, -8.0, 0.125, -3.0, 11.0, -5.0, 2.0, -7.0, 4.0 };
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(9, 1, &starts, &rows, storage[1..]);
-    const range = absoluteRange(matrix).?;
+    const range = absoluteRange(&matrix).?;
     try std.testing.expectEqual(@as(f64, 0.0), range.min);
     try std.testing.expect(!std.math.signbit(range.min));
     try std.testing.expectEqual(@as(f64, 11.0), range.max);
-    try std.testing.expectEqual(@as(f64, 11.0), maxAbs(matrix));
+    try std.testing.expectEqual(@as(f64, 11.0), maxAbs(&matrix));
 }
 
 test "high precision products retain small residual" {
@@ -420,6 +430,6 @@ test "high precision products retain small residual" {
     const matrix = csc.CscMatrix.initBorrowedAssumeValid(1, 3, &starts, &rows, &values);
     var y: [1]f64 = undefined;
     var scratch: [1]foundation.HCD = undefined;
-    try multiplyHighPrecision(matrix, &.{ 1.0, 1.0, 1.0 }, &y, &scratch);
+    try multiplyHighPrecision(&matrix, &.{ 1.0, 1.0, 1.0 }, &y, &scratch);
     try std.testing.expectEqual(@as(f64, 1.0), y[0]);
 }

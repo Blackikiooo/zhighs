@@ -24,7 +24,7 @@ pub const ProblemView = struct {
     relaxation: solver.LpProblemView,
     integrality: []const Integrality,
 
-    pub fn validate(self: ProblemView) !void {
+    pub fn validate(self: *const ProblemView) !void {
         try self.relaxation.validate();
         if (self.integrality.len != self.relaxation.num_cols) return error.DimensionMismatch;
     }

@@ -21,7 +21,7 @@ pub const Node = struct {
     depth: u32 = 0,
     branch_origin: ?BranchOrigin = null,
 
-    pub fn childWith(self: Node, arena: *DomainChangeArena, allocator: std.mem.Allocator, bound: f64, change: BoundChange) !Node {
+    pub fn childWith(self: *const Node, arena: *DomainChangeArena, allocator: std.mem.Allocator, bound: f64, change: BoundChange) !Node {
         return .{
             .change_head = try arena.appendWithReason(allocator, self.change_head, change, .branch),
             .bound = bound,

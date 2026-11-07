@@ -93,7 +93,31 @@ pub fn build(
             }
         }
     }
-    for (0..n) |i| std.mem.sort(u32, neighbors[starts[i]..starts[i + 1]], {}, std.sort.asc(u32));
+    // Sort each adjacency list, then compact duplicates across rows. The
+    // counting pass above is only an upper bound: tag `marker[q] == r`
+    // remembers a single row per node, so a pair is recounted whenever a
+    // third row overwrites the tag between two columns sharing it. Duplicate
+    // edges inflate degrees past n-1 (out-of-bounds ordering buckets) and
+    // multiply the neighbour walks in the symbolic factorization, so the
+    // graph is deduplicated here in place.
+    var read: usize = 0;
+    var write: usize = 0;
+    for (0..n) |i| {
+        const end = starts[i + 1];
+        starts[i] = write;
+        std.mem.sort(u32, neighbors[read..end], {}, std.sort.asc(u32));
+        var previous: ?u32 = null;
+        for (neighbors[read..end]) |v| {
+            if (previous) |p| {
+                if (p == v) continue;
+            }
+            previous = v;
+            neighbors[write] = v;
+            write += 1;
+        }
+        read = end;
+    }
+    starts[n] = write;
 
     return .{ .allocator = allocator, .n = n, .starts = starts, .neighbors = neighbors };
 }
@@ -251,4 +275,18 @@ pub fn symbolicPattern(
         std.mem.sort(u32, cols[starts[k]..starts[k + 1]], {}, std.sort.asc(u32));
     }
     return .{ .allocator = allocator, .starts = starts, .cols = cols };
+}
+
+test "build deduplicates edges shared by several columns" {
+    const a = std.testing.allocator;
+    // Two identical columns over rows {0,1,2}: three undirected edges, six
+    // directed entries. Recounting a pair once per column would store twelve.
+    const col_starts = [_]usize{ 0, 3, 6 };
+    const row_indices = [_]usize{ 0, 1, 2, 0, 1, 2 };
+    var g = try build(a, 3, &col_starts, &row_indices);
+    defer g.deinit();
+    try std.testing.expectEqual(@as(usize, 6), g.starts[3]);
+    try std.testing.expectEqual(@as(usize, 3), g.edgeCount());
+    for (0..3) |i| try std.testing.expectEqual(@as(usize, 2), g.starts[i + 1] - g.starts[i]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, g.neighbors[g.starts[0]..g.starts[1]]);
 }

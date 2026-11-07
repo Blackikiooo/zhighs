@@ -289,13 +289,13 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, requested, "alpha_ax_plus_y")) {
         @memset(h.y, 0.0);
         for (0..repeats) |_| {
-            zhighs.matrix.addProductAssumeValid(h.matrix, 1.0, h.dense_x, h.y);
+            zhighs.matrix.addProductAssumeValid(&h.matrix, 1.0, h.dense_x, h.y);
             clobberPtr(h.y.ptr);
         }
         result_checksum = checksum(h.y);
     } else if (std.mem.eql(u8, requested, "product_quad")) {
         for (0..repeats) |_| {
-            zhighs.matrix.multiplyCompensatedAssumeValid(h.matrix, h.dense_x, h.y, h.hcd_scratch);
+            zhighs.matrix.multiplyCompensatedAssumeValid(&h.matrix, h.dense_x, h.y, h.hcd_scratch);
             clobberPtr(h.y.ptr);
         }
         result_checksum = checksum(h.y);

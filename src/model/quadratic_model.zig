@@ -63,7 +63,7 @@ pub const QuadraticConstraint = struct {
     }
 
     /// Number of non‑zero linear coefficients.
-    pub fn linearNnz(self: Self) usize {
+    pub fn linearNnz(self: *const Self) usize {
         return self.linear_indices.len;
     }
 

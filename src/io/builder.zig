@@ -66,7 +66,7 @@ pub const Builder = struct {
     /// Name bytes accepted so far.
     name_bytes: usize = 0,
     /// Cooperative cancellation poller for long finalization loops.
-    control: types.ParseControl = types.ParseControl.init(.{}),
+    control: types.ParseControl = .{ .flag = null, .interval = 1, .remaining = 1 },
 
     /// Strong IDs make invalid dimensions fail at append time and keep each
     /// term at 16 bytes with the default 32-bit index configuration.
@@ -105,7 +105,7 @@ pub const Builder = struct {
         self.max_columns = options.max_columns;
         self.max_matrix_terms = options.max_matrix_terms;
         self.max_name_bytes = options.max_name_bytes;
-        self.control = types.ParseControl.init(options);
+        self.control = types.ParseControl.init(&options);
     }
 
     /// Release every temporary semantic and term array.

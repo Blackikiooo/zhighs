@@ -16,7 +16,7 @@ pub const CutRelaxation = struct {
     pool_revision: ?usize = null,
     structure_revision: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, base: solver.LpProblemView) !CutRelaxation {
+    pub fn init(allocator: std.mem.Allocator, base: *const solver.LpProblemView) !CutRelaxation {
         const starts = try allocator.dupe(usize, base.matrix.col_starts);
         errdefer allocator.free(starts);
         const rows = try allocator.dupe(@TypeOf(base.matrix.row_indices[0]), base.matrix.row_indices);
@@ -26,7 +26,7 @@ pub const CutRelaxation = struct {
         errdefer base_matrix.deinit(allocator);
         var base_rows = try matrix.CsrCache.buildAssumeValid(allocator, base_matrix, 0);
         errdefer base_rows.deinit(allocator);
-        return .{ .allocator = allocator, .base = base, .base_matrix = base_matrix, .base_rows = base_rows, .pool_revision = 0 };
+        return .{ .allocator = allocator, .base = base.*, .base_matrix = base_matrix, .base_rows = base_rows, .pool_revision = 0 };
     }
 
     pub fn deinit(self: *CutRelaxation) void {
@@ -97,7 +97,7 @@ test "cut relaxation appends active pool rows with stable base CSR" {
     };
     var cuts = try CutPool.init(std.testing.allocator, 2);
     defer cuts.deinit(std.testing.allocator);
-    var relaxation = try CutRelaxation.init(std.testing.allocator, base);
+    var relaxation = try CutRelaxation.init(std.testing.allocator, &base);
     defer relaxation.deinit();
     const columns = [_]foundation.ColId{ try foundation.ColId.init(0), try foundation.ColId.init(1) };
     _ = try cuts.add(std.testing.allocator, matrix.SparseVectorView(foundation.ColId).initAssumeValid(2, &columns, &.{ 1.0, 1.0 }), 1.0, 0.5);

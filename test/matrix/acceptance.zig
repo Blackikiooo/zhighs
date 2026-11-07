@@ -81,7 +81,7 @@ test "random structural transform chain remains canonical" {
         var restored = try matrix.transpose(std.testing.allocator, transposed);
         defer restored.deinit(std.testing.allocator);
         try restored.validate();
-        try std.testing.expect(matrix.eql(source, restored));
+        try std.testing.expect(matrix.eql(&source, &restored));
 
         const appended_row_starts = [_]usize{ 0, 1, 1 };
         const appended_cols = [_]foundation.ColId{try foundation.ColId.fromUsize(random.intRangeLessThan(usize, 0, cols_count))};

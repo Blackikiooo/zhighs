@@ -55,14 +55,14 @@ pub fn addVar(
 /// indices for cache-friendly matrix storage.
 pub fn addVarColumn(
     self: *Model,
-    column: Column,
+    column: *const Column,
     obj: f64,
     lb: f64,
     ub: f64,
     vtype: VarType,
     name: ?[]const u8,
 ) ModelError!void {
-    const indices = try column.resolveIndices(self.allocator, self.*);
+    const indices = try column.resolveIndices(self.allocator, self);
     defer self.allocator.free(indices);
     return self.addVar(indices.len, indices, column.values.items, obj, lb, ub, vtype, name);
 }
@@ -222,7 +222,7 @@ pub fn delConstrs(self: *Model, indices: []const usize) ModelError!void {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Look up a variable index by name
-pub fn getVarByName(self: Model, name: []const u8) ModelError!usize {
+pub fn getVarByName(self: *const Model, name: []const u8) ModelError!usize {
     for (self.var_names, 0..) |maybe_n, i| {
         if (maybe_n) |n| if (std.mem.eql(u8, n, name)) return i;
     }
@@ -230,7 +230,7 @@ pub fn getVarByName(self: Model, name: []const u8) ModelError!usize {
 }
 
 /// Look up a constraint index by name
-pub fn getConstrByName(self: Model, name: []const u8) ModelError!usize {
+pub fn getConstrByName(self: *const Model, name: []const u8) ModelError!usize {
     for (self.constr_names, 0..) |maybe_n, i| {
         if (maybe_n) |n| if (std.mem.eql(u8, n, name)) return i;
     }
@@ -238,7 +238,7 @@ pub fn getConstrByName(self: Model, name: []const u8) ModelError!usize {
 }
 
 /// Retrieve a single coefficient from the constraint matrix
-pub fn getCoeff(self: Model, constr_idx: usize, var_idx: usize) ModelError!f64 {
+pub fn getCoeff(self: *const Model, constr_idx: usize, var_idx: usize) ModelError!f64 {
     if (var_idx >= self.num_vars or constr_idx >= self.num_constrs) return error.IndexOutOfRange;
     const csc = self.matrix.csc();
     const start = csc.col_starts[var_idx];
@@ -250,7 +250,7 @@ pub fn getCoeff(self: Model, constr_idx: usize, var_idx: usize) ModelError!f64 {
 }
 
 /// Retrieve the indices of all variables
-pub fn getVars(self: Model, start: usize, len: usize, indices: []usize) ModelError!void {
+pub fn getVars(self: *const Model, start: usize, len: usize, indices: []usize) ModelError!void {
     if (indices.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         const idx = start + i;
@@ -260,7 +260,7 @@ pub fn getVars(self: Model, start: usize, len: usize, indices: []usize) ModelErr
 }
 
 /// Retrieve the indices of all constraints
-pub fn getConstrs(self: Model, start: usize, len: usize, indices: []usize) ModelError!void {
+pub fn getConstrs(self: *const Model, start: usize, len: usize, indices: []usize) ModelError!void {
     if (indices.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         const idx = start + i;

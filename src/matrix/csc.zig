@@ -1,5 +1,11 @@
 //! Canonical compressed sparse column (CSC) matrix storage.
 //!
+//! Role: authoritative storage, validation, and read-only compute kernels.
+//! Shape: m×n -> m×n (no structural change).
+//! Owns: the three streams (`Storage`) or borrows them (`CscView`).
+//! Build with `builder.zig`, read rows with `csr_view.zig`, transform with
+//! `transpose.zig` / `slice.zig` / `edit.zig` / `permutation.zig`.
+//!
 //! This is the read/compute representation used after construction. Columns
 //! are contiguous; row indices in every column are strictly increasing; and
 //! duplicate coordinates and explicit zeros are forbidden.
@@ -58,14 +64,53 @@ pub const CscMatrix = struct {
     row_indices: []RowId,
     /// Nonzero coefficients parallel to `row_indices`.
     values: []f64,
-    /// Optional single allocation backing the three primary slices.
-    storage: ?[]align(64) u8 = null,
-    /// Optional narrow offset mirror used by specialized multiply kernels.
-    compact_col_starts: ?[]foundation.HUInt = null,
-    /// Relevant when `storage == null`: true means the three slices are
-    /// independent allocator-owned allocations; false denotes a borrowed
-    /// matrix facade that must not free its slices.
-    owns_separate_slices: bool = false,
+    /// Allocation shape of the three streams. Ownership is decided by the
+    /// constructor that produced the matrix and is recovered by `deinit` from
+    /// this tag, so "packed" and "three independent slices" can never both be
+    /// asserted at once.
+    storage: Storage = .borrowed,
+
+    /// Tagged union of the three legal allocation shapes.
+    ///
+    /// A plain `?[]align(64) u8` plus a separate "owns its slices" flag could
+    /// describe a packed block that also claims three independent streams,
+    /// which is meaningless yet constructible from outside through a struct
+    /// literal. Encoding the shape as a union removes that state and keeps the
+    /// block-local `compact_starts` alias tied to the variant that owns it.
+    pub const Storage = union(enum) {
+        /// Three independently allocated streams owned by this matrix.
+        separate,
+        /// One 64-byte-aligned allocation carrying all three streams.
+        single_block: SingleBlock,
+        /// Caller-owned slices; `deinit` releases nothing.
+        borrowed,
+
+        /// Payload of the single-block variant.
+        pub const SingleBlock = struct {
+            /// Single owning allocation.
+            block: []align(64) u8,
+            /// Narrow offset mirror stored inside `block`. This is an alias,
+            /// never a separate allocation, so it is not freed on its own.
+            compact_starts: ?[]foundation.HUInt = null,
+        };
+
+        /// Narrow offset mirror for specialized kernels; only single-block
+        /// matrices carry one.
+        pub fn compactStarts(self: *const Storage) ?[]const foundation.HUInt {
+            return switch (self.*) {
+                .single_block => |single| single.compact_starts,
+                else => null,
+            };
+        }
+
+        /// Single owning block, or null for `separate`/`borrowed` matrices.
+        pub fn block(self: *const Storage) ?[]align(64) u8 {
+            return switch (self.*) {
+                .single_block => |single| single.block,
+                else => null,
+            };
+        }
+    };
 
     const Self = @This();
 
@@ -85,7 +130,7 @@ pub const CscMatrix = struct {
             .col_starts = col_starts,
             .row_indices = row_indices,
             .values = values,
-            .owns_separate_slices = true,
+            .storage = .separate,
         };
     }
 
@@ -105,7 +150,7 @@ pub const CscMatrix = struct {
             .col_starts = col_starts,
             .row_indices = row_indices,
             .values = values,
-            .owns_separate_slices = false,
+            .storage = .borrowed,
         };
     }
 
@@ -117,36 +162,74 @@ pub const CscMatrix = struct {
             .col_starts = col_starts,
             .row_indices = row_indices,
             .values = values,
-            .storage = storage,
-            .compact_col_starts = compact_col_starts,
+            .storage = .{ .single_block = .{ .block = storage, .compact_starts = compact_col_starts } },
         };
     }
 
     /// Creates an independent owning copy with explicit transfer contained
     /// inside this constructor, so partial allocation failures cannot leak.
-    pub fn clone(self: Self, allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
-        const col_starts = try allocator.dupe(usize, self.col_starts);
-        errdefer allocator.free(col_starts);
-        const row_indices = try allocator.dupe(RowId, self.row_indices);
-        errdefer allocator.free(row_indices);
-        const values = try allocator.dupe(f64, self.values);
-        return initOwnedSlicesAssumeValid(self.num_rows, self.num_cols, col_starts, row_indices, values);
+    ///
+    /// The copy keeps the packed shape of the source, including the block-local
+    /// compact offsets, instead of degrading it into three separate
+    /// allocations, so cloning never silently loses the hot-path layout.
+    pub fn clone(self: *const Self, allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
+        var result = initPackedInternal(allocator, self.num_rows, self.num_cols, self.nnz(), self.storage.compactStarts() != null) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // `self` already passed the same dimension checks when it was built.
+            else => unreachable,
+        };
+        @memcpy(result.col_starts, self.col_starts);
+        @memcpy(result.row_indices, self.row_indices);
+        @memcpy(result.values, self.values);
+        if (result.compactStartsMut()) |compact| {
+            for (compact, result.col_starts) |*destination, start| destination.* = @intCast(start);
+        }
+        return result;
     }
 
     /// Allocates one 64-byte-aligned packed block for CSC starts, row IDs and
     /// values. Contents are intentionally uninitialized; callers must fill a
     /// canonical matrix before publishing it or calling numerical kernels.
     pub fn initPackedUninitialized(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize, nonzeros: usize) (std.mem.Allocator.Error || MatrixError)!Self {
+        return initPackedInternal(allocator, num_rows, num_cols, nonzeros, false);
+    }
+
+    /// Shared packed allocator. When `include_compact_starts` is true the block
+    /// also carries a block-local HUInt mirror of `col_starts`; that mirror is
+    /// part of the same allocation and is never freed on its own.
+    fn initPackedInternal(allocator: std.mem.Allocator, num_rows: usize, num_cols: usize, nonzeros: usize, include_compact_starts: bool) (std.mem.Allocator.Error || MatrixError)!Self {
         try validateDimensions(num_rows, num_cols);
         const starts_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(usize)) catch return error.DimensionTooLarge;
         const rows_bytes = std.math.mul(usize, nonzeros, @sizeOf(RowId)) catch return error.DimensionTooLarge;
         const values_bytes = std.math.mul(usize, nonzeros, @sizeOf(f64)) catch return error.DimensionTooLarge;
+        if (include_compact_starts) {
+            const compact_bytes = std.math.mul(usize, num_cols + 1, @sizeOf(foundation.HUInt)) catch return error.DimensionTooLarge;
+            const layout = memory.computeLayout(
+                4,
+                .{ starts_bytes, compact_bytes, rows_bytes, values_bytes },
+                memory.lineAligns(4),
+            ) catch return error.DimensionTooLarge;
+            const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
+            const starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr + layout.offsets[0]));
+            const compact_ptr: [*]foundation.HUInt = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
+            const rows_ptr: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
+            const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[3]));
+            return initPackedPartsAssumeValid(
+                num_rows,
+                num_cols,
+                starts_ptr[0 .. num_cols + 1],
+                rows_ptr[0..nonzeros],
+                values_ptr[0..nonzeros],
+                storage,
+                compact_ptr[0 .. num_cols + 1],
+            );
+        }
         const layout = memory.computeLayout(
             3,
             .{ starts_bytes, rows_bytes, values_bytes },
             .{ @alignOf(usize), @alignOf(RowId), @alignOf(f64) },
         ) catch return error.DimensionTooLarge;
-        const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+        const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
         const starts_ptr: [*]usize = @ptrCast(@alignCast(storage.ptr));
         const rows_ptr: [*]RowId = @ptrCast(@alignCast(storage.ptr + layout.offsets[1]));
         const values_ptr: [*]f64 = @ptrCast(@alignCast(storage.ptr + layout.offsets[2]));
@@ -168,20 +251,44 @@ pub const CscMatrix = struct {
         return result;
     }
 
-    /// Release owned storage according to the constructor's ownership mode.
-    ///
-    /// Packed matrices free only `storage`; independently owned matrices free
-    /// each slice; borrowed facades free nothing. The supplied allocator must
-    /// be the allocator used by the owning constructor.
+    /// Release owned storage according to the allocation shape recorded by the
+    /// constructor. Packed matrices free the single block, which also contains
+    /// the compact mirror; independently owned matrices free each stream;
+    /// borrowed facades free nothing. The supplied allocator must be the one
+    /// used by the owning constructor.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        if (self.storage) |storage| {
-            allocator.free(storage);
-        } else if (self.owns_separate_slices) {
-            allocator.free(self.col_starts);
-            allocator.free(self.row_indices);
-            allocator.free(self.values);
+        switch (self.storage) {
+            .borrowed => {},
+            .separate => {
+                allocator.free(self.col_starts);
+                allocator.free(self.row_indices);
+                allocator.free(self.values);
+            },
+            .single_block => |single| allocator.free(single.block),
         }
         self.* = undefined;
+    }
+
+    /// Single owning block, or null when the matrix is `separate`/`borrowed`.
+    /// Intended for diagnostics and tests, not for manual freeing.
+    pub inline fn packedBlock(self: Self) ?[]align(64) u8 {
+        return self.storage.block();
+    }
+
+    /// Block-local HUInt offset mirror. Only packed matrices carry one, and it
+    /// must never be released separately from `packedBlock`.
+    pub inline fn compactColStarts(self: Self) ?[]const foundation.HUInt {
+        return self.storage.compactStarts();
+    }
+
+    /// Mutable view of the block-local compact mirror, used while filling or
+    /// cloning a packed matrix. Callers must keep it consistent with
+    /// `col_starts`.
+    inline fn compactStartsMut(self: *Self) ?[]foundation.HUInt {
+        return switch (self.storage) {
+            .single_block => |single| single.compact_starts,
+            else => null,
+        };
     }
 
     /// Returns the number of nonzero values in the matrix.
@@ -192,7 +299,7 @@ pub const CscMatrix = struct {
     /// Performs complete validation at API, parser, or test boundaries.
     /// Matrices emitted by MatrixBuilder.freeze need not be rechecked in every
     /// numerical kernel.
-    pub fn validate(self: Self) MatrixError!void {
+    pub fn validate(self: *const Self) MatrixError!void {
         try validateDimensions(self.num_rows, self.num_cols);
         if (self.col_starts.len != self.num_cols + 1) return error.InvalidColumnStarts;
         if (self.row_indices.len != self.values.len) return error.InconsistentStorage;
@@ -220,7 +327,7 @@ pub const CscMatrix = struct {
     }
 
     /// Returns a checked, non-owning view of one column.
-    pub fn column(self: Self, col: ColId) MatrixError!sparse_vector.SparseVectorView(RowId) {
+    pub fn column(self: *const Self, col: ColId) MatrixError!sparse_vector.SparseVectorView(RowId) {
         const col_index = col.toUsize();
         if (col_index >= self.num_cols) return error.IndexOutOfBounds;
         return self.columnAssumeValid(col_index);
@@ -234,50 +341,50 @@ pub const CscMatrix = struct {
     }
 
     /// Computes y = A * x, checking only vector dimensions.
-    pub fn multiply(self: Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn multiply(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplyAssumeValid(x, y);
     }
 
     /// Dense-vector hot path: branchless traversal after clearing y.
-    pub noinline fn multiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub noinline fn multiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         memory.clearF64(y);
-        if (self.compact_col_starts) |starts|
+        if (self.compactColStarts()) |starts|
             return multiplyDenseKernel(foundation.HUInt, self.num_cols, starts, self.row_indices, self.values, x, y);
         return multiplyDenseKernel(usize, self.num_cols, self.col_starts, self.row_indices, self.values, x, y);
     }
 
     /// Experimental: like multiplyAssumeValid but uses non-volatile clear so the
     /// compiler can reorder or merge the zero-fill with the subsequent scatter.
-    pub fn multiplyAssumeValidFastClear(self: Self, x: []const f64, y: []f64) void {
+    pub fn multiplyAssumeValidFastClear(self: *const Self, x: []const f64, y: []f64) void {
         memory.clearF64Fast(y);
-        if (self.compact_col_starts) |starts|
+        if (self.compactColStarts()) |starts|
             return multiplyDenseKernel(foundation.HUInt, self.num_cols, starts, self.row_indices, self.values, x, y);
         return multiplyDenseKernel(usize, self.num_cols, self.col_starts, self.row_indices, self.values, x, y);
     }
 
     /// Compute `y = A*x` while skipping columns whose multiplier is exactly
     /// zero, after checking vector dimensions.
-    pub fn multiplySkippingZeros(self: Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn multiplySkippingZeros(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         self.multiplySkippingZerosAssumeValid(x, y);
     }
 
     /// Prefer this over the branchless kernel only when x contains enough exact
     /// zeros to compensate for one branch per matrix column.
-    pub fn multiplySkippingZerosAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub fn multiplySkippingZerosAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
         const ri = self.row_indices;
         const vs = self.values;
         memory.clearF64(y);
-        if (self.compact_col_starts) |starts|
+        if (self.compactColStarts()) |starts|
             return multiplySkippingZerosKernel(foundation.HUInt, ncol, starts, ri, vs, x, y);
         return multiplySkippingZerosKernel(usize, ncol, self.col_starts, ri, vs, x, y);
     }
 
     /// Checked Ax for a genuinely sparse input vector. Unlike scanning a dense
     /// slice for zeros, work is proportional to active columns plus output clear.
-    pub fn multiplySparse(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+    pub fn multiplySparse(self: *const Self, x: *const sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
         if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         try x.validate();
         self.multiplySparseAssumeValid(x, y);
@@ -285,13 +392,13 @@ pub const CscMatrix = struct {
 
     /// Trusted sparse-input multiply. Clears `y`, then accumulates only columns
     /// explicitly present in canonical sparse vector `x`.
-    pub fn multiplySparseAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+    pub fn multiplySparseAssumeValid(self: *const Self, x: *const sparse_vector.SparseVectorView(ColId), y: []f64) void {
         memory.clearF64(y);
         self.addSparseProductAssumeValid(x, y);
     }
 
     /// Checked accumulation `y += A*x` for a canonical sparse input vector.
-    pub fn addSparseProduct(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
+    pub fn addSparseProduct(self: *const Self, x: *const sparse_vector.SparseVectorView(ColId), y: []f64) MatrixError!void {
         if (x.dimension != self.num_cols or y.len != self.num_rows) return error.DimensionMismatch;
         try x.validate();
         self.addSparseProductAssumeValid(x, y);
@@ -299,10 +406,10 @@ pub const CscMatrix = struct {
 
     /// Accumulates y += A*x for sparse x without clearing y. This is the hot
     /// path when the caller already owns a zeroed/generation-marked workspace.
-    pub fn addSparseProductAssumeValid(self: Self, x: sparse_vector.SparseVectorView(ColId), y: []f64) void {
+    pub fn addSparseProductAssumeValid(self: *const Self, x: *const sparse_vector.SparseVectorView(ColId), y: []f64) void {
         const ri = self.row_indices;
         const vs = self.values;
-        if (self.compact_col_starts) |starts| {
+        if (self.compactColStarts()) |starts| {
             return addSparseProductCompact(starts, ri, vs, x, y);
         }
         const starts = self.col_starts;
@@ -320,13 +427,13 @@ pub const CscMatrix = struct {
     }
 
     /// Computes y = transpose(A) * x, checking only vector dimensions.
-    pub fn transposeMultiply(self: Self, x: []const f64, y: []f64) MatrixError!void {
+    pub fn transposeMultiply(self: *const Self, x: []const f64, y: []f64) MatrixError!void {
         if (x.len != self.num_rows or y.len != self.num_cols) return error.DimensionMismatch;
         self.transposeMultiplyAssumeValid(x, y);
     }
 
     /// Hot-path transpose multiply with prevalidated dimensions and structure.
-    pub fn transposeMultiplyAssumeValid(self: Self, x: []const f64, y: []f64) void {
+    pub fn transposeMultiplyAssumeValid(self: *const Self, x: []const f64, y: []f64) void {
         const ncol = self.num_cols;
         const starts = self.col_starts;
         const ri = self.row_indices;
@@ -345,7 +452,7 @@ pub const CscMatrix = struct {
     /// Borrowed, non-owning view of a CSC matrix.  Returned by functions that
     /// write into externally-managed buffers so the caller retains full control
     /// over allocation lifetime.
-    pub fn view(self: Self) CscView {
+    pub fn view(self: *const Self) CscView {
         return CscView.initAssumeValid(self.num_rows, self.num_cols, self.col_starts, self.row_indices, self.values);
     }
 };
@@ -377,12 +484,12 @@ pub const CscView = struct {
     }
 
     /// Number of stored nonzero coefficients.
-    pub inline fn nnz(self: CscView) usize {
+    pub inline fn nnz(self: *const CscView) usize {
         return self.values.len;
     }
 
     /// Full structural validation matching CscMatrix.validate semantics.
-    pub fn validate(self: CscView) MatrixError!void {
+    pub fn validate(self: *const CscView) MatrixError!void {
         try validateDimensions(self.num_rows, self.num_cols);
         if (self.col_starts.len != self.num_cols + 1) return MatrixError.InvalidColumnStarts;
         if (self.row_indices.len != self.values.len) return MatrixError.InconsistentStorage;
@@ -439,7 +546,7 @@ noinline fn addSparseProductCompact(
     starts: []const foundation.HUInt,
     row_indices: []const RowId,
     matrix_values: []const f64,
-    x: sparse_vector.SparseVectorView(ColId),
+    x: *const sparse_vector.SparseVectorView(ColId),
     y: []f64,
 ) void {
     var active: usize = 0;
@@ -532,8 +639,9 @@ test "CSC zero matrix is valid and multiplies to zero" {
 test "packed uninitialized CSC uses one aligned owning allocation" {
     var matrix = try CscMatrix.initPackedUninitialized(std.testing.allocator, 3, 2, 3);
     defer matrix.deinit(std.testing.allocator);
-    try std.testing.expect(matrix.storage != null);
-    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(matrix.storage.?.ptr) % 64);
+    try std.testing.expect(std.meta.activeTag(matrix.storage) == .single_block);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(matrix.packedBlock().?.ptr) % 64);
+    try std.testing.expect(matrix.compactColStarts() == null);
 
     @memcpy(matrix.col_starts, &[_]usize{ 0, 2, 3 });
     matrix.row_indices[0] = try RowId.init(0);
@@ -541,6 +649,15 @@ test "packed uninitialized CSC uses one aligned owning allocation" {
     matrix.row_indices[2] = try RowId.init(1);
     @memcpy(matrix.values, &[_]f64{ 1.0, 2.0, 3.0 });
     try matrix.validate();
+
+    // A clone keeps the packed shape instead of degrading into three slices.
+    var copy = try matrix.clone(std.testing.allocator);
+    defer copy.deinit(std.testing.allocator);
+    try std.testing.expect(std.meta.activeTag(copy.storage) == .single_block);
+    try std.testing.expect(copy.packedBlock().?.ptr != matrix.packedBlock().?.ptr);
+    try std.testing.expectEqualSlices(usize, matrix.col_starts, copy.col_starts);
+    try std.testing.expectEqualSlices(RowId, matrix.row_indices, copy.row_indices);
+    try std.testing.expectEqualSlices(f64, matrix.values, copy.values);
 }
 
 test "named CSC constructors preserve explicit ownership" {
@@ -548,7 +665,8 @@ test "named CSC constructors preserve explicit ownership" {
     var borrowed_rows = [_]RowId{try RowId.init(0)};
     var borrowed_values = [_]f64{2.0};
     var borrowed = try CscMatrix.initBorrowed(1, 1, &borrowed_starts, &borrowed_rows, &borrowed_values);
-    try std.testing.expect(!borrowed.owns_separate_slices);
+    try std.testing.expect(std.meta.activeTag(borrowed.storage) == .borrowed);
+    try std.testing.expect(borrowed.packedBlock() == null);
     borrowed.deinit(std.testing.allocator); // Must not attempt to free stack slices.
 
     var owned = block: {
@@ -560,10 +678,13 @@ test "named CSC constructors preserve explicit ownership" {
         break :block try CscMatrix.initOwnedSlices(1, 1, owned_starts, owned_rows, owned_values);
     };
     defer owned.deinit(std.testing.allocator);
-    try std.testing.expect(owned.owns_separate_slices);
+    try std.testing.expect(std.meta.activeTag(owned.storage) == .separate);
 
+    // A clone is independently owned and normalized to the packed shape, so it
+    // never shares a stream with the source.
     var copy = try owned.clone(std.testing.allocator);
     defer copy.deinit(std.testing.allocator);
+    try std.testing.expect(std.meta.activeTag(copy.storage) == .single_block);
     try std.testing.expect(copy.col_starts.ptr != owned.col_starts.ptr);
     try std.testing.expect(copy.row_indices.ptr != owned.row_indices.ptr);
     try std.testing.expect(copy.values.ptr != owned.values.ptr);

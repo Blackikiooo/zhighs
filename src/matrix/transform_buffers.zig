@@ -1,4 +1,8 @@
 //! Reusable caller-owned output and scratch storage for CSC transformations.
+//!
+//! Role: scratch and output for `...Into` transforms; owns no matrix semantics.
+//! Shape: capacity only; the transform decides the resulting m×n.
+//! Shared by `slice.zig`, `permutation.zig`, and `edit.zig`.
 
 const std = @import("std");
 const foundation = @import("foundation");
@@ -52,7 +56,10 @@ pub const CscTransformBuffers = struct {
     }
 
     /// Check that current capacities can serve the requested output shape.
-    pub fn requireCapacity(self: CscTransformBuffers, num_cols: usize, nnz: usize, scratch: usize) csc.MatrixError!void {
+    ///
+    /// The receiver is borrowed by pointer: this read-only check must not copy
+    /// the four slice headers (64 bytes) on every call.
+    pub fn requireCapacity(self: *const CscTransformBuffers, num_cols: usize, nnz: usize, scratch: usize) csc.MatrixError!void {
         if (num_cols == std.math.maxInt(usize)) return error.DimensionTooLarge;
         if (self.col_starts.len < num_cols + 1 or
             self.row_indices.len < nnz or
@@ -62,7 +69,10 @@ pub const CscTransformBuffers = struct {
     }
 
     /// Borrow an immutable CSC view over the initialized output prefixes.
-    pub fn viewAssumeValid(self: CscTransformBuffers, num_rows: usize, num_cols: usize, nnz: usize) csc.CscView {
+    ///
+    /// The receiver is borrowed by pointer for the same reason as
+    /// `requireCapacity`; the returned view points at the same storage.
+    pub fn viewAssumeValid(self: *const CscTransformBuffers, num_rows: usize, num_cols: usize, nnz: usize) csc.CscView {
         std.debug.assert(self.col_starts.len >= num_cols + 1);
         std.debug.assert(self.row_indices.len >= nnz);
         std.debug.assert(self.values.len >= nnz);

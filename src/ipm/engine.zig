@@ -75,22 +75,22 @@ fn emptyResult(allocator: Allocator, status: lp.SolveStatus) Result {
 /// Solve `problem` with the given options. Invalid input is reported through
 /// the returned status. Invalid options and a missing time-limit clock are
 /// errors, as are allocation failures and storage-size overflow.
-pub fn solve(allocator: Allocator, problem: lp.ProblemView, options: Options) !Result {
-    return solveWithStats(allocator, problem, options, null, null);
+pub fn solve(allocator: Allocator, problem: *const lp.ProblemView, options: Options) !Result {
+    return solveWithStats(allocator, problem, &options, null, null);
 }
 
 /// Solve while accumulating per-phase timings into `stats` when `io` is set.
 pub fn solveWithStats(
     allocator: Allocator,
-    problem: lp.ProblemView,
-    options: Options,
+    problem: *const lp.ProblemView,
+    options: *const Options,
     io: ?std.Io,
     stats: ?*Stats,
 ) !Result {
     if (!options.valid()) return error.InvalidOptions;
     if (options.time_limit_ns != null and io == null) return error.ClockRequired;
     const started = clockNs(io);
-    var initial_options = options;
+    var initial_options = options.*;
     // Large, wide sparse models benefit from equilibration even when their
     // raw coefficient range is moderate: it reduces Cholesky growth and
     // usually lowers the factorization cost on the first attempt.
@@ -102,13 +102,13 @@ pub fn solveWithStats(
         if (options.time_limit_ns) |limit| initial_options.time_limit_ns = @max(limit / 2, 1);
     }
     if (scale_first) initial_options.equilibrate = true;
-    var first = try solveAttempt(allocator, problem, initial_options, io, stats);
+    var first = try solveAttempt(allocator, problem, &initial_options, io, stats);
     if (first.status == .optimal or first.status == .interrupted or first.status == .work_limit or
         first.status == .infeasible or first.status == .unbounded or
         options.max_iterations == 0 or options.equilibrate or !options.retry_equilibrated_on_failure)
         return first;
 
-    var retry_options = options;
+    var retry_options = options.*;
     retry_options.equilibrate = !scale_first;
     retry_options.retry_equilibrated_on_failure = false;
     retry_options.max_iterations = @max(retry_options.max_iterations, 300);
@@ -124,10 +124,10 @@ pub fn solveWithStats(
     }
     first.deinit();
     if (stats) |value| value.* = .{};
-    return solveAttempt(allocator, problem, retry_options, io, stats);
+    return solveAttempt(allocator, problem, &retry_options, io, stats);
 }
 
-fn coefficientRange(problem: lp.ProblemView) f64 {
+fn coefficientRange(problem: *const lp.ProblemView) f64 {
     var minimum = inf;
     var maximum: f64 = 0.0;
     for (problem.matrix.values) |value| {
@@ -141,8 +141,8 @@ fn coefficientRange(problem: lp.ProblemView) f64 {
 
 fn solveAttempt(
     allocator: Allocator,
-    problem: lp.ProblemView,
-    options: Options,
+    problem: *const lp.ProblemView,
+    options: *const Options,
     io: ?std.Io,
     stats: ?*Stats,
 ) !Result {
@@ -262,7 +262,9 @@ pub const Stats = struct {
     final_max_x: f64 = 0,
     /// 1=nonfinite mu, 2=mu growth, 3=primal escape, 4=initial factor,
     /// 5=iteration factor, 6/8=primal infeasible, 7/9=unbounded,
-    /// 10=dual escape.
+    /// 10=dual escape, 11/12=stalled residual without a
+    /// certificate (reported as a numerical failure so the equilibrated retry
+    /// still runs).
     failure_code: u8 = 0,
 };
 
@@ -316,7 +318,7 @@ const Engine = struct {
     num_pairs: usize,
     mu0: f64,
 
-    fn init(allocator: Allocator, sf: *const StandardForm, options: Options, g: ?*const graph_mod.Graph, order: *const graph_mod.Order) !Engine {
+    fn init(allocator: Allocator, sf: *const StandardForm, options: *const Options, g: ?*const graph_mod.Graph, order: *const graph_mod.Order) !Engine {
         const n = sf.num_cols;
         const m = sf.num_rows;
         var chol = try NormalFactor.init(allocator, sf, options.dense_normal, g, order);
@@ -384,7 +386,7 @@ const Engine = struct {
         return .{
             .allocator = allocator,
             .sf = sf,
-            .options = options,
+            .options = options.*,
             .x = x,
             .s = s,
             .w = w,
@@ -670,6 +672,34 @@ const Engine = struct {
         return value;
     }
 
+    /// Farkas certificate for primal infeasibility. The caller's residual test
+    /// supplies Aᵀy + s − t ≈ c and s, t ≥ 0. Dividing by
+    /// m = max(|y|∞, |s|∞, |t|∞) turns a diverging dual into the homogeneous
+    /// system Âᵀŷ + ŝ − t̂ ≈ 0, so a positive b̂ᵀŷ − ûᵀt̂ certifies that
+    /// Ax = b, 0 ≤ x ≤ û has no solution. Normalising matters: an
+    /// unnormalised sign test is satisfied by any large dual and would
+    /// misreport feasible models that merely drift.
+    fn certifiesPrimalInfeasibility(self: *const Engine) bool {
+        const magnitude = @max(maxAbs(self.y), @max(maxAbs(self.s), maxAbs(self.t)));
+        if (!(magnitude > 0.0) or !std.math.isFinite(magnitude)) return false;
+        const value = self.dualObjective() / magnitude;
+        var rhs_scale: f64 = 1.0;
+        for (self.sf.rhs) |b| rhs_scale = @max(rhs_scale, @abs(b));
+        return value > 1e-8 * rhs_scale;
+    }
+
+    /// Unboundedness certificate: x is primal feasible and the cost per unit
+    /// of the ray x/‖x‖ is negative, so d = lim x/‖x‖ satisfies Âd = 0,
+    /// d ≥ 0 and cᵀd < 0. A stalled primal residual without such a slope is a
+    /// numerical failure, not a certificate.
+    fn certifiesUnboundedness(self: *const Engine) bool {
+        const magnitude = maxAbs(self.x);
+        if (!(magnitude > 0.0) or !std.math.isFinite(magnitude)) return false;
+        var cost_scale: f64 = 1.0;
+        for (self.sf.cost) |c| cost_scale = @max(cost_scale, @abs(c));
+        return dot(self.sf.cost, self.x) / magnitude < -1e-8 * cost_scale;
+    }
+
     fn run(self: *Engine) Outcome {
         const started = clockNs(self.stats_io);
         defer if (self.stats) |stats| addElapsed(self.stats_io, started, &stats.total_ns);
@@ -764,15 +794,27 @@ const Engine = struct {
                 pres > tol.primal_feasibility * tol.heuristic_residual_relaxation and
                 dres <= tol.dual_feasibility)
             {
-                if (self.stats) |stats| stats.failure_code = 8;
-                return .{ .status = .infeasible, .iterations = iteration };
+                // A stalled residual is only a certificate when the normalised
+                // dual proves infeasibility; otherwise it is a failed solve.
+                // Reporting infeasible would also skip the equilibrated retry
+                // in `solveWithStats`, which recovers most such models.
+                if (self.certifiesPrimalInfeasibility()) {
+                    if (self.stats) |stats| stats.failure_code = 8;
+                    return .{ .status = .infeasible, .iterations = iteration };
+                }
+                if (self.stats) |stats| stats.failure_code = 11;
+                return .{ .status = .numerical_failure, .iterations = iteration };
             }
             if (stall_dual >= 10 and
                 dres > tol.dual_feasibility * tol.heuristic_residual_relaxation and
                 pres <= tol.primal_feasibility)
             {
-                if (self.stats) |stats| stats.failure_code = 9;
-                return .{ .status = .unbounded, .iterations = iteration };
+                if (self.certifiesUnboundedness()) {
+                    if (self.stats) |stats| stats.failure_code = 9;
+                    return .{ .status = .unbounded, .iterations = iteration };
+                }
+                if (self.stats) |stats| stats.failure_code = 12;
+                return .{ .status = .numerical_failure, .iterations = iteration };
             }
             // A global norm can hide a small-rhs row behind an unrelated large
             // rhs. Before taking another central-path step, project such a
@@ -804,21 +846,27 @@ const Engine = struct {
                 maxAbs(self.t) > tol.escape_magnitude;
             if (!std.math.isFinite(mu) or mu > tol.divergence_growth * self.mu0 or x_escaped or dual_escaped) {
                 if (self.stats) |stats| stats.failure_code = if (!std.math.isFinite(mu)) 1 else if (mu > tol.divergence_growth * self.mu0) 2 else if (x_escaped) 3 else 10;
-                // Classify against the pre-step residuals (min convention): a
-                // dual that stayed feasible while the primal residual stalled
-                // certifies primal infeasibility; a primal that stayed
-                // feasible while the dual residual stalled certifies
-                // unboundedness. Both stuck or both feasible is a genuine
-                // numerical failure.
+                // Classify against the pre-step residuals (min convention).
+                // Neither side is reported as infeasible/unbounded: without a
+                // homogeneous embedding the normalized dual is not a proof,
+                // and the equilibrated retry in `solveWithStats` recovers
+                // several of these models. The code records which side stalled.
                 const primal_stuck = prev_pres > tol.primal_feasibility * tol.heuristic_residual_relaxation;
                 const dual_stuck = prev_dres > tol.dual_feasibility * tol.heuristic_residual_relaxation;
-                if (primal_stuck and !dual_stuck) {
+                if (primal_stuck and !dual_stuck and self.certifiesPrimalInfeasibility()) {
                     if (self.stats) |stats| stats.failure_code = 6;
                     return .{ .status = .infeasible, .iterations = iteration };
                 }
-                if (dual_stuck and !primal_stuck) {
+                if (dual_stuck and !primal_stuck and self.certifiesUnboundedness()) {
                     if (self.stats) |stats| stats.failure_code = 7;
                     return .{ .status = .unbounded, .iterations = iteration };
+                }
+                if (self.stats) |stats| {
+                    if (primal_stuck and !dual_stuck) {
+                        stats.failure_code = 11;
+                    } else if (dual_stuck and !primal_stuck) {
+                        stats.failure_code = 12;
+                    }
                 }
                 return .{ .status = .numerical_failure, .iterations = iteration };
             }
@@ -1037,7 +1085,7 @@ const Engine = struct {
 
 fn mapResult(
     allocator: Allocator,
-    problem: lp.ProblemView,
+    problem: *const lp.ProblemView,
     sf: *const StandardForm,
     engine: *Engine,
     outcome: Outcome,

@@ -5,7 +5,7 @@ const ProblemView = @import("types.zig").ProblemView;
 
 pub const Candidate = struct { primal: []f64, objective: f64 };
 
-pub fn copyIfFeasible(allocator: std.mem.Allocator, problem: ProblemView, values: []const f64, tolerance: f64) !?Candidate {
+pub fn copyIfFeasible(allocator: std.mem.Allocator, problem: *const ProblemView, values: []const f64, tolerance: f64) !?Candidate {
     if (values.len != problem.relaxation.num_cols) return null;
     const primal = try allocator.dupe(f64, values);
     errdefer allocator.free(primal);

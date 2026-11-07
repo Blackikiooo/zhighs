@@ -232,19 +232,19 @@ pub const PresolvePipeline = struct {
     duplicate_row_count: u32 = 0,
     removed_row_count: u32 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, problem: ProblemView) !PresolvePipeline {
+    pub fn init(allocator: std.mem.Allocator, problem: *const ProblemView) !PresolvePipeline {
         return initInternal(allocator, problem, null);
     }
 
     /// MIP-safe pipeline: `nature` marks which original columns are discrete.
     /// Column-nature information is remapped through every pass so each pass
     /// applies only integrality-safe reductions.
-    pub fn initMip(allocator: std.mem.Allocator, problem: ProblemView, nature: []const ColumnNature) !PresolvePipeline {
+    pub fn initMip(allocator: std.mem.Allocator, problem: *const ProblemView, nature: []const ColumnNature) !PresolvePipeline {
         std.debug.assert(nature.len == problem.num_cols);
         return initInternal(allocator, problem, nature);
     }
 
-    fn initInternal(allocator: std.mem.Allocator, problem: ProblemView, nature: ?[]const ColumnNature) !PresolvePipeline {
+    fn initInternal(allocator: std.mem.Allocator, problem: *const ProblemView, nature: ?[]const ColumnNature) !PresolvePipeline {
         var result = PresolvePipeline{ .allocator = allocator };
         errdefer result.deinit();
         const maximum_passes = problem.num_rows + problem.num_cols + 1;
@@ -253,9 +253,9 @@ pub const PresolvePipeline = struct {
         var current_nature: ?[]ColumnNature = if (nature) |source| try allocator.dupe(ColumnNature, source) else null;
         defer if (current_nature) |slice| allocator.free(slice);
 
-        var current = problem;
+        var current: ProblemView = problem.*;
         while (result.passes.items.len < maximum_passes) {
-            var pass = try presolveImpl(allocator, current, current_nature);
+            var pass = try presolveImpl(allocator, &current, current_nature);
             if (!pass.wasApplied()) {
                 pass.deinit();
                 break;
@@ -378,19 +378,19 @@ fn classifySubstitution(
 }
 
 /// Apply exact column substitutions and redundant empty-row elimination.
-pub fn presolve(allocator: std.mem.Allocator, problem: ProblemView) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+pub fn presolve(allocator: std.mem.Allocator, problem: *const ProblemView) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     return presolveImpl(allocator, problem, null);
 }
 
 /// MIP-safe variant: `nature[column]` marks discrete columns. Discrete
 /// columns are substituted only at integer-feasible values, and
 /// free-singleton elimination applies to continuous columns only.
-pub fn presolveMip(allocator: std.mem.Allocator, problem: ProblemView, nature: []const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+pub fn presolveMip(allocator: std.mem.Allocator, problem: *const ProblemView, nature: []const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     std.debug.assert(nature.len == problem.num_cols);
     return presolveImpl(allocator, problem, nature);
 }
 
-fn presolveImpl(allocator: std.mem.Allocator, problem: ProblemView, nature: ?[]const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, nature: ?[]const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     // Select at most one free zero-cost singleton column for each row. If a
     // row has several, later passes see the remaining columns as empty.
     const raw_row_nnz = try allocator.alloc(u32, problem.num_rows);
@@ -1017,7 +1017,7 @@ test "problem without reducible rows or columns remains structurally unchanged" 
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
     try std.testing.expect(!pp.wasApplied());
     try std.testing.expectEqual(@as(u32, 2), pp.num_cols);
@@ -1039,7 +1039,7 @@ test "single fixed column elimination" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
 
     try std.testing.expect(pp.wasApplied());
@@ -1092,7 +1092,7 @@ test "singleton bounds immediately expose a general redundant row" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(std.testing.allocator, problem);
+    var pp = try presolve(std.testing.allocator, &problem);
     defer pp.deinit();
     try std.testing.expectEqual(@as(u32, 1), pp.singleton_row_count);
     try std.testing.expectEqual(@as(u32, 1), pp.redundant_row_count);
@@ -1127,7 +1127,7 @@ test "rectangular fixed-column postsolve restores every coordinate" {
         .objective_sense = .maximize,
         .objective_offset = 11.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
 
     try std.testing.expectEqual(@as(u32, 3), pp.original_num_rows);
@@ -1181,7 +1181,7 @@ test "postsolve expands an unbounded ray with zero fixed direction" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
     const sol = SolutionView{
         .status = .unbounded,
@@ -1212,7 +1212,7 @@ test "two fixed columns" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
     try std.testing.expectEqual(@as(u32, 2), pp.column_substitution_count);
     // offset = 1+4+0=5; the remaining singleton row is redundant with x3 <= 10.
@@ -1236,7 +1236,7 @@ test "finite-inf bounds not fixed" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve(a, problem);
+    var pp = try presolve(a, &problem);
     defer pp.deinit();
     try std.testing.expect(!pp.wasApplied());
 }
@@ -1257,12 +1257,12 @@ test "mip mode keeps a discrete column fixed at a fractional value" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolveMip(a, problem, &.{.discrete});
+    var pp = try presolveMip(a, &problem, &.{.discrete});
     defer pp.deinit();
     try std.testing.expect(!pp.wasApplied());
     try std.testing.expectEqual(@as(u32, 1), pp.num_cols);
 
-    var lp_pp = try presolve(a, problem);
+    var lp_pp = try presolve(a, &problem);
     defer lp_pp.deinit();
     try std.testing.expectEqual(@as(u32, 1), lp_pp.column_substitution_count);
 }
@@ -1284,7 +1284,7 @@ test "mip mode substitutes discrete fixed and rounded empty columns" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolveMip(a, problem, &.{ .discrete, .discrete, .continuous });
+    var pp = try presolveMip(a, &problem, &.{ .discrete, .discrete, .continuous });
     defer pp.deinit();
     try std.testing.expectEqual(@as(u32, 3), pp.column_substitution_count);
     try std.testing.expectEqual(@as(u32, 0), pp.num_cols);
@@ -1312,12 +1312,12 @@ test "mip mode skips free singleton elimination for discrete columns only" {
         .objective_offset = 0.0,
     };
     // Discrete singleton: reconstruction could be fractional, so keep both.
-    var discrete_pp = try presolveMip(a, problem, &.{ .discrete, .discrete });
+    var discrete_pp = try presolveMip(a, &problem, &.{ .discrete, .discrete });
     defer discrete_pp.deinit();
     try std.testing.expectEqual(@as(u32, 0), discrete_pp.free_singleton_column_count);
 
     // Continuous singleton: eliminated and reconstructed exactly.
-    var continuous_pp = try presolveMip(a, problem, &.{ .continuous, .discrete });
+    var continuous_pp = try presolveMip(a, &problem, &.{ .continuous, .discrete });
     defer continuous_pp.deinit();
     try std.testing.expectEqual(@as(u32, 1), continuous_pp.free_singleton_column_count);
     try std.testing.expectEqual(@as(u32, 0), continuous_pp.num_rows);
@@ -1353,7 +1353,7 @@ test "mip pipeline threads column nature through passes" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pipeline = try PresolvePipeline.initMip(a, problem, &.{ .discrete, .discrete });
+    var pipeline = try PresolvePipeline.initMip(a, &problem, &.{ .discrete, .discrete });
     defer pipeline.deinit();
     try std.testing.expect(pipeline.wasApplied());
     // Pass 1 substitutes x (fixed at 2) and transfers the singleton row into

@@ -144,7 +144,7 @@ fn addGenConstrWithExtra(self: *Model, gctype: GenConstrType, resvar: usize, ope
 }
 
 /// Compute the number of usize entries stored in genconstr_indices for constraint at `idx`.
-pub fn genConstrDataLen(self: Model, idx: usize) usize {
+pub fn genConstrDataLen(self: *const Model, idx: usize) usize {
     const t = self.genconstr_types[idx];
     const nv = self.genconstr_nvars[idx];
     return switch (t) {
@@ -157,7 +157,7 @@ pub fn genConstrDataLen(self: Model, idx: usize) usize {
 }
 
 /// Return the offset into genconstr_indices where constraint `idx`'s data starts.
-pub fn genConstrOffset(self: Model, idx: usize) usize {
+pub fn genConstrOffset(self: *const Model, idx: usize) usize {
     return self.genconstr_begin[idx];
 }
 
@@ -297,7 +297,7 @@ pub fn addGenConstrNL(self: *Model, resvar: usize, num_vars: usize, vars: []cons
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Retrieve a MAX general constraint's data
-pub fn getGenConstrMax(self: Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
+pub fn getGenConstrMax(self: *const Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .max) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     const nv = self.genconstr_nvars[idx];
@@ -307,7 +307,7 @@ pub fn getGenConstrMax(self: Model, idx: usize, resvar: *usize, num_vars: *usize
 }
 
 /// Retrieve a MIN general constraint's data
-pub fn getGenConstrMin(self: Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
+pub fn getGenConstrMin(self: *const Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .min) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     const nv = self.genconstr_nvars[idx];
@@ -317,7 +317,7 @@ pub fn getGenConstrMin(self: Model, idx: usize, resvar: *usize, num_vars: *usize
 }
 
 /// Retrieve an ABS general constraint's data
-pub fn getGenConstrAbs(self: Model, idx: usize, resvar: *usize, argvar: *usize) ModelError!void {
+pub fn getGenConstrAbs(self: *const Model, idx: usize, resvar: *usize, argvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .abs) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -325,7 +325,7 @@ pub fn getGenConstrAbs(self: Model, idx: usize, resvar: *usize, argvar: *usize) 
 }
 
 /// Retrieve an AND general constraint's data
-pub fn getGenConstrAnd(self: Model, idx: usize, resvar: *usize, var1: *usize, var2: *usize) ModelError!void {
+pub fn getGenConstrAnd(self: *const Model, idx: usize, resvar: *usize, var1: *usize, var2: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .and_) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -334,7 +334,7 @@ pub fn getGenConstrAnd(self: Model, idx: usize, resvar: *usize, var1: *usize, va
 }
 
 /// Retrieve an OR general constraint's data
-pub fn getGenConstrOr(self: Model, idx: usize, resvar: *usize, var1: *usize, var2: *usize) ModelError!void {
+pub fn getGenConstrOr(self: *const Model, idx: usize, resvar: *usize, var1: *usize, var2: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .or_) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -343,7 +343,7 @@ pub fn getGenConstrOr(self: Model, idx: usize, resvar: *usize, var1: *usize, var
 }
 
 /// Retrieve an INDICATOR general constraint's data
-pub fn getGenConstrIndicator(self: Model, idx: usize, binvar: *usize, binval: *i32, num_nz: *usize, ind: []usize, val: []f64, sense: *Sense, rhs: *f64) ModelError!void {
+pub fn getGenConstrIndicator(self: *const Model, idx: usize, binvar: *usize, binval: *i32, num_nz: *usize, ind: []usize, val: []f64, sense: *Sense, rhs: *f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .indicator) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     binvar.* = self.genconstr_resvar[idx];
@@ -362,7 +362,7 @@ pub fn getGenConstrIndicator(self: Model, idx: usize, binvar: *usize, binval: *i
 }
 
 /// Retrieve a PWL general constraint's data
-pub fn getGenConstrPWL(self: Model, idx: usize, xvar: *usize, yvar: *usize, num_pts: *usize, xpts: []f64, ypts: []f64) ModelError!void {
+pub fn getGenConstrPWL(self: *const Model, idx: usize, xvar: *usize, yvar: *usize, num_pts: *usize, xpts: []f64, ypts: []f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .pwl) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     yvar.* = self.genconstr_resvar[idx];
@@ -378,7 +378,7 @@ pub fn getGenConstrPWL(self: Model, idx: usize, xvar: *usize, yvar: *usize, num_
 }
 
 /// Retrieve a POLY general constraint's data
-pub fn getGenConstrPoly(self: Model, idx: usize, resvar: *usize, xvar: *usize, num_terms: *usize, terms: []f64) ModelError!void {
+pub fn getGenConstrPoly(self: *const Model, idx: usize, resvar: *usize, xvar: *usize, num_terms: *usize, terms: []f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .poly) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -391,7 +391,7 @@ pub fn getGenConstrPoly(self: Model, idx: usize, resvar: *usize, xvar: *usize, n
 }
 
 /// Retrieve an EXP general constraint's data
-pub fn getGenConstrExp(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrExp(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .exp) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -399,7 +399,7 @@ pub fn getGenConstrExp(self: Model, idx: usize, resvar: *usize, xvar: *usize) Mo
 }
 
 /// Retrieve an EXPA general constraint's data
-pub fn getGenConstrExpA(self: Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
+pub fn getGenConstrExpA(self: *const Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .expa) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -408,7 +408,7 @@ pub fn getGenConstrExpA(self: Model, idx: usize, resvar: *usize, xvar: *usize, a
 }
 
 /// Retrieve a LOG general constraint's data
-pub fn getGenConstrLog(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrLog(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .log) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -416,7 +416,7 @@ pub fn getGenConstrLog(self: Model, idx: usize, resvar: *usize, xvar: *usize) Mo
 }
 
 /// Retrieve a LOGA general constraint's data
-pub fn getGenConstrLogA(self: Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
+pub fn getGenConstrLogA(self: *const Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .loga) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -425,7 +425,7 @@ pub fn getGenConstrLogA(self: Model, idx: usize, resvar: *usize, xvar: *usize, a
 }
 
 /// Retrieve a POW general constraint's data
-pub fn getGenConstrPow(self: Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
+pub fn getGenConstrPow(self: *const Model, idx: usize, resvar: *usize, xvar: *usize, a: *f64) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .pow) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -434,7 +434,7 @@ pub fn getGenConstrPow(self: Model, idx: usize, resvar: *usize, xvar: *usize, a:
 }
 
 /// Retrieve a SIN general constraint's data
-pub fn getGenConstrSin(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrSin(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .sin) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -442,7 +442,7 @@ pub fn getGenConstrSin(self: Model, idx: usize, resvar: *usize, xvar: *usize) Mo
 }
 
 /// Retrieve a COS general constraint's data
-pub fn getGenConstrCos(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrCos(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .cos) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -450,7 +450,7 @@ pub fn getGenConstrCos(self: Model, idx: usize, resvar: *usize, xvar: *usize) Mo
 }
 
 /// Retrieve a TAN general constraint's data
-pub fn getGenConstrTan(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrTan(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .tan) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -458,7 +458,7 @@ pub fn getGenConstrTan(self: Model, idx: usize, resvar: *usize, xvar: *usize) Mo
 }
 
 /// Retrieve a LOGISTIC general constraint's data
-pub fn getGenConstrLogistic(self: Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
+pub fn getGenConstrLogistic(self: *const Model, idx: usize, resvar: *usize, xvar: *usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .logistic) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     resvar.* = self.genconstr_resvar[idx];
@@ -466,7 +466,7 @@ pub fn getGenConstrLogistic(self: Model, idx: usize, resvar: *usize, xvar: *usiz
 }
 
 /// Retrieve a NORM general constraint's data
-pub fn getGenConstrNorm(self: Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
+pub fn getGenConstrNorm(self: *const Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .norm) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     const nv = self.genconstr_nvars[idx];
@@ -476,7 +476,7 @@ pub fn getGenConstrNorm(self: Model, idx: usize, resvar: *usize, num_vars: *usiz
 }
 
 /// Retrieve an NL general constraint's data
-pub fn getGenConstrNL(self: Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
+pub fn getGenConstrNL(self: *const Model, idx: usize, resvar: *usize, num_vars: *usize, vars: []usize) ModelError!void {
     if (idx >= self.genconstr_count or self.genconstr_types[idx] != .nl) return error.InvalidArgument;
     const off = genConstrOffset(self, idx);
     const nv = self.genconstr_nvars[idx];

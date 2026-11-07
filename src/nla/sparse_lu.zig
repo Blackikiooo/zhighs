@@ -169,20 +169,20 @@ pub const SparseLU = struct {
     }
 
     /// Validate and factorize a compact CSC basis as `P*B*Q=L*U`.
-    pub fn factorize(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
+    pub fn factorize(self: *SparseLU, basis: *const sparse_basis.SparseBasisView) SparseLuError!void {
         return self.factorizeImpl(basis, true, null, false);
     }
 
     /// Zero-copy trusted reinversion entry for canonical engine-owned basis
     /// CSC. Workspace and factor capacities are retained across calls.
-    pub fn factorizeAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView) SparseLuError!void {
+    pub fn factorizeAssumeValid(self: *SparseLU, basis: *const sparse_basis.SparseBasisView) SparseLuError!void {
         return self.factorizeImpl(basis, false, null, false);
     }
 
     /// Replay a previously recorded row/column pivot sequence. This is mainly
     /// a diagnostic control for comparing numerical kernels under identical
     /// ordering; normal reinversion should use threshold Markowitz selection.
-    pub fn factorizeWithTraceAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
+    pub fn factorizeWithTraceAssumeValid(self: *SparseLU, basis: *const sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
         if (trace.rows.len != basis.dimension or trace.columns.len != basis.dimension) return error.DimensionMismatch;
         return self.factorizeImpl(basis, false, trace, false);
     }
@@ -191,13 +191,13 @@ pub const SparseLU = struct {
     /// Once a recorded pivot is missing or fails the numerical threshold, the
     /// remaining suffix is repaired with the configured ordering backend.
     /// This path retains all workspaces and performs no warm allocations.
-    pub fn factorizeWithTraceRepairAssumeValid(self: *SparseLU, basis: sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
+    pub fn factorizeWithTraceRepairAssumeValid(self: *SparseLU, basis: *const sparse_basis.SparseBasisView, trace: PivotTrace) SparseLuError!void {
         if (trace.rows.len != basis.dimension or trace.columns.len != basis.dimension) return error.DimensionMismatch;
         return self.factorizeImpl(basis, false, trace, true);
     }
 
     /// Shared factorization driver for validated, replayed, and repaired ordering.
-    fn factorizeImpl(self: *SparseLU, basis: sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace, repair_trace: bool) SparseLuError!void {
+    fn factorizeImpl(self: *SparseLU, basis: *const sparse_basis.SparseBasisView, comptime validate: bool, trace: ?PivotTrace, repair_trace: bool) SparseLuError!void {
         const n = basis.dimension;
         try self.ensureDimension(n);
         try self.ensureFactorCapacity(@max(basis.nnz(), n));
@@ -313,7 +313,7 @@ pub const SparseLU = struct {
     }
 
     /// Pack one fill-free symbolic singleton directly into L/U streams.
-    fn packSymbolicSingleton(self: *SparseLU, basis: sparse_basis.SparseBasisView, plan: sparse_symbolic.SymbolicPlanView, position: usize) SparseLuError!void {
+    fn packSymbolicSingleton(self: *SparseLU, basis: *const sparse_basis.SparseBasisView, plan: sparse_symbolic.SymbolicPlanView, position: usize) SparseLuError!void {
         const row = plan.pivot_rows[position];
         const column = plan.pivot_columns[position];
         var pivot_value: f64 = 0.0;

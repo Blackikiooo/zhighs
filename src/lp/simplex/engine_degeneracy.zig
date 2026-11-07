@@ -34,13 +34,13 @@ const SolveControl = @import("engine.zig").SolveControl;
 /// gone, leaving no smaller transactional snapshot to restore.
 pub fn restartSolveWithoutPerturbation(
     self: *SimplexEngine,
-    problem: problem_module.ProblemView,
-    control: SolveControl,
+    problem: *const problem_module.ProblemView,
+    control: *const SolveControl,
 ) SolveStatus {
-    var baseline_control = control;
+    var baseline_control = control.*;
     baseline_control.initial_basis = null;
     baseline_control.degeneracy_strategy = .baseline;
-    return self.solveProblem(problem, baseline_control);
+    return self.solveProblem(problem, &baseline_control);
 }
 
 /// Count exact-ratio ties after the ratio policy has already selected its

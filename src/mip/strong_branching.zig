@@ -92,7 +92,7 @@ pub const StrongBranching = struct {
 
     pub fn refine(
         self: *StrongBranching,
-        problem: solver.LpProblemView,
+        problem: *const solver.LpProblemView,
         integrality: []const plugin.Integrality,
         primal: []const f64,
         parent_objective: f64,
@@ -194,7 +194,7 @@ pub const StrongBranching = struct {
         return if (cached.generation == self.generation) cached.result else null;
     }
 
-    fn probe(self: *StrongBranching, problem: solver.LpProblemView, value: f64, column: usize, direction: BranchDirection, control: solver.LpSolveControl) ProbeResult {
+    fn probe(self: *StrongBranching, problem: *const solver.LpProblemView, value: f64, column: usize, direction: BranchDirection, control: solver.LpSolveControl) ProbeResult {
         @memcpy(self.lower, problem.col_lower);
         @memcpy(self.upper, problem.col_upper);
         switch (direction) {
@@ -203,18 +203,18 @@ pub const StrongBranching = struct {
         }
         if (self.lower[column] > self.upper[column]) return .{ .status = .infeasible };
 
-        var probe_problem = problem;
+        var probe_problem: solver.LpProblemView = problem.*;
         probe_problem.col_lower = self.lower;
         probe_problem.col_upper = self.upper;
         self.revision +%= 1;
-        const status = self.session.solveRelaxation(probe_problem, control, .{
+        const status = self.session.solveRelaxation(&probe_problem, control, .{
             .structure = 0,
             .matrix_values = 0,
             .bounds = self.revision,
             .objective = 0,
         });
         const objective = if (status == .optimal)
-            if (self.session.resultView(probe_problem, status)) |view| view.objective_value else null
+            if (self.session.resultView(&probe_problem, status)) |view| view.objective_value else null
         else
             null;
         return .{
@@ -279,7 +279,7 @@ test "strong branching refines both directions without touching caller bounds" {
     defer strong.deinit();
     var pseudocost = try Pseudocost.init(std.testing.allocator, 2, 2);
     defer pseudocost.deinit(std.testing.allocator);
-    const result = strong.refine(problem, &.{ .integer, .integer }, &.{ 0.5, 0.5 }, 0.5, &pseudocost, .{}, .{ .max_candidates = 1 }, 1e-6);
+    const result = strong.refine(&problem, &.{ .integer, .integer }, &.{ 0.5, 0.5 }, 0.5, &pseudocost, .{}, .{ .max_candidates = 1 }, 1e-6);
     try std.testing.expectEqual(@as(usize, 2), result.statistics.probes);
     try std.testing.expectEqual(@as(usize, 1), pseudocost.observations);
     try std.testing.expect(strong.directionResult(0, .down).?.infeasible);

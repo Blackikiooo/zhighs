@@ -45,7 +45,7 @@ pub const RowView = struct {
 
     /// Transpose the retained CSC entries into stable row-major order. Capacity
     /// growth is confined to this solve-boundary call.
-    pub fn build(self: *RowView, csc: matrix.CscView) !void {
+    pub fn build(self: *RowView, csc: *const matrix.CscView) !void {
         try self.ensureCapacity(csc.num_rows, csc.values.len);
         const starts = self.row_starts[0 .. csc.num_rows + 1];
         const cursor = self.row_cursor[0..csc.num_rows];

@@ -1,5 +1,11 @@
 //! Canonical sparse-vector storage and zero-allocation borrowed views.
 //!
+//! Role: payload of one sparse row or column, not a whole matrix.
+//! Shape: 1×n (row) or m×1 (column), stored as a dense dimension plus sorted
+//! `(index, value)` pairs.
+//! Owns: `SparseVector` owns its two streams; `SparseVectorView` borrows.
+//! `csr_view.zig` returns these for rows and `csc.zig` for columns.
+//!
 //! This module represents matrix rows and columns as sorted `(index, value)`
 //! pairs. It is intentionally different from the dense-plus-active workspace
 //! used later by Simplex FTRAN/BTRAN.
@@ -72,7 +78,7 @@ pub fn SparseVectorView(comptime Id: type) type {
             return self.indices.len == 0;
         }
         // Validates the canonical invariants of the sparse vector view.
-        pub fn validate(self: Self) SparseVectorError!void {
+        pub fn validate(self: *const Self) SparseVectorError!void {
             if (self.indices.len != self.values.len) {
                 return SparseVectorError.LengthMismatch;
             }
@@ -102,7 +108,7 @@ pub fn SparseVectorView(comptime Id: type) type {
         }
 
         /// Computes a sparse/dense dot product after checking dimensions.
-        pub fn dotDense(self: Self, dense: []const f64) SparseVectorError!f64 {
+        pub fn dotDense(self: *const Self, dense: []const f64) SparseVectorError!f64 {
             if (dense.len != self.dimension) {
                 return SparseVectorError.DimensionMismatch;
             }
@@ -110,7 +116,7 @@ pub fn SparseVectorView(comptime Id: type) type {
         }
 
         /// Computes a sparse/dense dot product for an already validated view.
-        pub fn dotDenseAssumeValid(self: Self, dense: []const f64) f64 {
+        pub fn dotDenseAssumeValid(self: *const Self, dense: []const f64) f64 {
             std.debug.assert(self.indices.len == self.values.len);
             std.debug.assert(dense.len == self.dimension);
 
@@ -125,7 +131,7 @@ pub fn SparseVectorView(comptime Id: type) type {
 
         /// Adds `alpha * self` to a dense vector after checking dimensions.
         pub fn addToDense(
-            self: Self,
+            self: *const Self,
             alpha: f64,
             dense: []f64,
         ) SparseVectorError!void {
@@ -136,7 +142,7 @@ pub fn SparseVectorView(comptime Id: type) type {
         }
 
         /// Adds `alpha * self` to an already dimension-compatible dense vector.
-        pub fn addToDenseAssumeValid(self: Self, alpha: f64, dense: []f64) void {
+        pub fn addToDenseAssumeValid(self: *const Self, alpha: f64, dense: []f64) void {
             std.debug.assert(self.indices.len == self.values.len);
             std.debug.assert(dense.len == self.dimension);
 
@@ -194,7 +200,7 @@ pub fn SparseVector(comptime Id: type) type {
             const indices_bytes = std.math.mul(usize, nonzeros, @sizeOf(Id)) catch return error.DimensionTooLarge;
             const values_bytes = std.math.mul(usize, nonzeros, @sizeOf(f64)) catch return error.DimensionTooLarge;
             const layout = memory.computeLayout(2, .{ indices_bytes, values_bytes }, .{ @alignOf(Id), @alignOf(f64) }) catch return error.DimensionTooLarge;
-            const storage = try allocator.alignedAlloc(u8, .@"64", layout.total);
+            const storage = try allocator.alignedAlloc(u8, memory.owning_block_alignment, layout.total);
             const indices_ptr = @as([*]Id, @ptrCast(@alignCast(storage.ptr)))[0..nonzeros];
             const values_ptr = @as([*]f64, @ptrCast(@alignCast(storage.ptr + layout.offsets[1])))[0..nonzeros];
             return .{ .dimension = dimension, .indices = indices_ptr, .values = values_ptr, .storage = storage };

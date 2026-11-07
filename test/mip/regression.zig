@@ -54,7 +54,7 @@ fn solveCase(allocator: std.mem.Allocator, case: Case, control: mip.SolveControl
         .semi_continuous => .semi_continuous,
         .semi_integer => .semi_integer,
     };
-    return mip.solve(allocator, .{
+    const problem: mip.ProblemView = .{
         .relaxation = .{
             .num_rows = model_data.row_lower.len,
             .num_cols = model_data.col_cost.len,
@@ -68,7 +68,8 @@ fn solveCase(allocator: std.mem.Allocator, case: Case, control: mip.SolveControl
             .objective_offset = model_data.objective_offset,
         },
         .integrality = integrality,
-    }, control);
+    };
+    return mip.solve(allocator, &problem, control);
 }
 
 fn expectSuite(control: mip.SolveControl) !void {

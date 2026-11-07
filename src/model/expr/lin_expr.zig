@@ -57,7 +57,7 @@ pub const LinExpr = struct {
     }
 
     /// Evaluate the expression using the model's solution vector.
-    pub fn getValue(self: Self, model: *Model) ModelError!f64 {
+    pub fn getValue(self: *const Self, model: *Model) ModelError!f64 {
         var val = self.constant;
         for (self.terms.items) |t| {
             const index = if (t.var_id) |id| try model.resolveVarId(id) else t.var_idx;
@@ -68,12 +68,12 @@ pub const LinExpr = struct {
     }
 
     /// Return the number of variable terms.
-    pub fn numTerms(self: Self) usize {
+    pub fn numTerms(self: *const Self) usize {
         return self.terms.items.len;
     }
 
     /// Return the constant term.
-    pub fn getConstant(self: Self) f64 {
+    pub fn getConstant(self: *const Self) f64 {
         return self.constant;
     }
 };

@@ -36,7 +36,7 @@ pub fn addQPterms(self: *Model, qrow: []const i32, qcol: []const i32, qval: []co
 /// Add quadratic objective terms from an expression, resolving stable VarIds
 /// once before appending the dense lower-triangle triples.
 pub fn addQPtermsExpr(self: *Model, expr: QuadExpr) ModelError!void {
-    const resolved = try expr.resolveQTerms(self.allocator, self.*);
+    const resolved = try expr.resolveQTerms(self.allocator, self);
     defer self.allocator.free(resolved);
     const qrow = try self.allocator.alloc(i32, resolved.len);
     defer self.allocator.free(qrow);
@@ -64,7 +64,7 @@ pub fn delQ(self: *Model) void {
     self.revision += 1;
 }
 
-pub fn getQ(self: Model, start: usize, len: usize, qrow: []i32, qcol: []i32, qval: []f64) ModelError!usize {
+pub fn getQ(self: *const Model, start: usize, len: usize, qrow: []i32, qcol: []i32, qval: []f64) ModelError!usize {
     if (qrow.len < len or qcol.len < len or qval.len < len) return error.InvalidArgument;
     const avail = if (start >= self.q_nz) 0 else @min(len, self.q_nz - start);
     if (avail > 0) {
@@ -194,7 +194,7 @@ pub fn delQConstrs(self: *Model, indices: []const usize) ModelError!void {
     self.revision += 1;
 }
 
-pub fn getQConstr(self: Model, idx: usize, qnz: *usize, qrow: []i32, qcol: []i32, qval: []f64, lnz: *usize, lind: []usize, lval: []f64) ModelError!void {
+pub fn getQConstr(self: *const Model, idx: usize, qnz: *usize, qrow: []i32, qcol: []i32, qval: []f64, lnz: *usize, lind: []usize, lval: []f64) ModelError!void {
     if (idx >= self.qconstr_count) return error.IndexOutOfRange;
     const qb = self.qconstr_qbegin[idx];
     const qe = self.qconstr_qbegin[idx + 1];
@@ -292,7 +292,7 @@ pub fn delSOS(self: *Model, indices: []const usize) ModelError!void {
     self.revision += 1;
 }
 
-pub fn getSOS(self: Model, idx: usize, sostype: *SosType, num_members: *usize, indices: []usize, weights: []f64) ModelError!void {
+pub fn getSOS(self: *const Model, idx: usize, sostype: *SosType, num_members: *usize, indices: []usize, weights: []f64) ModelError!void {
     if (idx >= self.sos_count) return error.IndexOutOfRange;
     sostype.* = self.sos_types[idx];
     const begin = self.sos_begin[idx];
@@ -303,7 +303,7 @@ pub fn getSOS(self: Model, idx: usize, sostype: *SosType, num_members: *usize, i
     if (weights.len >= count) @memcpy(weights[0..count], self.sos_weights[begin..end]);
 }
 
-pub fn getQConstrByName(self: Model, name: []const u8) ModelError!usize {
+pub fn getQConstrByName(self: *const Model, name: []const u8) ModelError!usize {
     for (self.qconstr_names, 0..) |maybe_name, i| {
         if (maybe_name) |candidate| if (std.mem.eql(u8, candidate, name)) return i;
     }

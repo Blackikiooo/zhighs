@@ -1,5 +1,12 @@
 //! Structural sparse matrix edits that return a new canonical CSC matrix.
 //!
+//! Role: grow or shrink the matrix.
+//! Shape: m×n -> m×(n+k), (m+k)×n, m×(n-k), or (m-k)×n.
+//! Owns: never mutates the source; the caller keeps the old matrix until the
+//! new one validates.
+//! For a subset use `slice.zig`; for a pure reorder use `permutation.zig`; for
+//! row-at-a-time growth use `dynamic_rows.zig`.
+//!
 //! Functions do not mutate the source. This gives callers strong failure
 //! safety: an allocation or validation error leaves the authoritative matrix
 //! untouched, and Model can swap revisions only after successful construction.

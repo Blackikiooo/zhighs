@@ -227,7 +227,7 @@ pub const DenseLU = struct {
 
     /// Cheap stability signal used for refactorization policy. This is pivot
     /// spread, deliberately not presented as a rigorous matrix condition number.
-    pub fn pivotConditionEstimate(self: Self) f64 {
+    pub fn pivotConditionEstimate(self: *const Self) f64 {
         if (self.min_abs_pivot <= 0.0) return std.math.inf(f64);
         return self.max_abs_pivot / self.min_abs_pivot;
     }

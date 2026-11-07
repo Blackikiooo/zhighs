@@ -62,7 +62,7 @@ pub const LpSolveResult = struct {
         self.* = undefined;
     }
 
-    pub fn resultView(self: *const LpSolveResult, problem: LpProblemView) ?LpSolveResultView {
+    pub fn resultView(self: *const LpSolveResult, problem: *const LpProblemView) ?LpSolveResultView {
         if (self.status == .invalid_model) return null;
         if (self.projection) |*projection| return projection.view(self.engine.iterations);
         if (self.presolved_problem != null) return null;
@@ -89,14 +89,14 @@ pub const LpSolveResult = struct {
 };
 
 /// Execute the LP backend while borrowing all immutable problem arrays.
-pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: LpSolveControl) LpSolveResult {
+pub fn solveLp(allocator: std.mem.Allocator, problem: *const LpProblemView, control: LpSolveControl) LpSolveResult {
     var engine = lp.simplex.engine.SimplexEngine.init(allocator);
     problem.validate() catch {
-        const status = engine.solveProblem(problem, control);
+        const status = engine.solveProblem(problem, &control);
         return .{ .engine = engine, .status = status };
     };
     if (!hasPresolveReductions(allocator, problem)) {
-        const status = engine.solveProblem(problem, control);
+        const status = engine.solveProblem(problem, &control);
         return .{ .engine = engine, .status = status };
     }
 
@@ -104,7 +104,7 @@ pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: Lp
         return .{ .engine = engine, .status = .numerical_failure };
     if (!pp.wasApplied()) {
         pp.deinit();
-        const status = engine.solveProblem(problem, control);
+        const status = engine.solveProblem(problem, &control);
         return .{ .engine = engine, .status = status };
     }
     var reduced_basis: ?ReducedBasisChain = null;
@@ -114,7 +114,7 @@ pub fn solveLp(allocator: std.mem.Allocator, problem: LpProblemView, control: Lp
         reduced_basis = ReducedBasisChain.init(allocator, &pp, initial_basis) catch null;
     reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
     const reduced_problem = pp.reducedView();
-    const status = engine.solveProblem(reduced_problem, reduced_control);
+    const status = engine.solveProblem(&reduced_problem, &reduced_control);
     const projection = PostsolveProjection.init(allocator, problem, &pp, &engine, status) catch null;
     return .{
         .engine = engine,
@@ -145,7 +145,7 @@ pub const LpSolveSession = struct {
         row_indices: []const foundation.RowId,
         values: []const f64,
 
-        fn matches(self: MatrixIdentity, problem: LpProblemView) bool {
+        fn matches(self: *const MatrixIdentity, problem: *const LpProblemView) bool {
             return self.col_starts.ptr == problem.matrix.col_starts.ptr and self.col_starts.len == problem.matrix.col_starts.len and
                 self.row_indices.ptr == problem.matrix.row_indices.ptr and self.row_indices.len == problem.matrix.row_indices.len and
                 self.values.ptr == problem.matrix.values.ptr and self.values.len == problem.matrix.values.len;
@@ -155,7 +155,7 @@ pub const LpSolveSession = struct {
     /// Validate the problem, skipping the O(nnz) CSC scan when the matrix
     /// slices are identical to the ones validated by the previous call
     /// (bound-only reoptimizations reuse them by construction).
-    fn validateProblem(self: *LpSolveSession, problem: LpProblemView) bool {
+    fn validateProblem(self: *LpSolveSession, problem: *const LpProblemView) bool {
         if (self.validated_matrix) |cached| {
             if (cached.matches(problem)) {
                 problem.validateExceptMatrix() catch return false;
@@ -181,7 +181,7 @@ pub const LpSolveSession = struct {
         self.* = undefined;
     }
 
-    pub fn solve(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
+    pub fn solve(self: *LpSolveSession, problem: *const LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
         if (self.projection) |*value| value.deinit();
         self.projection = null;
 
@@ -190,13 +190,13 @@ pub const LpSolveSession = struct {
             self.last_revision = null;
             self.last_rows = 0;
             self.last_cols = 0;
-            return self.engine.solveProblem(problem, control);
+            return self.engine.solveProblem(problem, &control);
         }
 
         if (!hasPresolveReductions(self.allocator, problem)) {
             if (self.presolved_problem) |*value| value.deinit();
             self.presolved_problem = null;
-            return self.solveReduced(problem, control, revision, false);
+            return self.solveReduced(problem, &control, revision, false);
         }
 
         var next_pp = presolve.presolvePipeline(self.allocator, problem) catch {
@@ -207,7 +207,7 @@ pub const LpSolveSession = struct {
             next_pp.deinit();
             if (self.presolved_problem) |*value| value.deinit();
             self.presolved_problem = null;
-            return self.solveReduced(problem, control, revision, false);
+            return self.solveReduced(problem, &control, revision, false);
         }
         const mapping_changed = if (self.presolved_problem) |*previous|
             !previous.sameMapping(&next_pp)
@@ -223,7 +223,7 @@ pub const LpSolveSession = struct {
             reduced_basis = ReducedBasisChain.init(self.allocator, &self.presolved_problem.?, initial_basis) catch null;
         reduced_control.initial_basis = if (reduced_basis) |*value| value.view() else null;
         const reduced_problem = self.presolved_problem.?.reducedView();
-        const status = self.solveReduced(reduced_problem, reduced_control, revision, mapping_changed);
+        const status = self.solveReduced(&reduced_problem, &reduced_control, revision, mapping_changed);
         self.projection = PostsolveProjection.init(
             self.allocator,
             problem,
@@ -243,20 +243,20 @@ pub const LpSolveSession = struct {
     /// change the reduced mapping and defeat basis/factorization reuse. The
     /// first call after a presolved solve is forced cold in original
     /// coordinates; subsequent compatible calls use direct reoptimization.
-    pub fn solveRelaxation(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
+    pub fn solveRelaxation(self: *LpSolveSession, problem: *const LpProblemView, control: LpSolveControl, revision: LpRevisionStamp) LpSolveStatus {
         if (!self.validateProblem(problem)) {
             self.clearPresolveState();
             self.last_revision = null;
             self.last_rows = 0;
             self.last_cols = 0;
-            return self.engine.solveProblem(problem, control);
+            return self.engine.solveProblem(problem, &control);
         }
         const force_cold = self.presolved_problem != null;
         self.clearPresolveState();
-        return self.solveReduced(problem, control, revision, force_cold);
+        return self.solveReduced(problem, &control, revision, force_cold);
     }
 
-    fn solveReduced(self: *LpSolveSession, problem: LpProblemView, control: LpSolveControl, revision: LpRevisionStamp, force_cold: bool) LpSolveStatus {
+    fn solveReduced(self: *LpSolveSession, problem: *const LpProblemView, control: *const LpSolveControl, revision: LpRevisionStamp, force_cold: bool) LpSolveStatus {
         const reusable = !force_cold and if (self.last_revision) |last|
             last.structure == revision.structure and last.matrix_values == revision.matrix_values and
                 self.last_rows == problem.num_rows and self.last_cols == problem.num_cols
@@ -275,7 +275,7 @@ pub const LpSolveSession = struct {
         return status;
     }
 
-    pub fn resultView(self: *const LpSolveSession, problem: LpProblemView, status: LpSolveStatus) ?LpSolveResultView {
+    pub fn resultView(self: *const LpSolveSession, problem: *const LpProblemView, status: LpSolveStatus) ?LpSolveResultView {
         if (status == .invalid_model) return null;
         if (self.projection) |*projection| return projection.view(self.engine.iterations);
         if (self.presolved_problem != null) return null;
@@ -308,7 +308,7 @@ pub const LpSolveSession = struct {
     }
 };
 
-fn hasPresolveReductions(allocator: std.mem.Allocator, problem: LpProblemView) bool {
+fn hasPresolveReductions(allocator: std.mem.Allocator, problem: *const LpProblemView) bool {
     const objective_sign: f64 = @floatFromInt(@intFromEnum(problem.objective_sense));
     for (0..problem.num_cols) |column| {
         const begin = problem.matrix.col_starts[column];
@@ -358,7 +358,7 @@ fn hasPresolveReductions(allocator: std.mem.Allocator, problem: LpProblemView) b
     return false;
 }
 
-fn hasExactDuplicateRows(allocator: std.mem.Allocator, problem: LpProblemView, row_counts: []const u32) bool {
+fn hasExactDuplicateRows(allocator: std.mem.Allocator, problem: *const LpProblemView, row_counts: []const u32) bool {
     const row_starts = allocator.alloc(usize, problem.num_rows + 1) catch return false;
     defer allocator.free(row_starts);
     row_starts[0] = 0;
@@ -416,7 +416,7 @@ fn hasExactDuplicateRows(allocator: std.mem.Allocator, problem: LpProblemView, r
     return false;
 }
 
-fn basisIsValid(problem: LpProblemView, basis: *const lp.simplex.basis.BasisState) bool {
+fn basisIsValid(problem: *const LpProblemView, basis: *const lp.simplex.basis.BasisState) bool {
     const view = LpBasisView{
         .structural_status = basis.col_status[0..problem.num_cols],
         .logical_status = basis.col_status[problem.num_cols..][0..problem.num_rows],
@@ -659,13 +659,13 @@ const PostsolveProjection = struct {
 
     fn init(
         allocator: std.mem.Allocator,
-        original_problem: LpProblemView,
+        original_problem: *const LpProblemView,
         pipeline: *const presolve.PresolvePipeline,
         engine: *const lp.simplex.engine.SimplexEngine,
         status: LpSolveStatus,
     ) !PostsolveProjection {
         const reduced_problem = pipeline.reducedView();
-        const reduced_solution = engine.solutionView(reduced_problem, status) orelse return error.SolutionUnavailable;
+        const reduced_solution = engine.solutionView(&reduced_problem, status) orelse return error.SolutionUnavailable;
         var result = PostsolveProjection{
             .allocator = allocator,
             .solution = try pipeline.postsolveAll(reduced_solution, allocator),
@@ -682,7 +682,7 @@ const PostsolveProjection = struct {
         var logical_status: []const LpBasisStatus = basis.col_status[reduced_problem.num_cols..][0..reduced_problem.num_rows];
         var basic_index: []const u32 = basis.basic_index[0..reduced_problem.num_rows];
         var row_scale: []const f64 = basis.row_scale[0..reduced_problem.num_rows];
-        var basis_valid = basisIsValid(reduced_problem, basis);
+        var basis_valid = basisIsValid(&reduced_problem, basis);
         var pass_index = pipeline.passes.items.len;
         while (pass_index > 0) {
             pass_index -= 1;
@@ -770,7 +770,7 @@ fn fixedColumnProblem(fixed_first: bool) LpProblemView {
     };
 }
 
-fn expectValidFarkas(problem: LpProblemView, ray: []const f64) !void {
+fn expectValidFarkas(problem: *const LpProblemView, ray: []const f64) !void {
     try std.testing.expectEqual(problem.num_rows, ray.len);
     var proof_lower: f64 = 0.0;
     for (ray, problem.row_lower, problem.row_upper) |multiplier, lower, upper| {
@@ -802,10 +802,10 @@ fn expectValidFarkas(problem: LpProblemView, ray: []const f64) !void {
 
 test "solveLp returns fixed-column solutions and basis in original coordinates" {
     const problem = fixedColumnProblem(false);
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(view.primal_valid);
     try std.testing.expect(view.dual_valid);
     try std.testing.expect(view.basis_valid);
@@ -819,9 +819,9 @@ test "solveLp returns fixed-column solutions and basis in original coordinates" 
 
 test "solveLp maps an exported original basis back through presolve" {
     const problem = fixedColumnProblem(false);
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     var snapshot = try LpBasisSnapshot.initFromView(std.testing.allocator, .{
         .structural_status = first_view.structural_status,
         .logical_status = first_view.logical_status,
@@ -829,10 +829,10 @@ test "solveLp maps an exported original basis back through presolve" {
     });
     defer snapshot.deinit();
 
-    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var second = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer second.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
-    const second_view = second.resultView(problem).?;
+    const second_view = second.resultView(&problem).?;
     try std.testing.expect(second_view.basis_valid);
     try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
     try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
@@ -857,10 +857,10 @@ test "presolve restores and warm-starts a redundant row exposed by a fixed colum
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 2.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 1.0 }, first_view.dual);
@@ -873,10 +873,10 @@ test "presolve restores and warm-starts a redundant row exposed by a fixed colum
         .basic_index = first_view.basic_index,
     });
     defer snapshot.deinit();
-    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var second = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer second.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
-    const second_view = second.resultView(problem).?;
+    const second_view = second.resultView(&problem).?;
     try std.testing.expect(second_view.basis_valid);
     try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
     try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
@@ -901,12 +901,12 @@ test "solver routes an original redundant empty row through reversible presolve"
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
     try std.testing.expect(result.presolved_problem.?.removed_row_count == 2);
     try std.testing.expect(result.presolved_problem.?.singleton_row_count == 1);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{2.0}, view.primal);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 1.0 }, view.dual);
@@ -936,12 +936,12 @@ test "activity presolve removes a general redundant row and warm-starts postsolv
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
     try std.testing.expectEqual(@as(u32, 1), first.presolved_problem.?.redundant_row_count);
     try std.testing.expectEqual(@as(usize, 2), first.presolved_problem.?.passes.items.len);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, -2.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{0.0}, first_view.dual);
@@ -955,10 +955,10 @@ test "activity presolve removes a general redundant row and warm-starts postsolv
         .basic_index = first_view.basic_index,
     });
     defer snapshot.deinit();
-    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var second = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer second.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
-    const second_view = second.resultView(problem).?;
+    const second_view = second.resultView(&problem).?;
     try std.testing.expect(second_view.basis_valid);
     try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
     try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
@@ -966,12 +966,12 @@ test "activity presolve removes a general redundant row and warm-starts postsolv
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
     const revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
-    const warm_status = session.solve(problem, .{}, revision);
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
+    const warm_status = session.solve(&problem, .{}, revision);
     try std.testing.expectEqual(LpSolveStatus.optimal, warm_status);
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
     try std.testing.expectEqual(@as(usize, 1), session.reoptimizations);
-    const warm_view = session.resultView(problem, warm_status).?;
+    const warm_view = session.resultView(&problem, warm_status).?;
     try std.testing.expect(warm_view.basis_valid);
     try std.testing.expectEqual(@as(usize, 0), warm_view.iterations);
     try std.testing.expectEqualSlices(f64, first_view.primal, warm_view.primal);
@@ -996,11 +996,11 @@ test "activity-redundant rows preserve unbounded and infeasible certificates" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var unbounded = solveLp(std.testing.allocator, unbounded_problem, .{});
+    var unbounded = solveLp(std.testing.allocator, &unbounded_problem, .{});
     defer unbounded.deinit();
     try std.testing.expectEqual(LpSolveStatus.unbounded, unbounded.status);
     try std.testing.expectEqual(@as(u32, 1), unbounded.presolved_problem.?.redundant_row_count);
-    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, unbounded.resultView(unbounded_problem).?.unbounded_ray);
+    try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, unbounded.resultView(&unbounded_problem).?.unbounded_ray);
 
     const infeasible_problem = LpProblemView{
         .num_rows = 2,
@@ -1025,12 +1025,12 @@ test "activity-redundant rows preserve unbounded and infeasible certificates" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var infeasible = solveLp(std.testing.allocator, infeasible_problem, .{ .phase_one_strategy = .dual });
+    var infeasible = solveLp(std.testing.allocator, &infeasible_problem, .{ .phase_one_strategy = .dual });
     defer infeasible.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, infeasible.status);
     try std.testing.expectEqual(@as(u32, 1), infeasible.presolved_problem.?.redundant_row_count);
-    const infeasible_view = infeasible.resultView(infeasible_problem).?;
-    try expectValidFarkas(infeasible_problem, infeasible_view.infeasibility_ray);
+    const infeasible_view = infeasible.resultView(&infeasible_problem).?;
+    try expectValidFarkas(&infeasible_problem, infeasible_view.infeasibility_ray);
     try std.testing.expectEqual(@as(f64, 0.0), infeasible_view.infeasibility_ray[0]);
     try std.testing.expect(infeasible_view.infeasibility_ray[1] > 0.0);
 }
@@ -1056,12 +1056,12 @@ test "exact duplicate rows restore dual basis and warm sessions" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
     try std.testing.expectEqual(@as(u32, 1), first.presolved_problem.?.duplicate_row_count);
     try std.testing.expectEqual(@as(usize, 1), first.presolved_problem.?.passes.items.len);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, first_view.dual);
@@ -1078,19 +1078,19 @@ test "exact duplicate rows restore dual basis and warm sessions" {
     var reduced_chain = try ReducedBasisChain.init(std.testing.allocator, &first.presolved_problem.?, snapshot.view());
     defer reduced_chain.deinit();
     try reduced_chain.view().validate(2, 1);
-    var warm = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var warm = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer warm.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, warm.status);
-    try std.testing.expectEqual(@as(usize, 0), warm.resultView(problem).?.iterations);
+    try std.testing.expectEqual(@as(usize, 0), warm.resultView(&problem).?.iterations);
 
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
     const revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
     try std.testing.expectEqual(@as(usize, 1), session.reoptimizations);
-    try std.testing.expect(session.resultView(problem, .optimal).?.basis_valid);
+    try std.testing.expect(session.resultView(&problem, .optimal).?.basis_valid);
 }
 
 test "duplicate row postsolve leaves the removed Farkas multiplier zero" {
@@ -1115,12 +1115,12 @@ test "duplicate row postsolve leaves the removed Farkas multiplier zero" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
     try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.duplicate_row_count);
-    const ray = result.resultView(problem).?.infeasibility_ray;
-    try expectValidFarkas(problem, ray);
+    const ray = result.resultView(&problem).?.infeasibility_ray;
+    try expectValidFarkas(&problem, ray);
     try std.testing.expect(ray[0] > 0.0);
     try std.testing.expectEqual(@as(f64, 0.0), ray[1]);
     try std.testing.expect(ray[2] < 0.0);
@@ -1147,12 +1147,12 @@ test "fixed substitution can expose duplicate adjusted rows in the same pass" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
     try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.column_substitution_count);
     try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.duplicate_row_count);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 1.0 }, view.primal);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, view.dual);
     try std.testing.expect(view.basis_valid);
@@ -1177,7 +1177,7 @@ test "presolve substitutes empty columns at finite objective-optimal bounds" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
     try std.testing.expectEqual(@as(usize, 2), first.presolved_problem.?.passes.items.len);
@@ -1185,7 +1185,7 @@ test "presolve substitutes empty columns at finite objective-optimal bounds" {
     try std.testing.expectEqual(@as(u32, 1), first.presolved_problem.?.singleton_row_count);
     try std.testing.expectEqual(@as(usize, 0), first.presolved_problem.?.reducedView().num_cols);
     try std.testing.expectEqual(@as(usize, 0), first.presolved_problem.?.reducedView().num_rows);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, -3.0, 5.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{1.0}, first_view.dual);
@@ -1203,10 +1203,10 @@ test "presolve substitutes empty columns at finite objective-optimal bounds" {
         .basic_index = first_view.basic_index,
     });
     defer snapshot.deinit();
-    var second = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var second = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer second.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, second.status);
-    const second_view = second.resultView(problem).?;
+    const second_view = second.resultView(&problem).?;
     try std.testing.expect(second_view.basis_valid);
     try std.testing.expectEqual(@as(usize, 0), second_view.iterations);
     try std.testing.expectEqualSlices(f64, first_view.primal, second_view.primal);
@@ -1225,12 +1225,12 @@ test "zero-cost empty columns publish canonical values basis and warm sessions" 
         .objective_sense = .maximize,
         .objective_offset = 7.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
     try std.testing.expectEqual(@as(usize, 1), first.presolved_problem.?.passes.items.len);
     try std.testing.expectEqual(@as(u32, 4), first.presolved_problem.?.column_substitution_count);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 3.0, 2.0, -2.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{ 0.0, 0.0, 0.0, 0.0 }, first_view.reduced_cost);
@@ -1243,10 +1243,10 @@ test "zero-cost empty columns publish canonical values basis and warm sessions" 
         .basic_index = first_view.basic_index,
     });
     defer snapshot.deinit();
-    var warm = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var warm = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer warm.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, warm.status);
-    const warm_view = warm.resultView(problem).?;
+    const warm_view = warm.resultView(&problem).?;
     try std.testing.expect(warm_view.basis_valid);
     try std.testing.expectEqual(@as(usize, 0), warm_view.iterations);
     try std.testing.expectEqualSlices(f64, first_view.primal, warm_view.primal);
@@ -1268,13 +1268,13 @@ test "zero-cost empty columns publish canonical values basis and warm sessions" 
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
     const first_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(session_problem, .{}, first_revision));
-    try std.testing.expectEqualSlices(f64, &.{ 0.0, 2.0 }, session.resultView(session_problem, .optimal).?.primal);
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&session_problem, .{}, first_revision));
+    try std.testing.expectEqualSlices(f64, &.{ 0.0, 2.0 }, session.resultView(&session_problem, .optimal).?.primal);
     lower[1] = 3.0;
     upper[0] = 4.0;
     const second_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 2, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(session_problem, .{}, second_revision));
-    const session_view = session.resultView(session_problem, .optimal).?;
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&session_problem, .{}, second_revision));
+    const session_view = session.resultView(&session_problem, .optimal).?;
     try std.testing.expectEqualSlices(f64, &.{ 4.0, 3.0 }, session_view.primal);
     try std.testing.expectEqualSlices(LpBasisStatus, &.{ .at_upper, .at_lower }, session_view.structural_status);
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
@@ -1300,11 +1300,11 @@ test "zero-cost free-column substitution preserves a Farkas certificate" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
-    const view = result.resultView(problem).?;
-    try expectValidFarkas(problem, view.infeasibility_ray);
+    const view = result.resultView(&problem).?;
+    try expectValidFarkas(&problem, view.infeasibility_ray);
     try std.testing.expectEqual(LpBasisStatus.free, view.structural_status[1]);
     try std.testing.expectEqual(@as(f64, 0.0), view.primal[1]);
 }
@@ -1328,11 +1328,11 @@ test "free zero-cost singleton column restores primal basis and warm sessions" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var first = solveLp(std.testing.allocator, problem, .{});
+    var first = solveLp(std.testing.allocator, &problem, .{});
     defer first.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, first.status);
     try std.testing.expectEqual(@as(u32, 1), first.presolved_problem.?.free_singleton_column_count);
-    const first_view = first.resultView(problem).?;
+    const first_view = first.resultView(&problem).?;
     try std.testing.expect(first_view.basis_valid);
     try std.testing.expectEqualSlices(f64, &.{ 2.0, 0.0 }, first_view.primal);
     try std.testing.expectEqualSlices(f64, &.{0.0}, first_view.dual);
@@ -1350,20 +1350,20 @@ test "free zero-cost singleton column restores primal basis and warm sessions" {
     var reduced_chain = try ReducedBasisChain.init(std.testing.allocator, &first.presolved_problem.?, snapshot.view());
     defer reduced_chain.deinit();
     try reduced_chain.view().validate(0, 0);
-    var warm = solveLp(std.testing.allocator, problem, .{ .initial_basis = snapshot.view() });
+    var warm = solveLp(std.testing.allocator, &problem, .{ .initial_basis = snapshot.view() });
     defer warm.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, warm.status);
-    try std.testing.expect(warm.resultView(problem).?.basis_valid);
-    try std.testing.expectEqualSlices(f64, first_view.primal, warm.resultView(problem).?.primal);
+    try std.testing.expect(warm.resultView(&problem).?.basis_valid);
+    try std.testing.expectEqualSlices(f64, first_view.primal, warm.resultView(&problem).?.primal);
 
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
     const revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
     try std.testing.expectEqual(@as(usize, 1), session.reoptimizations);
-    try std.testing.expect(session.resultView(problem, .optimal).?.basis_valid);
+    try std.testing.expect(session.resultView(&problem, .optimal).?.basis_valid);
 }
 
 test "free singleton postsolve cancels an unbounded row direction" {
@@ -1385,13 +1385,13 @@ test "free singleton postsolve cancels an unbounded row direction" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.unbounded, result.status);
-    const ray = result.resultView(problem).?.unbounded_ray;
-    try std.testing.expect(result.resultView(problem).?.basis_valid);
-    try std.testing.expectEqual(LpBasisStatus.basic, result.resultView(problem).?.structural_status[0]);
-    try std.testing.expectEqual(LpBasisStatus.fixed, result.resultView(problem).?.logical_status[0]);
+    const ray = result.resultView(&problem).?.unbounded_ray;
+    try std.testing.expect(result.resultView(&problem).?.basis_valid);
+    try std.testing.expectEqual(LpBasisStatus.basic, result.resultView(&problem).?.structural_status[0]);
+    try std.testing.expectEqual(LpBasisStatus.fixed, result.resultView(&problem).?.logical_status[0]);
     try std.testing.expectEqualSlices(f64, &.{ -1.5, 1.0 }, ray);
     try std.testing.expectApproxEqAbs(@as(f64, 0.0), 2.0 * ray[0] + 3.0 * ray[1], 1e-12);
     try std.testing.expect(problem.col_cost[0] * ray[0] + problem.col_cost[1] * ray[1] < 0.0);
@@ -1420,11 +1420,11 @@ test "free singleton postsolve leaves its Farkas row multiplier zero" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
-    const ray = result.resultView(problem).?.infeasibility_ray;
-    try expectValidFarkas(problem, ray);
+    const ray = result.resultView(&problem).?.infeasibility_ray;
+    try expectValidFarkas(&problem, ray);
     try std.testing.expectEqual(@as(f64, 0.0), ray[0]);
     try std.testing.expect(ray[1] > 0.0);
 }
@@ -1449,13 +1449,13 @@ test "multiple free singleton columns on one row converge across passes" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
     try std.testing.expectEqual(@as(usize, 2), result.presolved_problem.?.passes.items.len);
     try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.free_singleton_column_count);
     try std.testing.expectEqual(@as(u32, 2), result.presolved_problem.?.column_substitution_count);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0, 2.0 }, view.primal);
     try std.testing.expectEqualSlices(LpBasisStatus, &.{ .basic, .free, .at_lower }, view.structural_status);
     try std.testing.expectEqual(LpBasisStatus.at_upper, view.logical_status[0]);
@@ -1475,10 +1475,10 @@ test "maximize empty-column substitution publishes normalized reduced cost" {
         .objective_sense = .maximize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(view.primal_valid);
     try std.testing.expect(view.dual_valid);
     try std.testing.expect(view.basis_valid);
@@ -1501,10 +1501,10 @@ test "singleton upper bound postsolves dual reduced cost and basis" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(view.primal_valid);
     try std.testing.expect(view.dual_valid);
     try std.testing.expect(view.basis_valid);
@@ -1567,12 +1567,12 @@ test "singleton postsolve restores Farkas rays for every coefficient and bound o
             .objective_sense = .minimize,
             .objective_offset = 0.0,
         };
-        var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+        var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
         defer result.deinit();
         try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
-        const view = result.resultView(problem).?;
+        const view = result.resultView(&problem).?;
         try std.testing.expectEqual(@as(u32, 1), result.presolved_problem.?.singleton_row_count);
-        try expectValidFarkas(problem, view.infeasibility_ray);
+        try expectValidFarkas(&problem, view.infeasibility_ray);
         try std.testing.expect(view.infeasibility_ray[0] * case.restored_sign > 0.0);
         try std.testing.expectApproxEqAbs(
             @as(f64, 0.0),
@@ -1605,12 +1605,12 @@ test "singleton Farkas postsolve selects the last active bound source" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
     try std.testing.expectEqual(@as(u32, 2), result.presolved_problem.?.singleton_row_count);
-    const view = result.resultView(problem).?;
-    try expectValidFarkas(problem, view.infeasibility_ray);
+    const view = result.resultView(&problem).?;
+    try expectValidFarkas(&problem, view.infeasibility_ray);
     try std.testing.expectEqual(@as(f64, 0.0), view.infeasibility_ray[0]);
     try std.testing.expect(view.infeasibility_ray[1] > 0.0);
     try std.testing.expect(view.infeasibility_ray[2] < 0.0);
@@ -1639,13 +1639,13 @@ test "multi-pass postsolve preserves a singleton Farkas certificate" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
     try std.testing.expectEqual(@as(usize, 2), result.presolved_problem.?.passes.items.len);
     try std.testing.expectEqual(@as(u32, 2), result.presolved_problem.?.singleton_row_count);
-    const view = result.resultView(problem).?;
-    try expectValidFarkas(problem, view.infeasibility_ray);
+    const view = result.resultView(&problem).?;
+    try expectValidFarkas(&problem, view.infeasibility_ray);
     try std.testing.expect(view.infeasibility_ray[0] > 0.0);
     try std.testing.expect(view.infeasibility_ray[1] < 0.0);
     try std.testing.expectEqual(@as(f64, 0.0), view.infeasibility_ray[2]);
@@ -1670,7 +1670,7 @@ test "reduced basis mapping rejects a basic substituted column" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pp = try presolve.presolve(std.testing.allocator, problem);
+    var pp = try presolve.presolve(std.testing.allocator, &problem);
     defer pp.deinit();
     const original = LpBasisView{
         .structural_status = &.{ .at_lower, .at_lower, .basic },
@@ -1702,7 +1702,7 @@ test "multi-pass basis chain projects a logical warm basis to the fixed point" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var pipeline = try presolve.presolvePipeline(std.testing.allocator, problem);
+    var pipeline = try presolve.presolvePipeline(std.testing.allocator, &problem);
     defer pipeline.deinit();
     try std.testing.expectEqual(@as(usize, 2), pipeline.passes.items.len);
     const original = LpBasisView{
@@ -1730,10 +1730,10 @@ test "postsolve preserves unbounded certificates and validity semantics" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.unbounded, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(!view.primal_valid);
     try std.testing.expect(!view.dual_valid);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, view.unbounded_ray);
@@ -1759,10 +1759,10 @@ test "postsolve preserves infeasibility certificates independently of basis vali
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(!view.primal_valid);
     try std.testing.expect(!view.dual_valid);
     try std.testing.expectEqual(@as(usize, 0), view.unbounded_ray.len);
@@ -1783,10 +1783,10 @@ test "presolve handles an all-fixed feasible model" {
         .objective_sense = .maximize,
         .objective_offset = 3.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{});
+    var result = solveLp(std.testing.allocator, &problem, .{});
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.optimal, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expectEqualSlices(f64, &.{2.0}, view.primal);
     try std.testing.expectApproxEqAbs(@as(f64, 11.0), view.objective_value, 1e-12);
     try std.testing.expect(view.basis_valid);
@@ -1805,12 +1805,12 @@ test "presolve handles an all-fixed infeasible model" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
-    const view = result.resultView(problem).?;
+    const view = result.resultView(&problem).?;
     try std.testing.expect(!view.primal_valid);
-    try expectValidFarkas(problem, view.infeasibility_ray);
+    try expectValidFarkas(&problem, view.infeasibility_ray);
     try std.testing.expectEqualSlices(f64, &.{1.0}, view.infeasibility_ray);
 }
 
@@ -1832,13 +1832,13 @@ test "simplex publishes both orientations of an original empty-row Farkas ray" {
             .objective_sense = .minimize,
             .objective_offset = 0.0,
         };
-        var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+        var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
         defer result.deinit();
         try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
         try std.testing.expect(result.presolved_problem == null);
-        const ray = result.resultView(problem).?.infeasibility_ray;
+        const ray = result.resultView(&problem).?.infeasibility_ray;
         try std.testing.expectEqualSlices(f64, &.{case.multiplier}, ray);
-        try expectValidFarkas(problem, ray);
+        try expectValidFarkas(&problem, ray);
     }
 }
 
@@ -1859,14 +1859,15 @@ test "empty-row Farkas terminal is refreshed during direct reoptimization" {
     };
     var engine = lp.simplex.engine.SimplexEngine.init(std.testing.allocator);
     defer engine.deinit();
-    try std.testing.expectEqual(LpSolveStatus.optimal, engine.solveProblem(problem, .{}));
+    const engine_control: lp.simplex.engine.SolveControl = .{};
+    try std.testing.expectEqual(LpSolveStatus.optimal, engine.solveProblem(&problem, &engine_control));
     row_lower[0] = -std.math.inf(f64);
     row_upper[0] = -2.0;
-    const status = engine.reoptimizeProblem(problem, .{});
+    const status = engine.reoptimizeProblem(&problem, &engine_control);
     try std.testing.expectEqual(LpSolveStatus.infeasible, status);
-    const ray = engine.solutionView(problem, status).?.infeasibility_ray;
+    const ray = engine.solutionView(&problem, status).?.infeasibility_ray;
     try std.testing.expectEqualSlices(f64, &.{-1.0}, ray);
-    try expectValidFarkas(problem, ray);
+    try expectValidFarkas(&problem, ray);
 }
 
 test "empty-row Farkas ray survives a two-pass presolve chain" {
@@ -1888,13 +1889,13 @@ test "empty-row Farkas ray survives a two-pass presolve chain" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = solveLp(std.testing.allocator, problem, .{ .phase_one_strategy = .dual });
+    var result = solveLp(std.testing.allocator, &problem, .{ .phase_one_strategy = .dual });
     defer result.deinit();
     try std.testing.expectEqual(LpSolveStatus.infeasible, result.status);
     try std.testing.expectEqual(@as(usize, 2), result.presolved_problem.?.passes.items.len);
-    const ray = result.resultView(problem).?.infeasibility_ray;
+    const ray = result.resultView(&problem).?.infeasibility_ray;
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 0.0 }, ray);
-    try expectValidFarkas(problem, ray);
+    try expectValidFarkas(&problem, ray);
 }
 
 test "session invalidates reuse when the fixed-column mapping changes" {
@@ -1903,15 +1904,15 @@ test "session invalidates reuse when the fixed-column mapping changes" {
     const revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
 
     const first = fixedColumnProblem(false);
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(first, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&first, .{}, revision));
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
-    try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, session.resultView(first, .optimal).?.primal);
+    try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, session.resultView(&first, .optimal).?.primal);
 
     const second = fixedColumnProblem(true);
     const changed_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 2, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(second, .{}, changed_revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&second, .{}, changed_revision));
     try std.testing.expectEqual(@as(usize, 2), session.cold_solves);
-    try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, session.resultView(second, .optimal).?.primal);
+    try std.testing.expectEqualSlices(f64, &.{ 2.0, 3.0 }, session.resultView(&second, .optimal).?.primal);
 }
 
 test "session reoptimizes when an empty column switches optimal bound" {
@@ -1931,8 +1932,8 @@ test "session reoptimizes when an empty column switches optimal bound" {
     var session = LpSolveSession.init(std.testing.allocator);
     defer session.deinit();
     const first_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, first_revision));
-    const first = session.resultView(problem, .optimal).?;
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, first_revision));
+    const first = session.resultView(&problem, .optimal).?;
     try std.testing.expectEqualSlices(f64, &.{-3.0}, first.primal);
     try std.testing.expectApproxEqAbs(@as(f64, -6.0), first.objective_value, 1e-12);
     try std.testing.expectEqual(LpBasisStatus.at_lower, first.structural_status[0]);
@@ -1940,8 +1941,8 @@ test "session reoptimizes when an empty column switches optimal bound" {
 
     costs[0] = -2.0;
     const second_revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 2 };
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, second_revision));
-    const second = session.resultView(problem, .optimal).?;
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, second_revision));
+    const second = session.resultView(&problem, .optimal).?;
     try std.testing.expectEqualSlices(f64, &.{7.0}, second.primal);
     try std.testing.expectApproxEqAbs(@as(f64, -14.0), second.objective_value, 1e-12);
     try std.testing.expectEqual(LpBasisStatus.at_upper, second.structural_status[0]);
@@ -1962,11 +1963,11 @@ test "invalid models are rejected before presolve and do not publish results" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var malformed = solveLp(std.testing.allocator, invalid_matrix_problem, .{ .time_limit_ns = 0 });
+    var malformed = solveLp(std.testing.allocator, &invalid_matrix_problem, .{ .time_limit_ns = 0 });
     defer malformed.deinit();
     try std.testing.expectEqual(LpSolveStatus.invalid_model, malformed.status);
     try std.testing.expect(malformed.presolved_problem == null);
-    try std.testing.expect(malformed.resultView(invalid_matrix_problem) == null);
+    try std.testing.expect(malformed.resultView(&invalid_matrix_problem) == null);
     try std.testing.expectEqual(@as(usize, 0), malformed.engine.iterations);
 
     const invalid_bounds_problem = LpProblemView{
@@ -1981,10 +1982,10 @@ test "invalid models are rejected before presolve and do not publish results" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var reversed = solveLp(std.testing.allocator, invalid_bounds_problem, .{});
+    var reversed = solveLp(std.testing.allocator, &invalid_bounds_problem, .{});
     defer reversed.deinit();
     try std.testing.expectEqual(LpSolveStatus.invalid_model, reversed.status);
-    try std.testing.expect(reversed.resultView(invalid_bounds_problem) == null);
+    try std.testing.expect(reversed.resultView(&invalid_bounds_problem) == null);
 }
 
 test "session clears stale state after an invalid model and resumes cold" {
@@ -2005,22 +2006,22 @@ test "session clears stale state after an invalid model and resumes cold" {
     defer session.deinit();
     const revision = LpRevisionStamp{ .structure = 1, .matrix_values = 1, .bounds = 1, .objective = 1 };
 
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
     try std.testing.expect(session.presolved_problem != null);
     try std.testing.expectEqual(@as(usize, 1), session.cold_solves);
 
     lower[0] = std.math.nan(f64);
-    const invalid_status = session.solve(problem, .{}, revision);
+    const invalid_status = session.solve(&problem, .{}, revision);
     try std.testing.expectEqual(LpSolveStatus.invalid_model, invalid_status);
     try std.testing.expect(session.presolved_problem == null);
     try std.testing.expect(session.last_revision == null);
-    try std.testing.expect(session.resultView(problem, invalid_status) == null);
+    try std.testing.expect(session.resultView(&problem, invalid_status) == null);
 
     lower[0] = 0.0;
-    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(problem, .{}, revision));
+    try std.testing.expectEqual(LpSolveStatus.optimal, session.solve(&problem, .{}, revision));
     try std.testing.expectEqual(@as(usize, 2), session.cold_solves);
     try std.testing.expectEqual(@as(usize, 0), session.reoptimizations);
-    try std.testing.expectEqualSlices(f64, &.{0.0}, session.resultView(problem, .optimal).?.primal);
+    try std.testing.expectEqualSlices(f64, &.{0.0}, session.resultView(&problem, .optimal).?.primal);
 }
 
 test {

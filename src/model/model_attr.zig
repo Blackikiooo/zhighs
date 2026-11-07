@@ -27,7 +27,7 @@ const Status = types.Status;
 
 // ── Integer scalar attributes ───────────────────────────────────────────
 
-pub fn getIntAttr(self: Model, attr: Attr) ModelError!i64 {
+pub fn getIntAttr(self: *const Model, attr: Attr) ModelError!i64 {
     return switch (attr) {
         .num_vars => @intCast(self.num_vars),
         .num_constrs => @intCast(self.num_constrs),
@@ -62,7 +62,7 @@ pub fn setIntAttr(self: *Model, attr: Attr, value: i64) ModelError!void {
 
 // ── Double scalar attributes ────────────────────────────────────────────
 
-pub fn getDblAttr(self: Model, attr: Attr) ModelError!f64 {
+pub fn getDblAttr(self: *const Model, attr: Attr) ModelError!f64 {
     return switch (attr) {
         .obj_val => self.obj_val,
         .obj_bound => self.obj_bound,
@@ -83,7 +83,7 @@ pub fn setDblAttr(self: *Model, attr: Attr, value: f64) ModelError!void {
 
 // ── String scalar attributes ────────────────────────────────────────────
 
-pub fn getStrAttr(self: Model, attr: Attr) ModelError![]const u8 {
+pub fn getStrAttr(self: *const Model, attr: Attr) ModelError![]const u8 {
     return switch (attr) {
         .model_name => self.name,
         .status_label => self.status.label(),
@@ -107,7 +107,7 @@ pub fn setStrAttr(self: *Model, attr: Attr, value: []const u8) ModelError!void {
 
 // ── Integer element attributes ──────────────────────────────────────────
 
-pub fn getIntAttrElement(self: Model, attr: Attr, element: usize) ModelError!i64 {
+pub fn getIntAttrElement(self: *const Model, attr: Attr, element: usize) ModelError!i64 {
     switch (attr) {
         .v_basis => {
             if (element >= self.vbasis.len) return error.IndexOutOfRange;
@@ -137,7 +137,7 @@ pub fn setIntAttrElement(self: *Model, attr: Attr, element: usize, value: i64) M
 
 // ── Double element attributes ───────────────────────────────────────────
 
-pub fn getDblAttrElement(self: Model, attr: Attr, element: usize) ModelError!f64 {
+pub fn getDblAttrElement(self: *const Model, attr: Attr, element: usize) ModelError!f64 {
     switch (attr) {
         .lb => {
             if (element >= self.var_lb.len) return error.IndexOutOfRange;
@@ -235,7 +235,7 @@ pub fn setDblAttrElement(self: *Model, attr: Attr, element: usize, value: f64) M
 
 // ── Char element attributes ─────────────────────────────────────────────
 
-pub fn getCharAttrElement(self: Model, attr: Attr, element: usize) ModelError!u8 {
+pub fn getCharAttrElement(self: *const Model, attr: Attr, element: usize) ModelError!u8 {
     switch (attr) {
         .v_type => {
             if (element >= self.var_type.len) return error.IndexOutOfRange;
@@ -269,7 +269,7 @@ pub fn setCharAttrElement(self: *Model, attr: Attr, element: usize, value: u8) M
 
 // ── String element attributes ───────────────────────────────────────────
 
-pub fn getStrAttrElement(self: Model, attr: Attr, element: usize) ModelError![]const u8 {
+pub fn getStrAttrElement(self: *const Model, attr: Attr, element: usize) ModelError![]const u8 {
     switch (attr) {
         .var_name => {
             if (element >= self.var_names.len) return error.IndexOutOfRange;
@@ -333,7 +333,7 @@ pub fn setCharAttrArray(self: *Model, attr: Attr, start: usize, values: []const 
 }
 
 /// Retrieve a range of string attribute values
-pub fn getStrAttrArray(self: Model, attr: Attr, start: usize, len: usize, values: [][]const u8) ModelError!void {
+pub fn getStrAttrArray(self: *const Model, attr: Attr, start: usize, len: usize, values: [][]const u8) ModelError!void {
     if (values.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         values[i] = try self.getStrAttrElement(attr, start + i);
@@ -341,7 +341,7 @@ pub fn getStrAttrArray(self: Model, attr: Attr, start: usize, len: usize, values
 }
 
 /// Retrieve a range of double attribute values
-pub fn getDblAttrArray(self: Model, attr: Attr, start: usize, len: usize, values: []f64) ModelError!void {
+pub fn getDblAttrArray(self: *const Model, attr: Attr, start: usize, len: usize, values: []f64) ModelError!void {
     if (values.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         values[i] = try self.getDblAttrElement(attr, start + i);
@@ -349,7 +349,7 @@ pub fn getDblAttrArray(self: Model, attr: Attr, start: usize, len: usize, values
 }
 
 /// Retrieve a range of integer attribute values
-pub fn getIntAttrArray(self: Model, attr: Attr, start: usize, len: usize, values: []i64) ModelError!void {
+pub fn getIntAttrArray(self: *const Model, attr: Attr, start: usize, len: usize, values: []i64) ModelError!void {
     if (values.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         values[i] = try self.getIntAttrElement(attr, start + i);
@@ -357,7 +357,7 @@ pub fn getIntAttrArray(self: Model, attr: Attr, start: usize, len: usize, values
 }
 
 /// Retrieve a range of char attribute values
-pub fn getCharAttrArray(self: Model, attr: Attr, start: usize, len: usize, values: []u8) ModelError!void {
+pub fn getCharAttrArray(self: *const Model, attr: Attr, start: usize, len: usize, values: []u8) ModelError!void {
     if (values.len < len) return error.InvalidArgument;
     for (0..len) |i| {
         values[i] = try self.getCharAttrElement(attr, start + i);
@@ -396,28 +396,28 @@ pub fn setCharAttrList(self: *Model, attr: Attr, indices: []const usize, values:
     }
 }
 
-pub fn getDblAttrList(self: Model, attr: Attr, indices: []const usize, values: []f64) ModelError!void {
+pub fn getDblAttrList(self: *const Model, attr: Attr, indices: []const usize, values: []f64) ModelError!void {
     if (indices.len != values.len) return error.InvalidArgument;
     for (indices, values) |idx, *v| {
         v.* = try self.getDblAttrElement(attr, idx);
     }
 }
 
-pub fn getIntAttrList(self: Model, attr: Attr, indices: []const usize, values: []i64) ModelError!void {
+pub fn getIntAttrList(self: *const Model, attr: Attr, indices: []const usize, values: []i64) ModelError!void {
     if (indices.len != values.len) return error.InvalidArgument;
     for (indices, values) |idx, *v| {
         v.* = try self.getIntAttrElement(attr, idx);
     }
 }
 
-pub fn getStrAttrList(self: Model, attr: Attr, indices: []const usize, values: [][]const u8) ModelError!void {
+pub fn getStrAttrList(self: *const Model, attr: Attr, indices: []const usize, values: [][]const u8) ModelError!void {
     if (indices.len != values.len) return error.InvalidArgument;
     for (indices, values) |idx, *v| {
         v.* = try self.getStrAttrElement(attr, idx);
     }
 }
 
-pub fn getCharAttrList(self: Model, attr: Attr, indices: []const usize, values: []u8) ModelError!void {
+pub fn getCharAttrList(self: *const Model, attr: Attr, indices: []const usize, values: []u8) ModelError!void {
     if (indices.len != values.len) return error.InvalidArgument;
     for (indices, values) |idx, *v| {
         v.* = try self.getCharAttrElement(attr, idx);
@@ -427,7 +427,7 @@ pub fn getCharAttrList(self: Model, attr: Attr, indices: []const usize, values: 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Count how many variables have the given type.
-fn countVarType(self: Model, vt: VarType) usize {
+fn countVarType(self: *const Model, vt: VarType) usize {
     var count: usize = 0;
     for (self.var_type) |t| {
         if (t == vt) count += 1;

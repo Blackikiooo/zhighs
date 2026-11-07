@@ -1,4 +1,8 @@
 //! Mutable construction and canonicalization of sparse vectors.
+//!
+//! Role: turn unordered `(id, value)` pairs into a canonical vector.
+//! Shape: unordered pairs -> 1×n or m×1 payload (never a matrix).
+//! Pairs with `sparse_vector.zig` the way `builder.zig` pairs with `csc.zig`.
 
 const std = @import("std");
 const Foundation = @import("foundation");

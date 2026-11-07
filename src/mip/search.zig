@@ -40,9 +40,9 @@ pub const SolveComponents = types.SolveComponents;
 pub const SolveControl = types.SolveControl;
 pub const SolveResult = types.SolveResult;
 
-pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveControl) std.mem.Allocator.Error!SolveResult {
+pub fn solve(allocator: std.mem.Allocator, problem: *const ProblemView, control: SolveControl) std.mem.Allocator.Error!SolveResult {
     problem.validate() catch return .{ .allocator = allocator, .status = .invalid_model };
-    if (!types.validControl(control)) return .{ .allocator = allocator, .status = .invalid_model };
+    if (!types.validControl(&control)) return .{ .allocator = allocator, .status = .invalid_model };
 
     var registry = framework.PluginRegistry.init(allocator);
     defer registry.deinit();
@@ -106,7 +106,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
         null;
     defer if (strong_branching) |*engine| engine.deinit();
     var cut_generation: ?CutGeneration = if (control.cut_separation)
-        try CutGeneration.init(allocator, problem.relaxation)
+        try CutGeneration.init(allocator, &problem.relaxation)
     else
         null;
     defer if (cut_generation) |*generation| generation.deinit();
@@ -227,7 +227,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             node_control.initial_basis = if (nodes == 1 and node_lp_solves == 0) control.lp.initial_basis else null;
             node_control.time_limit_ns = remainingTime(control.lp.time_limit_ns, clock_io, start_ns);
             const structure_revision = if (cut_generation) |*generation| generation.structureRevision() else 0;
-            lp_status = lp_relaxation.solve(relaxation, node_control, nodes, .{
+            lp_status = lp_relaxation.solve(&relaxation, node_control, nodes, .{
                 .structure = structure_revision,
                 .matrix_values = structure_revision,
                 .bounds = nodes,
@@ -237,7 +237,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             iterations = std.math.add(usize, iterations, lp_relaxation.lastIterations()) catch std.math.maxInt(usize);
             work = std.math.add(u64, work, lp_relaxation.lastWork()) catch std.math.maxInt(u64);
             if (lp_status != .optimal) break;
-            const current_view = lp_relaxation.resultView(relaxation, lp_status) orelse
+            const current_view = lp_relaxation.resultView(&relaxation, lp_status) orelse
                 return finish(allocator, .numerical_failure, incumbent, incumbent_objective, 0.0, nodes, iterations, work, solutions, &lp_relaxation, pseudocost.observations);
             if (nodes == 1 and separation_rounds < control.max_cut_rounds) {
                 if (cut_generation) |*generation| {
@@ -283,7 +283,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             .numerical_failure, .not_implemented => return finish(allocator, .numerical_failure, incumbent, incumbent_objective, 0.0, nodes, iterations, work, solutions, &lp_relaxation, pseudocost.observations),
             .optimal => {},
         }
-        const view = solved_view orelse lp_relaxation.resultView(relaxation, lp_status) orelse
+        const view = solved_view orelse lp_relaxation.resultView(&relaxation, lp_status) orelse
             return finish(allocator, .numerical_failure, incumbent, incumbent_objective, 0.0, nodes, iterations, work, solutions, &lp_relaxation, pseudocost.observations);
         if (nodes == 1 and view.dual_valid) root_reduced_costs.capture(current_domain.lower, current_domain.upper, view.reduced_cost, view.objective_value);
         if (node.branch_origin) |origin| pseudocost.observe(problem.relaxation.objective_sense, origin, view.objective_value);
@@ -336,7 +336,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
             probe_control.work_limit = if (control.lp.work_limit) |limit| limit - work else null;
             probe_control.time_limit_ns = remainingTime(control.lp.time_limit_ns, clock_io, start_ns);
             const refined = engine.refine(
-                relaxation,
+                &relaxation,
                 problem.integrality,
                 view.primal,
                 view.objective_value,
@@ -365,7 +365,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
 
         const pseudocost_scores = pseudocost.prepareScores(view.primal);
         const branch_context = plugin.BranchingContext{
-            .problem = problem,
+            .problem = problem.*,
             .node_lower = current_domain.lower,
             .node_upper = current_domain.upper,
             .lp_primal = view.primal,
@@ -383,7 +383,7 @@ pub fn solve(allocator: std.mem.Allocator, problem: ProblemView, control: SolveC
         if (violation != null) {
             const heuristic_context = plugin.HeuristicContext{
                 .allocator = allocator,
-                .problem = problem,
+                .problem = problem.*,
                 .node_lower = current_domain.lower,
                 .node_upper = current_domain.upper,
                 .lp_primal = view.primal,
@@ -574,7 +574,8 @@ fn fractionalBinaryRelaxation() solver.LpProblemView {
 
 test "branch-and-bound solves a fractional binary relaxation" {
     const relaxation = fractionalBinaryRelaxation();
-    var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{ .propagation = false });
+    const problem_577: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var result = try solve(std.testing.allocator, &problem_577, .{ .propagation = false });
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
     try std.testing.expectApproxEqAbs(@as(f64, 2), result.objective_value, 1e-9);
@@ -585,22 +586,26 @@ test "branch-and-bound solves a fractional binary relaxation" {
     try std.testing.expectEqual(result.nodes - 1, result.lp_reoptimizations);
     try std.testing.expect(result.pseudocost_observations > 0);
 
-    var limited = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{ .propagation = false, .lp = .{ .max_iterations = 1 } });
+    const problem_589: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var limited = try solve(std.testing.allocator, &problem_589, .{ .propagation = false, .lp = .{ .max_iterations = 1 } });
     defer limited.deinit();
     try std.testing.expectEqual(SolveStatus.iteration_limit, limited.status);
     try std.testing.expect(limited.lp_iterations <= 1);
 
-    var work_limited = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{ .lp = .{ .work_limit = 0 } });
+    const problem_595: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var work_limited = try solve(std.testing.allocator, &problem_595, .{ .lp = .{ .work_limit = 0 } });
     defer work_limited.deinit();
     try std.testing.expectEqual(SolveStatus.work_limit, work_limited.status);
     try std.testing.expectEqual(@as(u64, 0), work_limited.lp_work);
     try std.testing.expectEqual(@as(usize, 0), work_limited.nodes);
 
-    var time_limited = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{ .lp = .{ .time_limit_ns = 0 } });
+    const problem_602: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var time_limited = try solve(std.testing.allocator, &problem_602, .{ .lp = .{ .time_limit_ns = 0 } });
     defer time_limited.deinit();
     try std.testing.expectEqual(SolveStatus.time_limit, time_limited.status);
 
-    var heuristic = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{ .solution_limit = 1 });
+    const problem_607: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var heuristic = try solve(std.testing.allocator, &problem_607, .{ .solution_limit = 1 });
     defer heuristic.deinit();
     try std.testing.expectEqual(SolveStatus.solution_limit, heuristic.status);
     try std.testing.expectEqual(@as(usize, 1), heuristic.nodes);
@@ -610,7 +615,8 @@ test "branch-and-bound solves a fractional binary relaxation" {
 
 test "row propagation can close the root domain before branching" {
     const relaxation = fractionalBinaryRelaxation();
-    var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .binary, .binary } }, .{});
+    const problem_618: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .binary, .binary } };
+    var result = try solve(std.testing.allocator, &problem_618, .{});
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
     try std.testing.expectEqual(@as(usize, 1), result.nodes);
@@ -633,13 +639,13 @@ test "clique propagation rejects a conflicting child before its LP solve" {
         .objective_offset = 0.0,
     };
     const problem = ProblemView{ .relaxation = relaxation, .integrality = &.{ .binary, .binary } };
-    var with_cliques = try solve(std.testing.allocator, problem, .{
+    var with_cliques = try solve(std.testing.allocator, &problem, .{
         .propagation = false,
         .cut_separation = false,
         .reliability_branching = false,
     });
     defer with_cliques.deinit();
-    var without_cliques = try solve(std.testing.allocator, problem, .{
+    var without_cliques = try solve(std.testing.allocator, &problem, .{
         .propagation = false,
         .clique_propagation = false,
         .cut_separation = false,
@@ -669,9 +675,9 @@ test "an incumbent activates reduced-cost domain tightening" {
         .objective_offset = 0.0,
     };
     const problem = ProblemView{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
-    var with_fixing = try solve(std.testing.allocator, problem, .{ .initial_solution = &.{ 2.0, 1.0 } });
+    var with_fixing = try solve(std.testing.allocator, &problem, .{ .initial_solution = &.{ 2.0, 1.0 } });
     defer with_fixing.deinit();
-    var without_fixing = try solve(std.testing.allocator, problem, .{
+    var without_fixing = try solve(std.testing.allocator, &problem, .{
         .initial_solution = &.{ 2.0, 1.0 },
         .reduced_cost_fixing = false,
     });
@@ -698,7 +704,7 @@ test "root cover separation closes a binary knapsack without branching" {
         .objective_offset = 0.0,
     };
     const problem = ProblemView{ .relaxation = relaxation, .integrality = &.{ .binary, .binary } };
-    var with_cuts = try solve(std.testing.allocator, problem, .{ .propagation = false, .reliability_branching = false });
+    var with_cuts = try solve(std.testing.allocator, &problem, .{ .propagation = false, .reliability_branching = false });
     defer with_cuts.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, with_cuts.status);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), with_cuts.objective_value, 1e-9);
@@ -707,7 +713,7 @@ test "root cover separation closes a binary knapsack without branching" {
     try std.testing.expectEqual(@as(usize, 2), with_cuts.cut_rounds);
     try std.testing.expectEqual(@as(usize, 2), with_cuts.lp_cold_solves);
 
-    var without_cuts = try solve(std.testing.allocator, problem, .{ .propagation = false, .reliability_branching = false, .cut_separation = false });
+    var without_cuts = try solve(std.testing.allocator, &problem, .{ .propagation = false, .reliability_branching = false, .cut_separation = false });
     defer without_cuts.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, without_cuts.status);
     try std.testing.expectApproxEqAbs(with_cuts.objective_value, without_cuts.objective_value, 1e-9);
@@ -728,7 +734,8 @@ test "reliability branching probes multiple fractional candidates" {
         .objective_sense = .minimize,
         .objective_offset = 0.0,
     };
-    var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } }, .{
+    const problem_737: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .integer } };
+    var result = try solve(std.testing.allocator, &problem_737, .{
         .propagation = false,
         .strong_branching_max_candidates = 1,
     });
@@ -753,7 +760,8 @@ test "branch-and-bound reoptimizes stable node LP mappings" {
         .objective_sense = .maximize,
         .objective_offset = 0,
     };
-    var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{ .integer, .continuous } }, .{ .propagation = false });
+    const problem_763: ProblemView = .{ .relaxation = relaxation, .integrality = &.{ .integer, .continuous } };
+    var result = try solve(std.testing.allocator, &problem_763, .{ .propagation = false });
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
     try std.testing.expectApproxEqAbs(@as(f64, 4), result.objective_value, 1e-9);
@@ -774,7 +782,8 @@ test "branch-and-bound proves integer infeasibility" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
-    var result = try solve(std.testing.allocator, .{ .relaxation = relaxation, .integrality = &.{.integer} }, .{});
+    const problem_785: ProblemView = .{ .relaxation = relaxation, .integrality = &.{.integer} };
+    var result = try solve(std.testing.allocator, &problem_785, .{});
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.infeasible, result.status);
 }
@@ -798,10 +807,11 @@ test "plugin components can override node selection and branching" {
     };
     var branching = FirstFractional{};
     var selector = Fifo{};
-    var result = try solve(std.testing.allocator, .{
+    const problem_810: ProblemView = .{
         .relaxation = fractionalBinaryRelaxation(),
         .integrality = &.{ .integer, .integer },
-    }, .{ .components = .{
+    };
+    var result = try solve(std.testing.allocator, &problem_810, .{ .components = .{
         .branching_rule = plugin.bindBranching(FirstFractional, &branching),
         .node_selector = plugin.bindNodeSelector(Fifo, &selector),
     } });
@@ -826,14 +836,14 @@ test "pseudocost branching stays competitive with most-fractional branching" {
     };
     const problem = ProblemView{ .relaxation = relaxation, .integrality = &.{ .binary, .binary, .binary, .binary } };
     var most_fractional = builtin_plugins.branching.MostFractional{};
-    var reference = try solve(std.testing.allocator, problem, .{
+    var reference = try solve(std.testing.allocator, &problem, .{
         .propagation = false,
         .reliability_branching = false,
         .cut_separation = false,
         .components = .{ .branching_rule = plugin.bindBranching(builtin_plugins.branching.MostFractional, &most_fractional) },
     });
     defer reference.deinit();
-    var pseudocost = try solve(std.testing.allocator, problem, .{
+    var pseudocost = try solve(std.testing.allocator, &problem, .{
         .propagation = false,
         .reliability_branching = false,
         .cut_separation = false,
@@ -849,10 +859,8 @@ test "pseudocost branching stays competitive with most-fractional branching" {
 
 test "best-bound node selection preserves optimal objective" {
     var selector = builtin_plugins.node_selectors.BestBound{};
-    var result = try solve(std.testing.allocator, .{
-        .relaxation = fractionalBinaryRelaxation(),
-        .integrality = &.{ .integer, .integer },
-    }, .{ .components = .{
+    const problem_862: ProblemView = .{        .relaxation = fractionalBinaryRelaxation(),        .integrality = &.{ .integer, .integer },    };
+    var result = try solve(std.testing.allocator, &problem_862, .{ .components = .{
         .node_selector = plugin.bindNodeSelector(builtin_plugins.node_selectors.BestBound, &selector),
     } });
     defer result.deinit();
@@ -862,10 +870,8 @@ test "best-bound node selection preserves optimal objective" {
 }
 
 test "disabling the rounding heuristic keeps the search correct" {
-    var result = try solve(std.testing.allocator, .{
-        .relaxation = fractionalBinaryRelaxation(),
-        .integrality = &.{ .integer, .integer },
-    }, .{ .rounding_heuristic = false });
+    const problem_876: ProblemView = .{        .relaxation = fractionalBinaryRelaxation(),        .integrality = &.{ .integer, .integer },    };
+    var result = try solve(std.testing.allocator, &problem_876, .{ .rounding_heuristic = false });
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
     try std.testing.expectApproxEqAbs(@as(f64, 2), result.objective_value, 1e-9);
@@ -889,10 +895,8 @@ test "the default diving heuristic finds an incumbent and stays optimal" {
         .objective_sense = .minimize,
         .objective_offset = 0,
     };
-    var result = try solve(std.testing.allocator, .{
-        .relaxation = relaxation,
-        .integrality = &.{ .binary, .binary, .binary },
-    }, .{});
+    const problem_904: ProblemView = .{        .relaxation = relaxation,        .integrality = &.{ .binary, .binary, .binary },    };
+    var result = try solve(std.testing.allocator, &problem_904, .{});
     defer result.deinit();
     try std.testing.expectEqual(SolveStatus.optimal, result.status);
     try std.testing.expectApproxEqAbs(@as(f64, 3), result.objective_value, 1e-9);

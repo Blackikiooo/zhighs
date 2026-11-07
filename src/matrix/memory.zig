@@ -1,7 +1,46 @@
 //! Small memory kernels shared by sparse matrix hot paths.
+//!
+//! Role: SIMD clear, layout math, and alignment helpers.
+//! Shape: none; these functions never describe a matrix.
 
 const std = @import("std");
 const target = @import("target_policy.zig");
+
+/// Alignment applied to owning sparse-matrix blocks.
+///
+/// Allocation sites reach this through `memory` instead of importing the
+/// policy module directly.  On x86 it is the usual 64-byte line; Apple Silicon
+/// and POWER use 128-byte lines, where keeping unrelated owning blocks on
+/// distinct lines avoids false sharing between matrices that stay live across
+/// one solver iteration.
+pub const owning_block_alignment: std.mem.Alignment = std.mem.Alignment.fromByteUnits(target.cache_line_bytes);
+
+/// Byte form of `owning_block_alignment`, for layout tables that take plain
+/// offsets or alignment integers.
+pub const owning_block_bytes: comptime_int = target.cache_line_bytes;
+
+/// Page-internal offsets that put each field on its own cache line.
+///
+/// Page coloring already separates fields by 4 KiB; within a page, fields that
+/// remain 64 bytes apart still share one 128-byte line on Apple Silicon and
+/// POWER, which defeats the purpose.  `computePageColoredLayout` callers should
+/// use this instead of a hard-coded `.{ 0, 64, 128, … }` table.
+pub fn lineOffsets(comptime N: usize) [N]usize {
+    return comptime blk: {
+        var result: [N]usize = undefined;
+        for (0..N) |index| result[index] = index * owning_block_bytes;
+        break :blk result;
+    };
+}
+
+/// Alignment tuple for `computeLayout` that starts every field on a cache line.
+pub fn lineAligns(comptime N: usize) [N]usize {
+    return comptime blk: {
+        var result: [N]usize = undefined;
+        for (0..N) |index| result[index] = owning_block_bytes;
+        break :blk result;
+    };
+}
 
 /// Native SIMD lane count for a scalar type on the selected build target.
 /// Callers still need an unaligned scalar tail because borrowed matrix slices
@@ -83,6 +122,18 @@ pub inline fn clearF64Bytes(values: []f64) void {
     @memset(std.mem.sliceAsBytes(values), 0);
 }
 
+/// Volatile SIMD vector stores for usize arrays.
+pub inline fn clearUsize(values: []usize) void {
+    clearGeneric(usize, values, true);
+}
+
+/// Non-volatile SIMD vector stores for usize arrays.
+/// Use this when the compiler barrier from volatile is not needed,
+/// e.g. clearing row_starts before a counting pass.
+pub inline fn clearUsizeFast(values: []usize) void {
+    clearGeneric(usize, values, false);
+}
+
 /// Checked consecutive-array layout calculator.
 ///
 /// Given `N` arrays with sizes `sizes[i]` and alignments `aligns[i]`, returns
@@ -129,18 +180,6 @@ pub fn computePageColoredLayout(comptime N: usize, sizes: [N]usize, page_offsets
         cursor = std.math.add(usize, result[i], size) catch return error.Overflow;
     }
     return .{ .offsets = result, .total = cursor };
-}
-
-/// Volatile SIMD vector stores for usize arrays.
-pub inline fn clearUsize(values: []usize) void {
-    clearGeneric(usize, values, true);
-}
-
-/// Non-volatile SIMD vector stores for usize arrays.
-/// Use this when the compiler barrier from volatile is not needed,
-/// e.g. clearing row_starts before a counting pass.
-pub inline fn clearUsizeFast(values: []usize) void {
-    clearGeneric(usize, values, false);
 }
 
 test "clear kernels handle short unaligned slices" {
@@ -234,4 +273,27 @@ test "computePageColoredLayout zero-size fields" {
 test "computePageColoredLayout overflow caught" {
     const big: usize = std.math.maxInt(usize) - 10;
     try std.testing.expectError(error.Overflow, computePageColoredLayout(2, .{ big, 1 }, .{ 0, 64 }));
+}
+
+test "line offsets and alignments follow the cache line size" {
+    const offsets = lineOffsets(5);
+    for (offsets, 0..) |offset, index| {
+        try std.testing.expectEqual(@as(usize, index * owning_block_bytes), offset);
+        try std.testing.expectEqual(@as(usize, 0), offset % target.cache_line_bytes);
+    }
+    // Page coloring still requires every in-page offset below one page.
+    try std.testing.expect(offsets[offsets.len - 1] < 4096);
+
+    const aligns = lineAligns(4);
+    for (aligns) |alignment| {
+        try std.testing.expectEqual(@as(usize, owning_block_bytes), alignment);
+        try std.testing.expect(std.math.isPowerOfTwo(alignment));
+    }
+}
+
+test "owning block alignment matches the cache line policy" {
+    try std.testing.expectEqual(
+        @as(usize, target.cache_line_bytes),
+        owning_block_alignment.toByteUnits(),
+    );
 }

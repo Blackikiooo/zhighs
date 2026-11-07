@@ -77,7 +77,7 @@ pub const Diving = struct {
         row_indices: []const foundation.RowId = &.{},
         values: []const f64 = &.{},
 
-        fn matches(self: MatrixIdentity, relaxation: solver.LpProblemView) bool {
+        fn matches(self: *const MatrixIdentity, relaxation: *const solver.LpProblemView) bool {
             return self.col_starts.ptr == relaxation.matrix.col_starts.ptr and self.col_starts.len == relaxation.matrix.col_starts.len and
                 self.row_indices.ptr == relaxation.matrix.row_indices.ptr and self.row_indices.len == relaxation.matrix.row_indices.len and
                 self.values.ptr == relaxation.matrix.values.ptr and self.values.len == relaxation.matrix.values.len;
@@ -104,7 +104,7 @@ pub const Diving = struct {
         const node_lower = if (ctx.node_lower.len == num_cols) ctx.node_lower else relaxation.col_lower;
         const node_upper = if (ctx.node_upper.len == num_cols) ctx.node_upper else relaxation.col_upper;
 
-        if (self.session == null or !self.matrix_identity.matches(relaxation))
+        if (self.session == null or !self.matrix_identity.matches(&relaxation))
             try self.resetSession(ctx.allocator);
         self.matrix_identity = .{
             .col_starts = relaxation.matrix.col_starts,
@@ -144,10 +144,11 @@ pub const Diving = struct {
             var sub_problem = relaxation;
             sub_problem.col_lower = lower;
             sub_problem.col_upper = upper;
-            const status = self.session.?.solveRelaxation(sub_problem, .{
+            const solve_control: solver.LpSolveControl = .{
                 .max_iterations = self.max_lp_iterations,
                 .initial_basis = if (rounds == 1 and !self.has_retained_state) ctx.lp_basis else null,
-            }, .{
+            };
+            const status = self.session.?.solveRelaxation(&sub_problem, solve_control, .{
                 .structure = 0,
                 .matrix_values = 0,
                 .bounds = rounds,
@@ -161,7 +162,7 @@ pub const Diving = struct {
             }
             if (status != .optimal) return null;
             self.has_retained_state = true;
-            const view = self.session.?.resultView(sub_problem, status) orelse return null;
+            const view = self.session.?.resultView(&sub_problem, status) orelse return null;
             if (!view.primal_valid or view.primal.len != num_cols) return null;
             @memcpy(current, view.primal);
         }
@@ -381,10 +382,10 @@ test "diving re-solves the LP to reach an integer incumbent" {
 
 test "diving borrows the parent basis without changing the node solution" {
     const relaxation = divingFeasibleRelaxation();
-    var parent = solver.solveLp(std.testing.allocator, relaxation, .{});
+    var parent = solver.solveLp(std.testing.allocator, &relaxation, .{});
     defer parent.deinit();
     try std.testing.expectEqual(solver.LpSolveStatus.optimal, parent.status);
-    const view = parent.resultView(relaxation).?;
+    const view = parent.resultView(&relaxation).?;
     const original_primal = try std.testing.allocator.dupe(f64, view.primal);
     defer std.testing.allocator.free(original_primal);
     var ctx = divingContext(&.{ .binary, .binary, .binary }, relaxation, view.primal, relaxation.col_lower, relaxation.col_upper);
@@ -398,7 +399,7 @@ test "diving borrows the parent basis without changing the node solution" {
     const candidate = (try heuristic.trySolution(ctx)).?;
     defer std.testing.allocator.free(candidate);
     try std.testing.expectEqualSlices(f64, &.{ 1.0, 1.0, 1.0 }, candidate);
-    try std.testing.expectEqualSlices(f64, original_primal, parent.resultView(relaxation).?.primal);
+    try std.testing.expectEqualSlices(f64, original_primal, parent.resultView(&relaxation).?.primal);
 }
 
 test "diving returns null when the dive hits an infeasible sub-LP" {

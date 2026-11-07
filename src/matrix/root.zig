@@ -1,5 +1,8 @@
 //! Sparse matrix data structures: CSC storage, CSR views, and transformations.
 //!
+//! See `README.md` in this directory for the module map, shape changes
+//! (m×n -> n×m, m×n -> m×k, ...), and ownership rules.
+//!
 //! Construction uses mutable SoA builders; solver kernels consume canonical,
 //! owning sparse vectors and CSC matrices.
 //!

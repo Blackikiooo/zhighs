@@ -103,7 +103,7 @@ pub const Hessian = struct {
     }
 
     /// Number of stored non‑zero entries.
-    pub fn nnz(self: Self) usize {
+    pub fn nnz(self: *const Self) usize {
         return self.values.len;
     }
 

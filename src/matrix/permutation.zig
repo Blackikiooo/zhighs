@@ -1,8 +1,16 @@
 //! Row and column permutation of canonical CSC matrices.
 //!
-//! A permutation slice maps old index to new strongly typed ID. Checked entry
-//! points verify a full bijection. Column movement is direct; row permutation
-//! requires sorting entries inside each destination column to restore canonical
+//! Role: relabel indices without changing the shape.
+//! Shape: m×n -> m×n (row and column order change, dimensions do not).
+//! Owns: `permute*` allocates; `permuteInto*` reuses `CscTransformBuffers`.
+//! Distinct from `transpose.zig` (m×n -> n×m) and `slice.zig` (drops
+//! rows/columns). Columns move directly; rows are remapped and each destination
+//! column is re-sorted to restore canonical increasing row order.
+//!
+//! Every `*_old_to_new` argument is indexed by the source index and yields the
+//! destination ID, so `row_old_to_new[old_row] == new_row`. Checked entry points
+//! verify a full bijection. Column movement is direct; row permutation requires
+//! sorting entries inside each destination column to restore canonical
 //! increasing row order.
 
 const std = @import("std");
@@ -13,6 +21,10 @@ const transform_buffers = @import("transform_buffers.zig");
 const CscTransformBuffers = transform_buffers.CscTransformBuffers;
 
 /// Validate row/column bijections and return an owning permuted matrix.
+///
+/// `matrix` is borrowed and never modified; `allocator` owns the result.
+/// `row_old_to_new[old] == new` must be a `matrix.num_rows`-sized bijection and
+/// `col_old_to_new[old] == new` a `matrix.num_cols`-sized bijection.
 pub fn permute(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -26,6 +38,10 @@ pub fn permute(
 }
 
 /// Trusted owning permutation for canonical input and valid bijections.
+///
+/// Skips `validate` and the bijection checks. `matrix` must already be canonical
+/// and both maps must satisfy `map[old] == new` as documented by `permute`;
+/// `allocator` owns the result.
 pub fn permuteAssumeValid(
     allocator: std.mem.Allocator,
     matrix: csc.CscMatrix,
@@ -62,6 +78,13 @@ pub fn permuteAssumeValid(
 }
 
 /// Validate permutations and write the permuted CSC into caller buffers.
+///
+/// `matrix` is borrowed and read-only. `buffers` supplies the output streams
+/// plus validation scratch and must cover `matrix.num_cols + 1` offsets,
+/// `matrix.nnz()` entries, and `@max(matrix.num_rows, matrix.num_cols)` scratch
+/// slots; the returned view borrows them. `row_old_to_new[old] == new` and
+/// `col_old_to_new[old] == new` follow the `permute` contract, sized by rows and
+/// columns respectively.
 pub fn permuteInto(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -76,6 +99,11 @@ pub fn permuteInto(
 }
 
 /// Trusted allocation-free permutation using scratch for sortable positions.
+///
+/// Callers guarantee a canonical `matrix` and `map[old] == new` bijections, so
+/// `matrix.validate` and the bijection sweeps are skipped. A local capacity
+/// check with no scratch requirement still runs, and the returned view borrows
+/// `buffers`.
 pub fn permuteIntoAssumeValid(
     buffers: *CscTransformBuffers,
     matrix: csc.CscMatrix,
@@ -110,6 +138,8 @@ pub fn permuteIntoAssumeValid(
 }
 
 /// Validate a bijection using temporary allocator-owned marker storage.
+///
+/// `old_to_new[old] == new` must hit every index in `0..dimension` exactly once.
 fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_new: []const Id, dimension: usize) (std.mem.Allocator.Error || csc.MatrixError)!void {
     if (old_to_new.len != dimension) return error.InvalidPermutation;
     const seen = try allocator.alloc(bool, dimension);
@@ -123,6 +153,9 @@ fn validatePermutation(comptime Id: type, allocator: std.mem.Allocator, old_to_n
 }
 
 /// Validate a bijection using caller-provided generation/marker scratch.
+///
+/// Same `old_to_new[old] == new` contract as `validatePermutation`, but the
+/// `dimension`-sized prefix of `scratch` replaces allocator storage.
 fn validatePermutationWithScratch(comptime Id: type, old_to_new: []const Id, dimension: usize, scratch: []usize) csc.MatrixError!void {
     if (old_to_new.len != dimension) return error.InvalidPermutation;
     if (scratch.len < dimension) return error.BufferTooSmall;

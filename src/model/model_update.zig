@@ -354,8 +354,8 @@ pub fn applyPending(self: *Model) ModelError!void {
             for (0..self.genconstr_count) |i| {
                 const t = self.genconstr_types[i];
                 const nvars = self.genconstr_nvars[i];
-                const off = genconstr.genConstrOffset(self.*, i);
-                const len = genconstr.genConstrDataLen(self.*, i);
+                const off = genconstr.genConstrOffset(self, i);
+                const len = genconstr.genConstrDataLen(self, i);
                 const data = self.genconstr_indices[off .. off + len];
                 var drop = deleted_vars[self.genconstr_resvar[i]];
                 var kept_nvars = nvars;

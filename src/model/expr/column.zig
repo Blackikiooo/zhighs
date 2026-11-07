@@ -52,14 +52,14 @@ pub const Column = struct {
     }
 
     /// Return the number of non-zeros in this column.
-    pub fn numNz(self: Self) usize {
+    pub fn numNz(self: *const Self) usize {
         return self.indices.items.len;
     }
 
     /// Resolve stable constraint handles to the current dense row indices.
     /// The returned array is owned by the caller and is suitable for the
     /// matrix-building API.
-    pub fn resolveIndices(self: Self, allocator: std.mem.Allocator, model: Model) ModelError![]usize {
+    pub fn resolveIndices(self: *const Self, allocator: std.mem.Allocator, model: *const Model) ModelError![]usize {
         if (self.stable_ids.items.len != self.indices.items.len) return error.InvalidArgument;
         const resolved = allocator.alloc(usize, self.indices.items.len) catch return error.OutOfMemory;
         errdefer allocator.free(resolved);

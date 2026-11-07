@@ -196,7 +196,7 @@ pub const Factorization = struct {
     /// their previous capacities are sufficient.
     pub fn factorizeSparseBasis(
         self: *Factorization,
-        problem_matrix: matrix.CscView,
+        problem_matrix: *const matrix.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
         column_scale: []const f64,
@@ -209,7 +209,7 @@ pub const Factorization = struct {
             error.CapacityOverflow, error.OutOfMemory => error.OutOfMemory,
             error.NonFiniteValue => error.NumericalFailure,
         };
-        self.sparse_lu.factorizeAssumeValid(basis) catch |err| return switch (err) {
+        self.sparse_lu.factorizeAssumeValid(&basis) catch |err| return switch (err) {
             error.DimensionMismatch, error.DimensionTooLarge => error.DimensionMismatch,
             error.Singular => error.Singular,
             error.NumericalFailure, error.InvalidBasis => error.NumericalFailure,
@@ -225,7 +225,7 @@ pub const Factorization = struct {
     /// larger bases assemble CSC directly for SparseLU.
     pub fn factorizeBasis(
         self: *Factorization,
-        problem_matrix: matrix.CscView,
+        problem_matrix: *const matrix.CscView,
         basic_index: []const u32,
         row_scale: []const f64,
         column_scale: []const f64,
@@ -277,7 +277,7 @@ pub const Factorization = struct {
             @memset(self.identity_scale, 1.0);
             @memset(self.identity_sign, 1.0);
             const empty_matrix = matrix.CscView.initAssumeValid(n, 0, &[_]usize{0}, &.{}, &.{});
-            return self.factorizeSparseBasis(empty_matrix, self.identity_basic, self.identity_scale, &.{}, self.identity_sign);
+            return self.factorizeSparseBasis(&empty_matrix, self.identity_basic, self.identity_scale, &.{}, self.identity_sign);
         }
         const started = self.statisticsTimestamp();
         defer self.recordElapsed(&self.stats.invert_ns, started);
@@ -647,12 +647,12 @@ pub const Factorization = struct {
     /// `maximum_update_growth` remains an optional statistics diagnostic, but
     /// HiGHS does not turn that ratio into a four-tier reinversion policy.
     /// Early reinversion belongs to solve/pivot checks and the synthetic clock.
-    pub fn recommendedUpdateLimit(self: Factorization, hard_limit: usize) usize {
+    pub fn recommendedUpdateLimit(self: *const Factorization, hard_limit: usize) usize {
         return if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
     }
 
     /// Return the reason a reinversion is currently required, if any.
-    pub fn reinversionReason(self: Factorization, hard_limit: usize) ?ReinversionReason {
+    pub fn reinversionReason(self: *const Factorization, hard_limit: usize) ?ReinversionReason {
         const recommended = self.recommendedUpdateLimit(hard_limit);
         if (self.update_count < recommended) return null;
         const storage_limit = if (self.backend_kind == .dense_lu) @min(hard_limit, self.eta_capacity) else hard_limit;
@@ -661,7 +661,7 @@ pub const Factorization = struct {
     }
 
     /// Convenience wrapper: true if a reinversion is required.
-    pub fn needsRefactor(self: Factorization, limit: usize) bool {
+    pub fn needsRefactor(self: *const Factorization, limit: usize) bool {
         return self.reinversionReason(limit) != null;
     }
 

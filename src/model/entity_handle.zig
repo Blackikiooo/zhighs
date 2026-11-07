@@ -57,15 +57,15 @@ pub fn HandleTableFor(comptime Id: type) type {
 
         const Self = @This();
 
-        pub fn len(self: Self) usize {
+        pub fn len(self: *const Self) usize {
             return self.generations.items.len;
         }
 
-        pub fn liveLen(self: Self) usize {
+        pub fn liveLen(self: *const Self) usize {
             return self.dense_slots.items.len;
         }
 
-        pub fn idAtDense(self: Self, dense_index: usize) HandleError!Id {
+        pub fn idAtDense(self: *const Self, dense_index: usize) HandleError!Id {
             if (dense_index >= self.dense_slots.items.len) return error.InvalidHandle;
             const slot = self.dense_slots.items[dense_index];
             return .{ .slot = slot, .generation = self.generations.items[slot] };
@@ -100,7 +100,7 @@ pub fn HandleTableFor(comptime Id: type) type {
             self.dense_indices.items[slot] = dense_index;
         }
 
-        pub fn resolve(self: Self, id: Id) HandleError!u32 {
+        pub fn resolve(self: *const Self, id: Id) HandleError!u32 {
             const slot = try self.resolveSlot(id);
             return self.dense_indices.items[slot] orelse error.InvalidHandle;
         }
@@ -173,7 +173,7 @@ pub fn HandleTableFor(comptime Id: type) type {
             self.* = undefined;
         }
 
-        fn resolveSlot(self: Self, id: Id) HandleError!usize {
+        fn resolveSlot(self: *const Self, id: Id) HandleError!usize {
             if (id.slot >= self.generations.items.len) return error.InvalidHandle;
             const slot: usize = id.slot;
             if (self.generations.items[slot] != id.generation) return error.InvalidHandle;
