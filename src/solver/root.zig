@@ -341,7 +341,7 @@ fn hasPresolveReductions(allocator: std.mem.Allocator, problem: *const LpProblem
         if (count == 1) return true;
         if (presolve.rules.empty_row.classify(count, lower, upper) == .remove) return true;
     }
-    if (hasExactDuplicateRows(allocator, problem, row_counts)) return true;
+    if (hasExactDuplicateOrParallelRows(allocator, problem, row_counts)) return true;
 
     const row_activity = allocator.alloc(presolve.rules.redundant_row.ActivityBounds, problem.num_rows) catch return false;
     defer allocator.free(row_activity);
@@ -354,11 +354,15 @@ fn hasPresolveReductions(allocator: std.mem.Allocator, problem: *const LpProblem
     }
     for (row_activity, problem.row_lower, problem.row_upper) |activity, lower, upper| {
         if (presolve.rules.redundant_row.classify(activity, lower, upper) == .remove) return true;
+        // Cheapest sufficient condition for the forcing/implied-fixing rule:
+        // the whole row activity interval touches one of the row bounds. Such
+        // a row either fixes columns immediately or starts a fixing chain.
+        if (activity.lower >= upper or activity.upper <= lower) return true;
     }
     return false;
 }
 
-fn hasExactDuplicateRows(allocator: std.mem.Allocator, problem: *const LpProblemView, row_counts: []const u32) bool {
+fn hasExactDuplicateOrParallelRows(allocator: std.mem.Allocator, problem: *const LpProblemView, row_counts: []const u32) bool {
     const row_starts = allocator.alloc(usize, problem.num_rows + 1) catch return false;
     defer allocator.free(row_starts);
     row_starts[0] = 0;
@@ -412,6 +416,39 @@ fn hasExactDuplicateRows(allocator: std.mem.Allocator, problem: *const LpProblem
         }
         next[row] = heads.get(signature) orelse std.math.maxInt(u32);
         heads.put(allocator, signature, @intCast(row)) catch return false;
+    }
+
+    var pattern_heads: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+    defer pattern_heads.deinit(allocator);
+    const pattern_next = allocator.alloc(u32, problem.num_rows) catch return false;
+    defer allocator.free(pattern_next);
+    @memset(pattern_next, std.math.maxInt(u32));
+    for (0..problem.num_rows) |row| {
+        const begin = row_starts[row];
+        const end = row_starts[row + 1];
+        const columns = row_columns[begin..end];
+        const signature = presolve.rules.duplicate_row.patternHash(columns);
+        var candidate = pattern_heads.get(signature) orelse std.math.maxInt(u32);
+        while (candidate != std.math.maxInt(u32)) : (candidate = pattern_next[candidate]) {
+            const candidate_begin = row_starts[candidate];
+            const candidate_end = row_starts[candidate + 1];
+            const candidate_columns = row_columns[candidate_begin..candidate_end];
+            const scale = presolve.rules.duplicate_row.parallelScale(
+                candidate_columns,
+                row_values[candidate_begin..candidate_end],
+                columns,
+                row_values[begin..end],
+            ) orelse continue;
+            if (presolve.rules.duplicate_row.boundsMatchScale(
+                scale,
+                problem.row_lower[candidate],
+                problem.row_upper[candidate],
+                problem.row_lower[row],
+                problem.row_upper[row],
+            )) return true;
+        }
+        pattern_next[row] = pattern_heads.get(signature) orelse std.math.maxInt(u32);
+        pattern_heads.put(allocator, signature, @intCast(row)) catch return false;
     }
     return false;
 }

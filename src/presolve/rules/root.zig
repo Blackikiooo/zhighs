@@ -10,6 +10,7 @@ pub const column_substitution = @import("column_substitution.zig");
 pub const singleton_row = @import("singleton_row.zig");
 pub const redundant_row = @import("redundant_row.zig");
 pub const duplicate_row = @import("duplicate_row.zig");
+pub const implied_fixing = @import("implied_fixing.zig");
 
 test {
     std.testing.refAllDecls(@This());

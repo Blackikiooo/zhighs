@@ -12,8 +12,11 @@ pub const PresolvedProblem = presolve_mod.PresolvedProblem;
 pub const PresolvePipeline = presolve_mod.PresolvePipeline;
 pub const PresolveResult = presolve_mod.PresolveResult;
 pub const ColumnNature = presolve_mod.ColumnNature;
+pub const PresolveOptions = presolve_mod.PresolveOptions;
 pub const presolve = presolve_mod.presolve;
 pub const presolveMip = presolve_mod.presolveMip;
+pub const presolveWithOptions = presolve_mod.presolveWithOptions;
+pub const presolveMipWithOptions = presolve_mod.presolveMipWithOptions;
 pub const presolvePipeline = PresolvePipeline.init;
 pub const postsolve = presolve_mod.postsolve;
 

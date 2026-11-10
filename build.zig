@@ -531,6 +531,23 @@ pub fn build(b: *std.Build) void {
     const build_mip_bench_step = b.step("build-bench-mip", "Build the MIP profiling binary without running it");
     build_mip_bench_step.dependOn(&install_mip_solver_bench.step);
 
+    const presolve_bench = b.addExecutable(.{
+        .name = "presolve-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/presolve/presolve_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zhighs", .module = mod }},
+        }),
+    });
+    const run_presolve_bench = b.addRunArtifact(presolve_bench);
+    if (b.args) |args| run_presolve_bench.addArgs(args);
+    const presolve_bench_step = b.step("bench-presolve", "Benchmark presolve rule ablation and reduction counts");
+    presolve_bench_step.dependOn(&run_presolve_bench.step);
+    const install_presolve_bench = b.addInstallArtifact(presolve_bench, .{});
+    const build_presolve_bench_step = b.step("build-bench-presolve", "Build the presolve ablation benchmark without running it");
+    build_presolve_bench_step.dependOn(&install_presolve_bench.step);
+
     const perf_profile = b.addExecutable(.{
         .name = "perf-profile",
         .root_module = b.createModule(.{

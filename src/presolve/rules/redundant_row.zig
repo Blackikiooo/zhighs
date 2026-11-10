@@ -40,7 +40,7 @@ pub fn classify(activity: ActivityBounds, row_lower: f64, row_upper: f64) Action
     return .keep;
 }
 
-fn outwardProduct(left: f64, right: f64, direction: f64) f64 {
+pub fn outwardProduct(left: f64, right: f64, direction: f64) f64 {
     const product = left * right;
     if (!std.math.isFinite(product)) return product;
     const residual = foundation.HCD.twoProduct(left, right).low;
@@ -48,7 +48,7 @@ fn outwardProduct(left: f64, right: f64, direction: f64) f64 {
     return if (rounded_inward) std.math.nextAfter(f64, product, direction) else product;
 }
 
-fn outwardAdd(left: f64, right: f64, direction: f64) f64 {
+pub fn outwardAdd(left: f64, right: f64, direction: f64) f64 {
     const sum = left + right;
     if (!std.math.isFinite(sum)) return sum;
     const residual = foundation.HCD.twoSum(left, right).low;

@@ -270,7 +270,7 @@ NLP / MINLP            ░░░░░░░░░░   0%  返回 FeatureNotAva
 
 ```
 回调系统                ████░░░░░░  40%  iteration 回调 ✓, MIP 回调 ✗
-Presolve               █████░░░░░  50%  LP 路径经 LpSolveSession 接入; MIP 安全模式已接入 MILP 求解路径
+Presolve               ██████░░░░  60%  LP 路径经 LpSolveSession 接入; MIP 安全模式已接入 MILP 求解路径; 新增行活动强制固定与精确比例平行行
 IIS                    █░░░░░░░░░  10%  stub
 FeasRelax              █░░░░░░░░░  10%  stub
 Multi-objective        ░░░░░░░░░░   0%  stub
@@ -301,7 +301,7 @@ Advanced Simplex       ██░░░░░░░░  20%  getBasisHead ✓, FT
 半连续/半整数模型目前跳过区间预处理，交由 MIP 引擎保留零分支；
 二进制预处理保留 0/1 域限制。未求解节点的目标界保持未知，无 incumbent 时不输出伪目标值。
 
-1. **Presolve 实现** — ✅ 求解路径接入已完成：LP 经 `LpSolveSession`，MILP 经 `src/model/model_solve.zig` 的 MIP 安全 pipeline（`presolve.PresolvePipeline.initMip`）。可选增强：probing、系数收紧等更强规则。
+1. **Presolve 实现** — ✅ 求解路径接入已完成：LP 经 `LpSolveSession`，MILP 经 `src/model/model_solve.zig` 的 MIP 安全 pipeline（`presolve.PresolvePipeline.initMip`）。已新增行活动强制固定（forcing/implied fixing，含 MIP 整数收缩）与精确比例平行行；后续增强：通用 bound tightening 的对偶 postsolve、probing、系数收紧、doubleton/aggregator、dominated columns。基准与文献核对见 `docs/presolve-strategy-review.md`。
 
 2. **MIP 回调接入** — `cbCut`（lazy constraints）、`cbSolution`（heuristic solutions）、`cbGet`（callback-time query）。MILP solver 已就位，回调仍是 stub。
 

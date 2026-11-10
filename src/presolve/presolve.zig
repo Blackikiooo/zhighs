@@ -56,6 +56,15 @@ pub const ColumnNature = enum {
     binary,
 };
 
+/// Rule switches used by benchmark/ablation callers. The regular `presolve`,
+/// `presolveMip`, and pipeline entry points keep every rule enabled.
+pub const PresolveOptions = struct {
+    /// Row-activity propagation that commits only forced (collapsed) fixings.
+    implied_fixing: bool = true,
+    /// Remove rows that are exact non-zero scalar multiples of another row.
+    parallel_rows: bool = true,
+};
+
 /// Record for one exactly substituted column.
 pub const ColumnSubstitutionRecord = struct {
     original_column: u32,
@@ -142,6 +151,8 @@ pub const PresolvedProblem = struct {
     singleton_row_count: u32,
     redundant_row_count: u32,
     duplicate_row_count: u32,
+    implied_fixed_column_count: u32,
+    parallel_row_count: u32,
     removed_row_count: u32,
 
     pub fn wasApplied(self: *const PresolvedProblem) bool {
@@ -230,21 +241,41 @@ pub const PresolvePipeline = struct {
     singleton_row_count: u32 = 0,
     redundant_row_count: u32 = 0,
     duplicate_row_count: u32 = 0,
+    implied_fixed_column_count: u32 = 0,
+    parallel_row_count: u32 = 0,
     removed_row_count: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, problem: *const ProblemView) !PresolvePipeline {
-        return initInternal(allocator, problem, null);
+        return initWithOptions(allocator, problem, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, problem: *const ProblemView, options: PresolveOptions) !PresolvePipeline {
+        return initInternal(allocator, problem, null, options);
     }
 
     /// MIP-safe pipeline: `nature` marks which original columns are discrete.
     /// Column-nature information is remapped through every pass so each pass
     /// applies only integrality-safe reductions.
     pub fn initMip(allocator: std.mem.Allocator, problem: *const ProblemView, nature: []const ColumnNature) !PresolvePipeline {
-        std.debug.assert(nature.len == problem.num_cols);
-        return initInternal(allocator, problem, nature);
+        return initMipWithOptions(allocator, problem, nature, .{});
     }
 
-    fn initInternal(allocator: std.mem.Allocator, problem: *const ProblemView, nature: ?[]const ColumnNature) !PresolvePipeline {
+    pub fn initMipWithOptions(
+        allocator: std.mem.Allocator,
+        problem: *const ProblemView,
+        nature: []const ColumnNature,
+        options: PresolveOptions,
+    ) !PresolvePipeline {
+        std.debug.assert(nature.len == problem.num_cols);
+        return initInternal(allocator, problem, nature, options);
+    }
+
+    fn initInternal(
+        allocator: std.mem.Allocator,
+        problem: *const ProblemView,
+        nature: ?[]const ColumnNature,
+        options: PresolveOptions,
+    ) !PresolvePipeline {
         var result = PresolvePipeline{ .allocator = allocator };
         errdefer result.deinit();
         const maximum_passes = problem.num_rows + problem.num_cols + 1;
@@ -255,7 +286,7 @@ pub const PresolvePipeline = struct {
 
         var current: ProblemView = problem.*;
         while (result.passes.items.len < maximum_passes) {
-            var pass = try presolveImpl(allocator, &current, current_nature);
+            var pass = try presolveImpl(allocator, &current, current_nature, options);
             if (!pass.wasApplied()) {
                 pass.deinit();
                 break;
@@ -272,6 +303,8 @@ pub const PresolvePipeline = struct {
             result.singleton_row_count += pass.singleton_row_count;
             result.redundant_row_count += pass.redundant_row_count;
             result.duplicate_row_count += pass.duplicate_row_count;
+            result.implied_fixed_column_count += pass.implied_fixed_column_count;
+            result.parallel_row_count += pass.parallel_row_count;
             result.removed_row_count += pass.removed_row_count;
             result.passes.appendAssumeCapacity(pass);
             current = result.passes.items[result.passes.items.len - 1].reducedView();
@@ -377,9 +410,188 @@ fn classifySubstitution(
     }
 }
 
+/// Apply the forced fixing override first, then the original column rule.
+fn classifyColumn(
+    implied_fixings: ?[]const ?f64,
+    column: usize,
+    nonzero_count: usize,
+    cost: f64,
+    lower: f64,
+    upper: f64,
+    objective_sign: f64,
+    nature: ?ColumnNature,
+) rules.column_substitution.Action {
+    if (implied_fixings) |values| {
+        if (values[column]) |value| return .{ .substitute = .{ .value = value, .bound = .fixed } };
+    }
+    return classifySubstitution(nonzero_count, cost, lower, upper, objective_sign, nature);
+}
+
+const MAX_PROPAGATION_PASSES: u32 = 8;
+
+/// Propagate row activities until no bound or fixing changes, and return the
+/// forced value of every column whose implied interval collapses. Only fixings
+/// are returned: temporary bound tightenings are internal to propagation and
+/// never leak into the reduced model, which keeps dual postsolve exact.
+fn computeImpliedFixings(
+    allocator: std.mem.Allocator,
+    problem: *const ProblemView,
+    nature: ?[]const ColumnNature,
+) ![]?f64 {
+    const result = try allocator.alloc(?f64, problem.num_cols);
+    errdefer allocator.free(result);
+    @memset(result, null);
+    if (problem.num_rows == 0 or problem.num_cols == 0) return result;
+
+    const row_counts = try allocator.alloc(u32, problem.num_rows);
+    defer allocator.free(row_counts);
+    @memset(row_counts, 0);
+    for (problem.matrix.row_indices) |row| row_counts[row.toUsize()] += 1;
+
+    const row_starts = try allocator.alloc(usize, problem.num_rows + 1);
+    defer allocator.free(row_starts);
+    row_starts[0] = 0;
+    for (row_counts, 0..) |count, row| row_starts[row + 1] = row_starts[row] + count;
+
+    const row_columns = try allocator.alloc(u32, problem.matrix.values.len);
+    defer allocator.free(row_columns);
+    const row_values = try allocator.alloc(f64, problem.matrix.values.len);
+    defer allocator.free(row_values);
+    const row_cursor = try allocator.dupe(usize, row_starts[0..problem.num_rows]);
+    defer allocator.free(row_cursor);
+    for (0..problem.num_cols) |column| {
+        const begin = problem.matrix.col_starts[column];
+        const end = problem.matrix.col_starts[column + 1];
+        for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row_id, value| {
+            const row = row_id.toUsize();
+            row_columns[row_cursor[row]] = @intCast(column);
+            row_values[row_cursor[row]] = value;
+            row_cursor[row] += 1;
+        }
+    }
+
+    const lower = try allocator.dupe(f64, problem.col_lower);
+    defer allocator.free(lower);
+    const upper = try allocator.dupe(f64, problem.col_upper);
+    defer allocator.free(upper);
+    const fixed = try allocator.alloc(bool, problem.num_cols);
+    defer allocator.free(fixed);
+    @memset(fixed, false);
+    const fixed_values = try allocator.alloc(f64, problem.num_cols);
+    defer allocator.free(fixed_values);
+    @memset(fixed_values, 0.0);
+    const activity = try allocator.alloc(rules.redundant_row.ActivityBounds, problem.num_rows);
+    defer allocator.free(activity);
+    // Integer domains can be rounded before the first pass. This is the only
+    // bound information that is safe to propagate without a postsolve record,
+    // because it is never published: it only strengthens the fixing test.
+    for (0..problem.num_cols) |column| {
+        const kind = columnKind(nature, column);
+        if (kind == .continuous) continue;
+        if (kind == .binary) {
+            lower[column] = @max(lower[column], 0.0);
+            upper[column] = @min(upper[column], 1.0);
+        }
+        lower[column] = @ceil(lower[column]);
+        upper[column] = @floor(upper[column]);
+    }
+
+    var pass: u32 = 0;
+    var changed = true;
+    while (changed and pass < MAX_PROPAGATION_PASSES) : (pass += 1) {
+        changed = false;
+        for (activity) |*bounds| bounds.* = .{};
+        for (0..problem.num_cols) |column| {
+            const begin = problem.matrix.col_starts[column];
+            const end = problem.matrix.col_starts[column + 1];
+            for (problem.matrix.row_indices[begin..end], problem.matrix.values[begin..end]) |row_id, coefficient|
+                activity[row_id.toUsize()].add(coefficient, lower[column], upper[column]);
+        }
+
+        for (0..problem.num_rows) |row| {
+            const total = activity[row];
+            const row_lower = problem.row_lower[row];
+            const row_upper = problem.row_upper[row];
+            if (std.math.isNan(total.lower) or std.math.isNan(total.upper) or
+                std.math.isNan(row_lower) or std.math.isNan(row_upper)) continue;
+            // An infeasible row under the current box is left to simplex to
+            // certify; it must not drive fixings.
+            if (total.upper < row_lower or total.lower > row_upper) continue;
+
+            for (row_starts[row]..row_starts[row + 1]) |entry| {
+                const column = row_columns[entry];
+                if (fixed[column]) continue;
+                const coefficient = row_values[entry];
+                // total is the sum of per-term interval endpoints. Excluding
+                // this term uses its minimum rounded up (respectively maximum
+                // rounded down), which keeps both remaining bounds rigorous.
+                const others = rules.implied_fixing.Bounds{
+                    .lower = rules.redundant_row.outwardAdd(total.lower, -rules.implied_fixing.minimumUpper(coefficient, lower[column], upper[column]), -std.math.inf(f64)),
+                    .upper = rules.redundant_row.outwardAdd(total.upper, -rules.implied_fixing.maximumLower(coefficient, lower[column], upper[column]), std.math.inf(f64)),
+                };
+                const implied = rules.implied_fixing.impliedBounds(coefficient, row_lower, row_upper, others);
+                if (std.math.isNan(implied.lower) or std.math.isNan(implied.upper)) continue;
+
+                var new_lower = @max(lower[column], implied.lower);
+                var new_upper = @min(upper[column], implied.upper);
+                const kind = columnKind(nature, column);
+                if (kind == .binary) {
+                    new_lower = @max(new_lower, 0.0);
+                    new_upper = @min(new_upper, 1.0);
+                }
+                if (kind != .continuous) {
+                    new_lower = @ceil(new_lower);
+                    new_upper = @floor(new_upper);
+                }
+                // Outward rounding can leave a small gap even when the true
+                // interval collapses; only commit a fixing when it is gone.
+                if (new_lower > new_upper) continue;
+
+                if (new_lower != lower[column] or new_upper != upper[column]) {
+                    lower[column] = new_lower;
+                    upper[column] = new_upper;
+                    changed = true;
+                }
+                if (rules.implied_fixing.fixValue(.{ .lower = new_lower, .upper = new_upper }, kind)) |value| {
+                    fixed[column] = true;
+                    fixed_values[column] = value;
+                    lower[column] = value;
+                    upper[column] = value;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for (0..problem.num_cols) |column| {
+        if (fixed[column]) result[column] = fixed_values[column];
+    }
+    return result;
+}
+
+fn columnKind(nature: ?[]const ColumnNature, column: usize) rules.implied_fixing.Kind {
+    const kinds = nature orelse return .continuous;
+    return switch (kinds[column]) {
+        .continuous => .continuous,
+        .discrete => .integer,
+        .binary => .binary,
+    };
+}
+
 /// Apply exact column substitutions and redundant empty-row elimination.
+
+
 pub fn presolve(allocator: std.mem.Allocator, problem: *const ProblemView) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
-    return presolveImpl(allocator, problem, null);
+    return presolveImpl(allocator, problem, null, .{});
+}
+
+/// LP variant with explicit rule switches for ablation benchmarks.
+pub fn presolveWithOptions(
+    allocator: std.mem.Allocator,
+    problem: *const ProblemView,
+    options: PresolveOptions,
+) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+    return presolveImpl(allocator, problem, null, options);
 }
 
 /// MIP-safe variant: `nature[column]` marks discrete columns. Discrete
@@ -387,16 +599,43 @@ pub fn presolve(allocator: std.mem.Allocator, problem: *const ProblemView) (Pres
 /// free-singleton elimination applies to continuous columns only.
 pub fn presolveMip(allocator: std.mem.Allocator, problem: *const ProblemView, nature: []const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     std.debug.assert(nature.len == problem.num_cols);
-    return presolveImpl(allocator, problem, nature);
+    return presolveImpl(allocator, problem, nature, .{});
 }
 
-fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, nature: ?[]const ColumnNature) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+/// MIP-safe variant with explicit rule switches for ablation benchmarks.
+pub fn presolveMipWithOptions(
+    allocator: std.mem.Allocator,
+    problem: *const ProblemView,
+    nature: []const ColumnNature,
+    options: PresolveOptions,
+) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
+    std.debug.assert(nature.len == problem.num_cols);
+    return presolveImpl(allocator, problem, nature, options);
+}
+
+fn presolveImpl(
+    allocator: std.mem.Allocator,
+    problem: *const ProblemView,
+    nature: ?[]const ColumnNature,
+    options: PresolveOptions,
+) (PresolveError || std.mem.Allocator.Error)!PresolvedProblem {
     // Select at most one free zero-cost singleton column for each row. If a
     // row has several, later passes see the remaining columns as empty.
     const raw_row_nnz = try allocator.alloc(u32, problem.num_rows);
     defer allocator.free(raw_row_nnz);
     @memset(raw_row_nnz, 0);
     for (problem.matrix.row_indices) |row| raw_row_nnz[row.toUsize()] += 1;
+
+    // Row-activity propagation is intentionally committing-only: it returns
+    // values for columns whose implied interval collapses, never looser output
+    // bounds. The exact fixed-column substitution below therefore remains the
+    // sole postsolve record and dual reconstruction is unchanged.
+    const implied_fixings: ?[]?f64 = if (options.implied_fixing)
+        try computeImpliedFixings(allocator, problem, nature)
+    else
+        null;
+    defer if (implied_fixings) |values| allocator.free(values);
+
     const free_singleton_by_row = try allocator.alloc(u32, problem.num_rows);
     defer allocator.free(free_singleton_by_row);
     @memset(free_singleton_by_row, SENTINEL);
@@ -435,7 +674,9 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
         const begin = problem.matrix.col_starts[j];
         const end = problem.matrix.col_starts[j + 1];
         if (free_singleton_row_by_col[j] != SENTINEL) continue;
-        switch (classifySubstitution(
+        switch (classifyColumn(
+            implied_fixings,
+            j,
             end - begin,
             problem.col_cost[j],
             problem.col_lower[j],
@@ -467,6 +708,7 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
     @memset(retained_row_value, 0.0);
 
     // ── Allocate result ──
+    var implied_fixed_count: u32 = 0;
     var pp = PresolvedProblem{
         .allocator = allocator,
         .num_rows = 0,
@@ -496,6 +738,8 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
         .singleton_row_count = 0,
         .redundant_row_count = 0,
         .duplicate_row_count = 0,
+        .implied_fixed_column_count = 0,
+        .parallel_row_count = 0,
         .removed_row_count = 0,
     };
     errdefer pp.deinit();
@@ -584,7 +828,10 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
         const begin = problem.matrix.col_starts[j];
         const end = problem.matrix.col_starts[j + 1];
         if (free_singleton_row_by_col[j] != SENTINEL) continue;
-        switch (classifySubstitution(
+        const implied_fixed = if (implied_fixings) |values| values[j] != null else false;
+        switch (classifyColumn(
+            implied_fixings,
+            j,
             end - begin,
             problem.col_cost[j],
             problem.col_lower[j],
@@ -593,6 +840,7 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
             if (nature) |kinds| kinds[j] else null,
         )) {
             .substitute => |substitution| {
+                if (implied_fixed) implied_fixed_count += 1;
                 pp.column_substitutions[fi] = .{
                     .original_column = @intCast(j),
                     .value = substitution.value,
@@ -639,6 +887,7 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
     }
     std.debug.assert(fi == substitution_count);
     std.debug.assert(rc == reduced_cols);
+    pp.implied_fixed_column_count = implied_fixed_count;
 
     // Remove feasible empty rows and transfer feasible singleton rows into the
     // retained column bounds. Infeasible rows remain for simplex to certify.
@@ -787,6 +1036,54 @@ fn presolveImpl(allocator: std.mem.Allocator, problem: *const ProblemView, natur
         try duplicate_heads.put(allocator, signature, @intCast(row));
     }
     pp.duplicate_row_count = duplicate_count;
+
+    // Remove rows that are exact non-zero scalar multiples of a retained row.
+    // A scaled copy defines the same half-spaces, so its dual multiplier can be
+    // zero during postsolve. Approximate proportionality is deliberately not
+    // accepted: every coefficient and both bounds must be bit-exact after
+    // scaling, which keeps the reduction certificate exact.
+    var parallel_count: u32 = 0;
+    if (options.parallel_rows) {
+        var parallel_heads: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer parallel_heads.deinit(allocator);
+        const parallel_next = try allocator.alloc(u32, problem.num_rows);
+        defer allocator.free(parallel_next);
+        @memset(parallel_next, SENTINEL);
+        for (0..problem.num_rows) |row| {
+            if (row_removed[row]) continue;
+            const begin = retained_row_starts[row];
+            const end = retained_row_starts[row + 1];
+            const columns = retained_row_columns[begin..end];
+            const signature = rules.duplicate_row.patternHash(columns);
+            var candidate = parallel_heads.get(signature) orelse SENTINEL;
+            while (candidate != SENTINEL) : (candidate = parallel_next[candidate]) {
+                const candidate_begin = retained_row_starts[candidate];
+                const candidate_end = retained_row_starts[candidate + 1];
+                const candidate_columns = retained_row_columns[candidate_begin..candidate_end];
+                if (!std.mem.eql(u32, columns, candidate_columns)) continue;
+                const scale = rules.duplicate_row.parallelScale(
+                    candidate_columns,
+                    retained_row_values[candidate_begin..candidate_end],
+                    columns,
+                    retained_row_values[begin..end],
+                ) orelse continue;
+                if (!rules.duplicate_row.boundsMatchScale(
+                    scale,
+                    adjusted_row_lower[candidate],
+                    adjusted_row_upper[candidate],
+                    adjusted_row_lower[row],
+                    adjusted_row_upper[row],
+                )) continue;
+                row_removed[row] = true;
+                parallel_count += 1;
+                break;
+            }
+            if (row_removed[row]) continue;
+            parallel_next[row] = parallel_heads.get(signature) orelse SENTINEL;
+            try parallel_heads.put(allocator, signature, @intCast(row));
+        }
+    }
+    pp.parallel_row_count = parallel_count;
 
     var reduced_rows: u32 = 0;
     for (row_removed) |removed| reduced_rows += @intFromBool(!removed);
@@ -1041,7 +1338,6 @@ test "single fixed column elimination" {
     };
     var pp = try presolve(a, &problem);
     defer pp.deinit();
-
     try std.testing.expect(pp.wasApplied());
     try std.testing.expectEqual(@as(u32, 1), pp.num_cols);
     try std.testing.expectEqual(@as(u32, 1), pp.column_substitution_count);
@@ -1363,4 +1659,119 @@ test "mip pipeline threads column nature through passes" {
     try std.testing.expectEqual(@as(u32, 0), reduced.num_rows);
     try std.testing.expectEqual(@as(u32, 0), reduced.num_cols);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), reduced.objective_offset, 1e-12);
+}
+
+
+
+test "row activity forcing fixes both continuous columns" {
+    const a = std.testing.allocator;
+    // min x + y  s.t. x + y = 20, 0 <= x,y <= 10.
+    const problem = ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 1.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ 10.0, 10.0 },
+        .row_lower = &.{20.0},
+        .row_upper = &.{20.0},
+        .matrix = matrix.CscView.initAssumeValid(
+            1,
+            2,
+            &[_]usize{ 0, 1, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolve(a, &problem);
+    defer pp.deinit();
+    try std.testing.expectEqual(@as(u32, 2), pp.implied_fixed_column_count);
+    try std.testing.expectEqual(@as(u32, 0), pp.num_cols);
+    try std.testing.expectEqual(@as(u32, 0), pp.num_rows);
+    try std.testing.expectApproxEqAbs(@as(f64, 20.0), pp.objective_offset, 1e-12);
+
+    const sol = SolutionView{
+        .status = .optimal,
+        .objective_value = 20.0,
+        .iterations = 0,
+        .primal = &.{},
+        .dual = &.{},
+        .reduced_cost = &.{},
+        .unbounded_ray = &.{},
+        .infeasibility_ray = &.{},
+    };
+    var res = try postsolve(&pp, sol, a);
+    defer res.deinit();
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), res.primal[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), res.primal[1], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 20.0), res.objective_value, 1e-12);
+}
+
+test "mip row activity fixes a forced integer pair" {
+    const a = std.testing.allocator;
+    // x + y = 7 with integer x in [6.5,10], y in [0,10]: integer rounding
+    // gives x = 7 and then y = 0.
+    const problem = ProblemView{
+        .num_rows = 1,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 1.0 },
+        .col_lower = &.{ 6.5, 0.0 },
+        .col_upper = &.{ 10.0, 10.0 },
+        .row_lower = &.{7.0},
+        .row_upper = &.{7.0},
+        .matrix = matrix.CscView.initAssumeValid(
+            1,
+            2,
+            &[_]usize{ 0, 1, 2 },
+            &.{ foundation.RowId.fromUsizeAssumeValid(0), foundation.RowId.fromUsizeAssumeValid(0) },
+            &.{ 1.0, 1.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolveMip(a, &problem, &.{ .discrete, .discrete });
+    defer pp.deinit();
+    try std.testing.expectEqual(@as(u32, 2), pp.implied_fixed_column_count);
+    try std.testing.expectEqual(@as(u32, 0), pp.num_cols);
+}
+
+test "exact scaled rows are removed and weaker options keep them" {
+    const a = std.testing.allocator;
+    // r1: x + 2y <= 5; r2 = 2*r1; r3 = -1*r1. Every row defines the same
+    // half-space, so two copies can be removed with zero postsolve duals.
+    const problem = ProblemView{
+        .num_rows = 3,
+        .num_cols = 2,
+        .col_cost = &.{ 1.0, 1.0 },
+        .col_lower = &.{ 0.0, 0.0 },
+        .col_upper = &.{ 10.0, 10.0 },
+        .row_lower = &.{ -std.math.inf(f64), -std.math.inf(f64), -5.0 },
+        .row_upper = &.{ 5.0, 10.0, std.math.inf(f64) },
+        .matrix = matrix.CscView.initAssumeValid(
+            3,
+            2,
+            &[_]usize{ 0, 3, 6 },
+            &.{
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(2),
+                foundation.RowId.fromUsizeAssumeValid(0),
+                foundation.RowId.fromUsizeAssumeValid(1),
+                foundation.RowId.fromUsizeAssumeValid(2),
+            },
+            &.{ 1.0, 2.0, -1.0, 2.0, 4.0, -2.0 },
+        ),
+        .objective_sense = .minimize,
+        .objective_offset = 0.0,
+    };
+    var pp = try presolve(a, &problem);
+    defer pp.deinit();
+    try std.testing.expectEqual(@as(u32, 1), pp.num_rows);
+    try std.testing.expectEqual(@as(u32, 2), pp.parallel_row_count);
+
+    var disabled = try presolveWithOptions(a, &problem, .{ .parallel_rows = false });
+    defer disabled.deinit();
+    try std.testing.expectEqual(@as(u32, 3), disabled.num_rows);
+    try std.testing.expectEqual(@as(u32, 0), disabled.parallel_row_count);
 }
